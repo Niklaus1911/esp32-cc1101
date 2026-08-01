@@ -1178,7 +1178,6 @@ esp_err_t initialize_rmt()
     ESP_RETURN_ON_ERROR(rmt_rx_register_event_callbacks(s_rx_channel, &callbacks, nullptr), kTag,
                         "register RMT callback");
     ESP_RETURN_ON_ERROR(rmt_enable(s_tx_channel), kTag, "enable RMT TX");
-    ESP_RETURN_ON_ERROR(rmt_enable(s_rx_channel), kTag, "enable RMT RX");
 
     s_receive_config.signal_range_min_ns = 2500;
     s_receive_config.signal_range_max_ns = static_cast<uint32_t>(kRmtStopDurationUs) * 1000U;
