@@ -22,3 +22,37 @@ TEST_CASE("console unsigned parser rejects malformed and overflowing input", "[r
     TEST_ASSERT_FALSE(rfbridge::parse_unsigned_value("12junk", UINT64_MAX, &value));
     TEST_ASSERT_FALSE(rfbridge::parse_unsigned_value("256", 255, &value));
 }
+
+TEST_CASE("replay parser preserves RAM forms and requires repeats for names", "[rf_console]")
+{
+    const char *ram_default[] = {"replay"};
+    const char *ram_repeats[] = {"replay", "10"};
+    const char *named[] = {"replay", "gate", "7"};
+    const char *named_missing_repeats[] = {"replay", "gate"};
+    const char *bad_repeats[] = {"replay", "gate", "21"};
+    rfbridge::ReplayArguments arguments{};
+    TEST_ASSERT_TRUE(rfbridge::parse_replay_arguments(1, ram_default, 8, &arguments));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::ReplayTarget::kRam), static_cast<int>(arguments.target));
+    TEST_ASSERT_EQUAL_UINT16(8, arguments.repeats);
+    TEST_ASSERT_TRUE(rfbridge::parse_replay_arguments(2, ram_repeats, 8, &arguments));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::ReplayTarget::kRam), static_cast<int>(arguments.target));
+    TEST_ASSERT_EQUAL_UINT16(10, arguments.repeats);
+    TEST_ASSERT_TRUE(rfbridge::parse_replay_arguments(3, named, 8, &arguments));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::ReplayTarget::kNamed), static_cast<int>(arguments.target));
+    TEST_ASSERT_EQUAL_UINT16(7, arguments.repeats);
+    TEST_ASSERT_FALSE(rfbridge::parse_replay_arguments(2, named_missing_repeats, 8, &arguments));
+    TEST_ASSERT_FALSE(rfbridge::parse_replay_arguments(3, bad_repeats, 8, &arguments));
+}
+
+TEST_CASE("learn capture window is post-arm and half open", "[rf_console]")
+{
+    using rfbridge::LearnFrameDisposition;
+    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kCapture),
+                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 31000999, 2000)));
+    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kTimeout),
+                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 31001000, 2000)));
+    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kIgnore),
+                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 999, 999)));
+    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kIgnore),
+                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 2000, 999)));
+}

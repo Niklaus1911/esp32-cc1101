@@ -8,8 +8,9 @@ It provides:
 - Hardware-timed ESP32 RMT capture and transmission—no Arduino layer or GPIO bit-banging.
 - Stable complete-frame decoding with repeated-frame consensus and ambiguity rejection.
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
-- A UART console for inspection, direct sending, last-frame replay, diagnostics, and radio recovery.
-- No Wi-Fi, MQTT, NVS, or persistent signal storage. The last frame is lost at reboot.
+- A UART console for inspection, named learning, direct sending, replay, diagnostics, and radio recovery.
+- Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
+- No Wi-Fi or MQTT.
 
 ## Hardware
 
@@ -68,7 +69,7 @@ Exit the monitor with `Ctrl+]`. The software build and host-test results do not 
 
 ## Serial console
 
-UART0 runs at 115200 baud. Type `help` to list commands.
+UART0 runs at 115200 baud. Type `help` to list commands. The console uses linenoise dumb mode because RF events arrive asynchronously; command history, arrow-key editing, and tab completion are intentionally disabled so event output cannot corrupt the active input line.
 
 ### Receive
 
@@ -113,7 +114,9 @@ send 0xA88142 24 1 386 8
 - Omitted repeats use `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8); the valid range is 1–20.
 - Total continuous transmission is bounded to five seconds.
 
-### Inspect and replay the last frame
+### Inspect, learn, and replay frames
+
+The latest accepted frame remains available only in RAM:
 
 ```text
 last
@@ -121,7 +124,29 @@ replay
 replay 10
 ```
 
-The last accepted decoded or raw frame is held only in RAM. RX is disabled during TX, stale captures are discarded, and the prior desired RX state is restored afterward.
+Learn the next accepted decoded or raw signal under a persistent name:
+
+```text
+learn gate
+# Press the remote after LEARN ARMED appears.
+learn list
+replay gate 10
+forget gate
+```
+
+Learning rules:
+
+- `learn <name>` waits up to 30 seconds for the next accepted signal that begins after `LEARN ARMED`. It prints `LEARNED name=...` after a successful NVS commit or `LEARN TIMEOUT name=...` when the window expires.
+- Names are 1–15 characters, begin with a letter, and contain only letters, digits, `_`, or `-`. The name `list` is reserved.
+- Only one learn request can be pending. A second valid request replaces the pending name and starts a fresh 30-second window. If the console event queue overflows, learning is cancelled with an error instead of risking saving a later signal under the wrong name.
+- Existing names are never overwritten: `learn <existing-name>` fails without arming. Use `forget <name>` first when replacement is intentional.
+- `learn list` enumerates committed names. `forget` erases only the selected record and commits the deletion.
+- Persistent records use a versioned, checksummed format and are validated again before replay. Missing, corrupt, or unsupported records are never transmitted.
+- NVS initialization or capacity errors disable/fail only persistent operations; RF and RAM commands continue. Capacity depends on the configured NVS partition and decoded/raw record sizes. Firmware never automatically erases NVS to recover an error.
+
+Named replay requires an explicit repeat count from 1–20. Existing `replay` and `replay <repeats>` forms continue to use the latest RAM frame. Named replay does not replace that RAM frame.
+
+RX is disabled during TX, stale captures are discarded, and the prior desired RX state is restored afterward.
 
 ### Stage and send raw timings
 
@@ -141,7 +166,7 @@ Raw rules:
 - Start level is 0 or 1.
 - Durations are 100–29000 µs. This keeps pulses above the CC1101 asynchronous sampling floor and below the 30 ms RMT frame-stop threshold.
 - A frame must contain an even 8–256 alternating pulses.
-- The staged frame and last received frame are not persistent.
+- The staged frame and unnamed last received frame are not persistent; only frames captured by `learn <name>` are stored in NVS.
 
 ### Diagnostics and recovery
 
@@ -218,4 +243,4 @@ idf.py -B build build
 # idf.py -B build -p /dev/ttyUSB0 flash monitor
 ```
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed—only the on-device `0 Failures` summary does. The suite covers the hardened decoder vectors, raw matching, parser bounds, frequency calculation, and PA selection; CC1101 SPI/RMT lifecycle and RF behavior still require hardware testing. RF timing/range and recovery claims are not proven by compilation alone.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed—only the on-device `0 Failures` summary does. The suite covers the hardened decoder vectors, raw matching, parser/deadline bounds, versioned storage records, frequency calculation, and PA selection; CC1101 SPI/RMT lifecycle, NVS persistence across reboot, and RF behavior still require hardware testing. RF timing/range and recovery claims are not proven by compilation alone.

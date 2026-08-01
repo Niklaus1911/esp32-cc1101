@@ -1,10 +1,12 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <cstdlib>
 
 #include "rf_codec.hpp"
 #include "rf_console_parse.hpp"
+#include "rf_storage_format.hpp"
 
 namespace {
 
@@ -161,6 +163,96 @@ void test_console_parser()
     require(!rfbridge::parse_unsigned_value("0x", UINT64_MAX, &value), "empty hex rejected");
     require(!rfbridge::parse_unsigned_value("12junk", UINT64_MAX, &value), "trailing junk rejected");
     require(!rfbridge::parse_unsigned_value("256", 255, &value), "bound enforced");
+
+    const char *ram[] = {"replay"};
+    const char *ram_repeats[] = {"replay", "10"};
+    const char *named[] = {"replay", "gate", "7"};
+    const char *missing_named_repeats[] = {"replay", "gate"};
+    rfbridge::ReplayArguments replay{};
+    require(rfbridge::parse_replay_arguments(1, ram, 8, &replay) &&
+                replay.target == rfbridge::ReplayTarget::kRam && replay.repeats == 8,
+            "default RAM replay preserved");
+    require(rfbridge::parse_replay_arguments(2, ram_repeats, 8, &replay) &&
+                replay.target == rfbridge::ReplayTarget::kRam && replay.repeats == 10,
+            "explicit RAM replay preserved");
+    require(rfbridge::parse_replay_arguments(3, named, 8, &replay) &&
+                replay.target == rfbridge::ReplayTarget::kNamed && replay.repeats == 7,
+            "named replay parsed");
+    require(!rfbridge::parse_replay_arguments(2, missing_named_repeats, 8, &replay),
+            "named replay requires repeats");
+}
+
+void test_learn_deadline_classification()
+{
+    using rfbridge::LearnFrameDisposition;
+    require(rfbridge::classify_learn_frame(1000, 31001000, 1000, 1000) ==
+                LearnFrameDisposition::kCapture,
+            "frame at arm boundary captured");
+    require(rfbridge::classify_learn_frame(1000, 31001000, 31000999, 2000) ==
+                LearnFrameDisposition::kCapture,
+            "frame before learn deadline captured");
+    require(rfbridge::classify_learn_frame(1000, 31001000, 31001000, 2000) ==
+                LearnFrameDisposition::kTimeout,
+            "frame at learn deadline rejected");
+    require(rfbridge::classify_learn_frame(1000, 31001000, 999, 999) ==
+                LearnFrameDisposition::kIgnore,
+            "frame accepted before arm ignored");
+    require(rfbridge::classify_learn_frame(1000, 31001000, 2000, 999) ==
+                LearnFrameDisposition::kIgnore,
+            "capture that started before learning is ignored");
+}
+
+void test_storage_format()
+{
+    require(rfbridge::rf_storage_name_is_valid("Remote_1"), "valid storage name");
+    require(!rfbridge::rf_storage_name_is_valid("list"), "list name reserved");
+    require(!rfbridge::rf_storage_name_is_valid("1remote"), "numeric-leading name rejected");
+    require(!rfbridge::rf_storage_name_is_valid("a-23456789012345"), "overlength name rejected");
+
+    rfbridge::RfStoredSignal decoded{};
+    decoded.encoding = rfbridge::RfStoredEncoding::kDecoded;
+    decoded.decoded.code = 0xA88142;
+    decoded.decoded.pulse_us = 386;
+    decoded.decoded.bits = 24;
+    decoded.decoded.protocol = 1;
+    uint8_t record[rfbridge::kRfStorageMaxRecordSize]{};
+    std::size_t record_size = 0;
+    require(rfbridge::encode_rf_storage_record(decoded, record, sizeof(record), &record_size) ==
+                rfbridge::RfStorageFormatResult::kOk &&
+                record_size == 25,
+            "decoded storage record encodes");
+    constexpr uint8_t golden_record[] = {0x52, 0x46, 0x53, 0x52, 0x01, 0x01, 0x0D, 0x00, 0x42,
+                                         0x81, 0xA8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x82, 0x01,
+                                         0x18, 0x01, 0x00, 0xFA, 0x83, 0x81, 0x07};
+    require(record_size == sizeof(golden_record) && std::memcmp(record, golden_record, sizeof(golden_record)) == 0,
+            "version-one decoded storage record matches golden bytes");
+    rfbridge::RfStoredSignal loaded{};
+    require(rfbridge::decode_rf_storage_record(record, record_size, &loaded) ==
+                rfbridge::RfStorageFormatResult::kOk &&
+                loaded.encoding == rfbridge::RfStoredEncoding::kDecoded &&
+                rfbridge::decoded_signals_match(decoded.decoded, loaded.decoded),
+            "decoded storage record round trips");
+    record[8] ^= 1U;
+    require(rfbridge::decode_rf_storage_record(record, record_size, &loaded) ==
+                rfbridge::RfStorageFormatResult::kInvalidCrc,
+            "storage record CRC corruption rejected");
+
+    rfbridge::RfStoredSignal raw{};
+    raw.encoding = rfbridge::RfStoredEncoding::kRaw;
+    raw.raw.count = rfbridge::kMaxRawPulses;
+    raw.raw.start_level = 1;
+    for (std::size_t index = 0; index < raw.raw.count; ++index) {
+        raw.raw.durations_us[index] = static_cast<uint16_t>(100U + index);
+    }
+    require(rfbridge::encode_rf_storage_record(raw, record, sizeof(record), &record_size) ==
+                rfbridge::RfStorageFormatResult::kOk &&
+                record_size == rfbridge::kRfStorageMaxRecordSize,
+            "maximum raw storage record encodes");
+    require(rfbridge::decode_rf_storage_record(record, record_size, &loaded) ==
+                rfbridge::RfStorageFormatResult::kOk &&
+                loaded.encoding == rfbridge::RfStoredEncoding::kRaw &&
+                rfbridge::raw_signals_match(raw.raw, loaded.raw),
+            "maximum raw storage record round trips");
 }
 
 }  // namespace
@@ -173,6 +265,8 @@ int main()
     test_raw_identity_rules();
     test_protocol_alias_policy();
     test_console_parser();
+    test_learn_deadline_classification();
+    test_storage_format();
     std::puts("All host RF tests passed");
     return 0;
 }

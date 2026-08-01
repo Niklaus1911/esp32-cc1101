@@ -3,13 +3,18 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "linenoise/linenoise.h"
 #include "rf_console_parse.hpp"
+#include "rf_storage.hpp"
 #include "sdkconfig.h"
 
 #ifndef CONFIG_ESP_CONSOLE_UART_DEFAULT
@@ -21,14 +26,38 @@ namespace {
 
 constexpr char kTag[] = "rf_console";
 constexpr std::size_t kOutputLineSize = 2048;
-constexpr uint32_t kPrinterTaskStackSize = 6144;
-QueueHandle_t s_frame_queue = nullptr;
-TaskHandle_t s_printer_task = nullptr;
+constexpr uint32_t kEventWorkerTaskStackSize = 6144;
+constexpr int64_t kLearnTimeoutUs = 30000000;
+constexpr TickType_t kLearnEnqueueWaitTicks = pdMS_TO_TICKS(100);
+
+enum class ConsoleEventType : uint8_t {
+    kFrame,
+    kLearnRequest,
+};
+
+struct ConsoleEvent {
+    ConsoleEventType type = ConsoleEventType::kFrame;
+    int64_t occurred_us = 0;
+    RfFrame frame{};
+    char name[kRfStorageNameCapacity]{};
+};
+
+struct PendingLearn {
+    bool active = false;
+    int64_t armed_us = 0;
+    int64_t deadline_us = 0;
+    uint32_t frame_drops_at_arm = 0;
+    char name[kRfStorageNameCapacity]{};
+};
+
+QueueHandle_t s_event_queue = nullptr;
+TaskHandle_t s_event_worker_task = nullptr;
 esp_console_repl_t *s_repl = nullptr;
 bool s_repl_started = false;
 std::atomic<bool> s_started{false};
 std::atomic_flag s_starting = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> s_frame_queue_drops{0};
+std::atomic<uint32_t> s_frame_callbacks_in_flight{0};
 RawSignal s_staged_raw{};
 bool s_raw_staging = false;
 
@@ -55,8 +84,8 @@ void print_frame(const char *prefix, const RfFrame &frame)
     if (frame.encoding == RfEncoding::kDecoded) {
         formatted = append_to_line(
             line, sizeof(line), &length,
-            "\n%s RC code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u confidence=%s repeats=%u "
-            "fingerprint=0x%08lX\n",
+            "\r\n%s RC code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u confidence=%s repeats=%u "
+            "fingerprint=0x%08lX\r\n",
             prefix, static_cast<unsigned long long>(frame.decoded.code),
             static_cast<unsigned long long>(frame.decoded.code), frame.decoded.bits, frame.decoded.protocol,
             frame.decoded.pulse_us,
@@ -64,7 +93,7 @@ void print_frame(const char *prefix, const RfFrame &frame)
             frame.observed_repeats, static_cast<unsigned long>(frame.fingerprint));
     } else {
         formatted = append_to_line(line, sizeof(line), &length,
-                                   "\n%s RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=", prefix,
+                                   "\r\n%s RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=", prefix,
                                    frame.raw.start_level, frame.raw.count, frame.observed_repeats,
                                    static_cast<unsigned long>(frame.fingerprint));
         for (std::size_t index = 0; formatted && index < frame.raw.count; ++index) {
@@ -72,7 +101,7 @@ void print_frame(const char *prefix, const RfFrame &frame)
                                        frame.raw.durations_us[index]);
         }
         if (formatted) {
-            formatted = append_to_line(line, sizeof(line), &length, "\n");
+            formatted = append_to_line(line, sizeof(line), &length, "\r\n");
         }
     }
     if (!formatted) {
@@ -83,12 +112,169 @@ void print_frame(const char *prefix, const RfFrame &frame)
     std::fflush(stdout);
 }
 
-void printer_task(void *)
+void clear_pending_learn(PendingLearn *pending)
 {
-    RfFrame frame{};
+    *pending = {};
+}
+
+void print_learn_timeout(PendingLearn *pending)
+{
+    char name[kRfStorageNameCapacity]{};
+    std::memcpy(name, pending->name, sizeof(name));
+    clear_pending_learn(pending);
+    std::printf("\r\nLEARN TIMEOUT name=%s\r\n", name);
+    std::fflush(stdout);
+}
+
+RfStoredSignal stored_signal_from_frame(const RfFrame &frame)
+{
+    RfStoredSignal stored{};
+    if (frame.encoding == RfEncoding::kDecoded) {
+        stored.encoding = RfStoredEncoding::kDecoded;
+        stored.decoded = frame.decoded;
+    } else {
+        stored.encoding = RfStoredEncoding::kRaw;
+        stored.raw = frame.raw;
+    }
+    return stored;
+}
+
+void process_learn_request(const ConsoleEvent &event, PendingLearn *pending)
+{
+    RfRadioStatus status{};
+    const esp_err_t status_error = get_rf_radio_status(&status);
+    if (status_error != ESP_OK || !status.running || !status.receive_enabled) {
+        const esp_err_t error = status_error == ESP_OK ? ESP_ERR_INVALID_STATE : status_error;
+        std::printf("\r\nERROR learn name=%s: RF/RX unavailable: %s (0x%x)\r\n", event.name,
+                    esp_err_to_name(error), static_cast<unsigned>(error));
+        std::fflush(stdout);
+        return;
+    }
+
+    bool exists = false;
+    const esp_err_t exists_error = rf_storage_exists(event.name, &exists);
+    if (exists_error != ESP_OK) {
+        std::printf("\r\nERROR learn name=%s: %s (0x%x)\r\n", event.name, esp_err_to_name(exists_error),
+                    static_cast<unsigned>(exists_error));
+        return;
+    }
+    if (exists) {
+        std::printf("\r\nERROR learn name=%s already exists\r\n", event.name);
+        return;
+    }
+    if (pending->active) {
+        char old_name[kRfStorageNameCapacity]{};
+        std::memcpy(old_name, pending->name, sizeof(old_name));
+        clear_pending_learn(pending);
+        std::printf("\r\nLEARN REPLACED old=%s new=%s\r\n", old_name, event.name);
+    }
+    std::printf("\r\nLEARN ARMED name=%s timeout=30s\r\n", event.name);
+    std::fflush(stdout);
+
+    // Open the capture window only after the marker has been emitted.
+    const uint32_t frame_drops_at_arm = s_frame_queue_drops.load(std::memory_order_acquire);
+    const int64_t armed_us = esp_timer_get_time();
+    pending->active = true;
+    pending->armed_us = armed_us;
+    pending->deadline_us = armed_us + kLearnTimeoutUs;
+    pending->frame_drops_at_arm = frame_drops_at_arm;
+    std::memcpy(pending->name, event.name, sizeof(pending->name));
+}
+
+void process_frame_event(const ConsoleEvent &event, PendingLearn *pending)
+{
+    if (!pending->active) {
+        print_frame("RX", event.frame);
+        return;
+    }
+    const LearnFrameDisposition disposition =
+        classify_learn_frame(pending->armed_us, pending->deadline_us, event.occurred_us,
+                             event.frame.captured_us);
+    if (disposition == LearnFrameDisposition::kIgnore) {
+        print_frame("RX", event.frame);
+        return;
+    }
+    if (disposition == LearnFrameDisposition::kTimeout) {
+        print_learn_timeout(pending);
+        print_frame("RX", event.frame);
+        return;
+    }
+
+    char name[kRfStorageNameCapacity]{};
+    std::memcpy(name, pending->name, sizeof(name));
+    clear_pending_learn(pending);
+    print_frame("RX", event.frame);
+    const RfStoredSignal stored = stored_signal_from_frame(event.frame);
+    const esp_err_t error = rf_storage_create(name, stored);
+    if (error == ESP_OK) {
+        std::printf("\r\nLEARNED name=%s\r\n", name);
+    } else if (error == ESP_ERR_INVALID_STATE) {
+        std::printf("\r\nERROR learn name=%s already exists\r\n", name);
+    } else {
+        std::printf("\r\nERROR learn name=%s: %s (0x%x)\r\n", name, esp_err_to_name(error),
+                    static_cast<unsigned>(error));
+    }
+    std::fflush(stdout);
+}
+
+void process_console_event(const ConsoleEvent &event, PendingLearn *pending)
+{
+    if (event.type == ConsoleEventType::kLearnRequest) {
+        if (pending->active && event.occurred_us >= pending->deadline_us) {
+            print_learn_timeout(pending);
+        }
+        process_learn_request(event, pending);
+    } else {
+        process_frame_event(event, pending);
+    }
+}
+
+TickType_t learn_wait_ticks(int64_t remaining_us)
+{
+    const uint64_t ticks = (static_cast<uint64_t>(remaining_us) * configTICK_RATE_HZ + 999999U) / 1000000U;
+    return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
+}
+
+void event_worker_task(void *)
+{
+    PendingLearn pending{};
     while (true) {
-        if (xQueueReceive(s_frame_queue, &frame, portMAX_DELAY) == pdTRUE) {
-            print_frame("RX", frame);
+        ConsoleEvent event{};
+        if (pending.active &&
+            s_frame_queue_drops.load(std::memory_order_acquire) != pending.frame_drops_at_arm) {
+            char name[kRfStorageNameCapacity]{};
+            std::memcpy(name, pending.name, sizeof(name));
+            clear_pending_learn(&pending);
+            std::printf("\r\nLEARN ERROR name=%s: frame event queue overflowed; retry\r\n", name);
+            std::fflush(stdout);
+            continue;
+        }
+        if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
+            process_console_event(event, &pending);
+            continue;
+        }
+        if (!pending.active) {
+            if (xQueueReceive(s_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+                process_console_event(event, &pending);
+            }
+            continue;
+        }
+
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us >= pending.deadline_us) {
+            if (s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
+                vTaskDelay(1);
+                continue;
+            }
+            if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
+                process_console_event(event, &pending);
+                continue;
+            }
+            print_learn_timeout(&pending);
+            continue;
+        }
+        if (xQueueReceive(s_event_queue, &event, learn_wait_ticks(pending.deadline_us - now_us)) == pdTRUE) {
+            process_console_event(event, &pending);
         }
     }
 }
@@ -184,18 +370,110 @@ int last_command(int argc, char **)
     return 0;
 }
 
+int list_learned_names()
+{
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::size_t count = 0;
+        esp_err_t error = rf_storage_list(nullptr, 0, &count);
+        if (error != ESP_OK) {
+            return print_result("learn list", error);
+        }
+        if (count == 0) {
+            std::printf("LEARNED_NAMES count=0\n");
+            return 0;
+        }
+        std::unique_ptr<RfStorageName[]> names(new (std::nothrow) RfStorageName[count]);
+        if (!names) {
+            return print_result("learn list", ESP_ERR_NO_MEM);
+        }
+        const std::size_t capacity = count;
+        error = rf_storage_list(names.get(), capacity, &count);
+        if (error == ESP_ERR_INVALID_SIZE && attempt == 0) {
+            continue;
+        }
+        if (error != ESP_OK) {
+            return print_result("learn list", error);
+        }
+        std::printf("LEARNED_NAMES count=%zu\n", count);
+        for (std::size_t index = 0; index < count; ++index) {
+            std::printf("  %s\n", names[index].value);
+        }
+        return 0;
+    }
+    return print_result("learn list", ESP_ERR_INVALID_SIZE);
+}
+
+int learn_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "list") == 0) {
+        return list_learned_names();
+    }
+    if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
+        std::printf("usage: learn <name>|list (name: letter then up to 14 letters/digits/_/-)\n");
+        return 1;
+    }
+    if (!rf_storage_is_available()) {
+        return print_result("learn", rf_storage_initialization_error());
+    }
+    bool exists = false;
+    esp_err_t error = rf_storage_exists(argv[1], &exists);
+    if (error != ESP_OK) {
+        return print_result("learn", error);
+    }
+    if (exists) {
+        std::printf("ERROR learn name=%s already exists\n", argv[1]);
+        return 1;
+    }
+    RfRadioStatus status{};
+    error = get_rf_radio_status(&status);
+    if (error != ESP_OK) {
+        return print_result("learn", error);
+    }
+    if (!status.running || !status.receive_enabled) {
+        std::printf("ERROR learn requires running RF with RX enabled\n");
+        return 1;
+    }
+
+    ConsoleEvent event{};
+    event.type = ConsoleEventType::kLearnRequest;
+    event.occurred_us = esp_timer_get_time();
+    std::memcpy(event.name, argv[1], std::strlen(argv[1]) + 1U);
+    if (s_event_queue == nullptr || xQueueSend(s_event_queue, &event, kLearnEnqueueWaitTicks) != pdTRUE) {
+        std::printf("ERROR learn event queue busy\n");
+        return 1;
+    }
+    return 0;
+}
+
+int forget_command(int argc, char **argv)
+{
+    if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
+        std::printf("usage: forget <name>\n");
+        return 1;
+    }
+    return print_result("forget", rf_storage_forget(argv[1]));
+}
+
 int replay_command(int argc, char **argv)
 {
-    if (argc > 2) {
-        std::printf("usage: replay [repeats]\n");
+    ReplayArguments arguments{};
+    if (!parse_replay_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &arguments)) {
+        std::printf("usage: replay [repeats:1..20] | replay <name> <repeats:1..20>\n");
         return 1;
     }
-    uint64_t repeats = CONFIG_RF_DEFAULT_TX_REPEATS;
-    if (argc == 2 && !parse_bounded(argv[1], 1, 20, &repeats)) {
-        std::printf("ERROR repeats must be 1..20\n");
-        return 1;
+    if (arguments.target == ReplayTarget::kRam) {
+        return print_result("replay", replay_last_rf_frame(arguments.repeats));
     }
-    return print_result("replay", replay_last_rf_frame(static_cast<uint16_t>(repeats)));
+
+    RfStoredSignal stored{};
+    const esp_err_t load_error = rf_storage_load(argv[1], &stored);
+    if (load_error != ESP_OK) {
+        return print_result("replay named load", load_error);
+    }
+    const esp_err_t transmit_error = stored.encoding == RfStoredEncoding::kDecoded
+                                         ? transmit_rf_decoded(stored.decoded, arguments.repeats)
+                                         : transmit_rf_raw(stored.raw, arguments.repeats);
+    return print_result("replay named", transmit_error);
 }
 
 int send_value_command(int argc, char **argv)
@@ -359,7 +637,9 @@ constexpr CommandDefinition kCommands[] = {
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
     {"rx", "Enable or disable reception", "<on|off>", rx_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
-    {"replay", "Replay the latest RAM frame", "[repeats]", replay_command},
+    {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
+    {"forget", "Delete one learned NVS frame", "<name>", forget_command},
+    {"replay", "Replay the latest RAM frame or a learned name", "[repeats] | <name> <repeats>", replay_command},
     {"send", "Send an rc-switch-compatible value", "<code> <bits> <protocol> [pulse_us] [repeats]",
      send_value_command},
     {"raw", "Stage and send a raw alternating OOK period", "<begin|append|show|send|clear> ...", raw_command},
@@ -391,13 +671,13 @@ void deregister_commands(std::size_t registered_count)
 
 void cleanup_failed_start(std::size_t registered_count)
 {
-    if (s_printer_task != nullptr) {
-        vTaskDelete(s_printer_task);
-        s_printer_task = nullptr;
+    if (s_event_worker_task != nullptr) {
+        vTaskDelete(s_event_worker_task);
+        s_event_worker_task = nullptr;
     }
-    if (s_frame_queue != nullptr) {
-        vQueueDelete(s_frame_queue);
-        s_frame_queue = nullptr;
+    if (s_event_queue != nullptr) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = nullptr;
     }
 
     deregister_commands(registered_count);
@@ -438,12 +718,14 @@ esp_err_t start_rf_console()
     if (s_starting.test_and_set(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_frame_queue != nullptr ||
-        s_printer_task != nullptr) {
+    if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
+        s_event_worker_task != nullptr) {
         s_starting.clear(std::memory_order_release);
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Linenoise cursor redraw is not safe when RF events print from another task.
+    linenoiseSetDumbMode(1);
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "rf>";
     repl_config.max_cmdline_length = 2048;
@@ -464,14 +746,19 @@ esp_err_t start_rf_console()
         return fail_start(error, registered_count);
     }
 
-    s_frame_queue = xQueueCreate(4, sizeof(RfFrame));
-    if (s_frame_queue == nullptr) {
+    s_event_queue = xQueueCreate(8, sizeof(ConsoleEvent));
+    if (s_event_queue == nullptr) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
-    if (xTaskCreate(printer_task, "rf_print", kPrinterTaskStackSize, nullptr, 3, &s_printer_task) != pdPASS) {
+    s_frame_queue_drops.store(0, std::memory_order_relaxed);
+    s_frame_callbacks_in_flight.store(0, std::memory_order_relaxed);
+    if (xTaskCreate(event_worker_task, "rf_events", kEventWorkerTaskStackSize, nullptr, 3,
+                    &s_event_worker_task) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
 
+    std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
+    std::fflush(stdout);
     error = esp_console_start_repl(s_repl);
     if (error == ESP_OK) {
         s_repl_started = true;
@@ -483,15 +770,20 @@ esp_err_t start_rf_console()
 
     s_started.store(true, std::memory_order_release);
     s_starting.clear(std::memory_order_release);
-    std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
     return ESP_OK;
 }
 
 void rf_console_on_frame(const RfFrame &frame, void *)
 {
-    if (s_frame_queue == nullptr || xQueueSend(s_frame_queue, &frame, 0) != pdTRUE) {
+    s_frame_callbacks_in_flight.fetch_add(1, std::memory_order_acq_rel);
+    ConsoleEvent event{};
+    event.type = ConsoleEventType::kFrame;
+    event.frame = frame;
+    event.occurred_us = esp_timer_get_time();
+    if (s_event_queue == nullptr || xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
         s_frame_queue_drops.fetch_add(1, std::memory_order_relaxed);
     }
+    s_frame_callbacks_in_flight.fetch_sub(1, std::memory_order_release);
 }
 
 }  // namespace rfbridge

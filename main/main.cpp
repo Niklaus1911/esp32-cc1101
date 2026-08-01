@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 #include "rf_console.hpp"
 #include "rf_ook.hpp"
+#include "rf_storage.hpp"
 
 namespace {
 
@@ -13,6 +14,11 @@ constexpr char kTag[] = "app";
 
 extern "C" void app_main(void)
 {
+    const esp_err_t storage_error = rfbridge::initialize_rf_storage();
+    if (storage_error != ESP_OK) {
+        ESP_LOGE(kTag, "Persistent RF storage unavailable: %s; NVS was not erased",
+                 esp_err_to_name(storage_error));
+    }
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;
     for (int attempt = 1; attempt <= 3 && error != ESP_OK; ++attempt) {

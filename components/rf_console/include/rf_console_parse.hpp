@@ -4,6 +4,26 @@
 
 namespace rfbridge {
 
+enum class LearnFrameDisposition : uint8_t {
+    kIgnore,
+    kCapture,
+    kTimeout,
+};
+
+enum class ReplayTarget : uint8_t {
+    kRam,
+    kNamed,
+};
+
+struct ReplayArguments {
+    ReplayTarget target = ReplayTarget::kRam;
+    uint16_t repeats = 0;
+};
+
 bool parse_unsigned_value(const char *text, uint64_t maximum, uint64_t *value);
+bool parse_replay_arguments(int argc, const char *const *argv, uint16_t default_repeats,
+                            ReplayArguments *arguments);
+LearnFrameDisposition classify_learn_frame(int64_t armed_us, int64_t deadline_us, int64_t frame_event_us,
+                                           int64_t frame_capture_start_us);
 
 }  // namespace rfbridge
