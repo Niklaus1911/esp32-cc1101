@@ -1,0 +1,13 @@
+menu "OOK service configuration"
+
+    config RF_DEFAULT_TX_REPEATS
+        int "Default RF transmit repeats"
+        range 1 20
+        default 8
+
+    config RF_DUPLICATE_WINDOW_MS
+        int "Received duplicate suppression window (ms)"
+        range 0 2000
+        default 350
+
+endmenu

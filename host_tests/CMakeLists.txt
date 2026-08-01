@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.22)
+project(esp32_cc1101_host_tests LANGUAGES CXX)
+
+enable_testing()
+
+add_executable(rf_host_tests
+    host_tests.cpp
+    ../components/rf_codec/rf_codec.cpp
+    ../components/rf_console/rf_console_parse.cpp
+)
+target_include_directories(rf_host_tests PRIVATE
+    ../components/rf_codec/include
+    ../components/rf_console/include
+)
+target_compile_features(rf_host_tests PRIVATE cxx_std_17)
+target_compile_options(rf_host_tests PRIVATE -Wall -Wextra -Werror)
+
+add_test(NAME rf_host_tests COMMAND rf_host_tests)
