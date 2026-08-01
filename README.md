@@ -57,7 +57,7 @@ idf.py menuconfig
 # CC1101 RF configuration
 ```
 
-Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand.
+Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. The project defaults to the 4 MB flash detected on the target DevKit; select the real size in `menuconfig` before flashing a board with different flash capacity.
 
 Flash only when the correct serial port and wiring have been verified:
 
