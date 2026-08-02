@@ -104,3 +104,44 @@ TEST_CASE("automation rejects frames from prior rule generations", "[rf_automati
     TEST_ASSERT_FALSE(rfbridge::rf_automation_event_is_current(4, 4, 2000, 2000));
     TEST_ASSERT_FALSE(rfbridge::rf_automation_event_is_current(4, 4, 1999, 2000));
 }
+
+
+TEST_CASE("automation log modes filter action and verbose events", "[rf_automation][logging]")
+{
+    using rfbridge::RfAutomationEventType;
+    using rfbridge::RfAutomationLogMode;
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_is_valid(RfAutomationLogMode::kOff));
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_is_valid(RfAutomationLogMode::kActions));
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_is_valid(RfAutomationLogMode::kVerbose));
+    TEST_ASSERT_FALSE(rfbridge::rf_automation_log_mode_is_valid(static_cast<RfAutomationLogMode>(3)));
+    TEST_ASSERT_FALSE(rfbridge::rf_automation_log_mode_allows(RfAutomationLogMode::kOff,
+                                                              RfAutomationEventType::kTriggered));
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_allows(RfAutomationLogMode::kActions,
+                                                             RfAutomationEventType::kTriggered));
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_allows(RfAutomationLogMode::kActions,
+                                                             RfAutomationEventType::kActionCompleted));
+    TEST_ASSERT_FALSE(rfbridge::rf_automation_log_mode_allows(RfAutomationLogMode::kActions,
+                                                              RfAutomationEventType::kCooldownSuppressed));
+    TEST_ASSERT_TRUE(rfbridge::rf_automation_log_mode_allows(RfAutomationLogMode::kVerbose,
+                                                             RfAutomationEventType::kCooldownSuppressed));
+    TEST_ASSERT_EQUAL_STRING("off", rfbridge::rf_automation_log_mode_name(RfAutomationLogMode::kOff));
+    TEST_ASSERT_EQUAL_STRING("actions", rfbridge::rf_automation_log_mode_name(RfAutomationLogMode::kActions));
+    TEST_ASSERT_EQUAL_STRING("verbose", rfbridge::rf_automation_log_mode_name(RfAutomationLogMode::kVerbose));
+}
+
+TEST_CASE("automation reports match counts and cooldown remainder", "[rf_automation][logging]")
+{
+    const rfbridge::RfStoredSignal low = uniform_raw(100);
+    const rfbridge::RfStoredSignal middle = uniform_raw(108);
+    const rfbridge::RfStoredSignal high = uniform_raw(116);
+    const rfbridge::RfStoredSignal *triggers[] = {&low, &high};
+    std::size_t matched_index = 0;
+    std::size_t match_count = 0;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfAutomationMatchResult::kAmbiguous),
+                      static_cast<int>(rfbridge::rf_find_unique_stored_signal_match(
+                          middle, triggers, std::size(triggers), &matched_index, &match_count)));
+    TEST_ASSERT_EQUAL_UINT32(2, match_count);
+    TEST_ASSERT_EQUAL_UINT32(1000, rfbridge::rf_automation_cooldown_remaining_ms(1000000, 1000000, 1000));
+    TEST_ASSERT_EQUAL_UINT32(501, rfbridge::rf_automation_cooldown_remaining_ms(1000000, 1499001, 1000));
+    TEST_ASSERT_EQUAL_UINT32(0, rfbridge::rf_automation_cooldown_remaining_ms(1000000, 2000000, 1000));
+}

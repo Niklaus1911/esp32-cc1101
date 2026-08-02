@@ -31,6 +31,8 @@ esp_err_t rf_storage_rule_name_list(RfStorageName *, std::size_t, std::size_t *)
 esp_err_t rf_storage_rule_load(const char *, RfStoredRule *);
 esp_err_t rf_storage_rule_enabled_get(bool *);
 esp_err_t rf_storage_rule_enabled_set(bool);
+esp_err_t rf_storage_rule_log_mode_get(uint8_t *);
+esp_err_t rf_storage_rule_log_mode_set(uint8_t);
 
 namespace {
 
@@ -56,6 +58,12 @@ struct AddValidationContext {
     const char *target_name = nullptr;
 };
 
+enum class EventEmitResult : uint8_t {
+    kFiltered,
+    kAccepted,
+    kRejected,
+};
+
 static_assert(std::is_trivially_copyable_v<RuntimeRule>);
 
 std::array<RuntimeRule, CONFIG_RF_MAX_AUTOMATION_RULES> s_rules{};
@@ -65,12 +73,18 @@ SemaphoreHandle_t s_mutex = nullptr;
 QueueHandle_t s_frame_queue = nullptr;
 TaskHandle_t s_task = nullptr;
 std::atomic<bool> s_initialization_started{false};
+std::atomic<bool> s_initialization_finished{false};
 std::atomic<bool> s_available{false};
 std::atomic<bool> s_enabled{false};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<int64_t> s_generation_changed_us{0};
 std::atomic<uint32_t> s_queue_drops{0};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
+RfAutomationLogMode s_log_mode = RfAutomationLogMode::kActions;
+RfAutomationEventSink s_event_sink = nullptr;
+void *s_event_sink_context = nullptr;
+uint32_t s_last_reported_queue_drops = 0;
+uint32_t s_next_action_id = 0;
 RfAutomationStatus s_status{};
 
 class AutomationLock {
@@ -105,6 +119,55 @@ void copy_name(char *destination, const char *source)
 {
     std::strncpy(destination, source, kRfStorageNameCapacity - 1U);
     destination[kRfStorageNameCapacity - 1U] = '\0';
+}
+
+
+void populate_rule_event(RfAutomationEvent *event, RfAutomationEventType type, const RuntimeRule &rule,
+                         RfStoredEncoding received_encoding, int64_t occurred_us)
+{
+    *event = {};
+    event->type = type;
+    event->occurred_us = occurred_us;
+    copy_name(event->trigger_name, rule.entry.trigger_name);
+    copy_name(event->target_name, rule.entry.rule.target_name);
+    event->received_encoding = received_encoding;
+    event->target_encoding = rule.target_signal.encoding;
+    event->repeats = rule.entry.rule.repeats;
+}
+
+EventEmitResult emit_event(RfAutomationEvent event)
+{
+    if (!rf_automation_log_mode_allows(s_log_mode, event.type) || s_event_sink == nullptr) {
+        return EventEmitResult::kFiltered;
+    }
+    if (event.occurred_us <= 0) {
+        event.occurred_us = esp_timer_get_time();
+    }
+    if (s_event_sink(event, s_event_sink_context)) {
+        ++s_status.log_events;
+        return EventEmitResult::kAccepted;
+    }
+    ++s_status.log_drops;
+    return EventEmitResult::kRejected;
+}
+
+uint32_t next_action_id()
+{
+    ++s_next_action_id;
+    if (s_next_action_id == 0) {
+        ++s_next_action_id;
+    }
+    return s_next_action_id;
+}
+
+uint32_t elapsed_milliseconds(int64_t start_us, int64_t end_us)
+{
+    if (start_us <= 0 || end_us <= start_us) {
+        return 0;
+    }
+    const uint64_t elapsed_us = static_cast<uint64_t>(end_us - start_us);
+    const uint64_t elapsed_ms = (elapsed_us + 999U) / 1000U;
+    return elapsed_ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed_ms);
 }
 
 void clear_runtime_rules()
@@ -182,13 +245,29 @@ esp_err_t validate_new_rule_signals(const RfStoredSignal &trigger_signal, const 
 void process_frame(const FrameEvent &event)
 {
     AutomationLock lock;
-    if (!lock.locked() || !s_available.load(std::memory_order_acquire) || !s_enabled.load(std::memory_order_relaxed)) {
+    if (!lock.locked() || !s_available.load(std::memory_order_acquire) ||
+        !s_enabled.load(std::memory_order_relaxed)) {
         return;
     }
+
+    const uint32_t queue_drops = s_queue_drops.load(std::memory_order_relaxed);
+    if (queue_drops != s_last_reported_queue_drops) {
+        RfAutomationEvent drop_event{};
+        drop_event.type = RfAutomationEventType::kQueueDrop;
+        drop_event.value = queue_drops;
+        if (emit_event(drop_event) != EventEmitResult::kRejected) {
+            s_last_reported_queue_drops = queue_drops;
+        }
+    }
+
     const uint32_t generation = s_generation.load(std::memory_order_relaxed);
     const int64_t changed_us = s_generation_changed_us.load(std::memory_order_relaxed);
     if (!rf_automation_event_is_current(event.generation, generation, event.frame.captured_us, changed_us)) {
         ++s_status.stale_frames;
+        RfAutomationEvent stale_event{};
+        stale_event.type = RfAutomationEventType::kStaleFrame;
+        stale_event.value = event.generation;
+        emit_event(stale_event);
         return;
     }
 
@@ -199,10 +278,15 @@ void process_frame(const FrameEvent &event)
         triggers[index] = &s_rules[index].trigger_signal;
     }
     std::size_t matched_index = 0;
-    const RfAutomationMatchResult match =
-        rf_find_unique_stored_signal_match(incoming, triggers.data(), s_rule_count, &matched_index);
+    std::size_t match_count = 0;
+    const RfAutomationMatchResult match = rf_find_unique_stored_signal_match(
+        incoming, triggers.data(), s_rule_count, &matched_index, &match_count);
     if (match == RfAutomationMatchResult::kAmbiguous) {
         ++s_status.ambiguous_frames;
+        RfAutomationEvent ambiguous_event{};
+        ambiguous_event.type = RfAutomationEventType::kAmbiguousFrame;
+        ambiguous_event.value = static_cast<uint32_t>(match_count);
+        emit_event(ambiguous_event);
         return;
     }
     if (match == RfAutomationMatchResult::kNone) {
@@ -212,8 +296,15 @@ void process_frame(const FrameEvent &event)
 
     ++s_status.matches;
     const int64_t action_us = esp_timer_get_time();
-    if (!rf_automation_cooldown_allows(matched->last_fired_us, action_us, matched->entry.rule.cooldown_ms)) {
+    if (!rf_automation_cooldown_allows(matched->last_fired_us, action_us,
+                                       matched->entry.rule.cooldown_ms)) {
         ++s_status.cooldown_suppressed;
+        RfAutomationEvent cooldown_event{};
+        populate_rule_event(&cooldown_event, RfAutomationEventType::kCooldownSuppressed, *matched,
+                            incoming.encoding, action_us);
+        cooldown_event.value = rf_automation_cooldown_remaining_ms(
+            matched->last_fired_us, action_us, matched->entry.rule.cooldown_ms);
+        emit_event(cooldown_event);
         return;
     }
     matched->last_fired_us = action_us;
@@ -221,15 +312,33 @@ void process_frame(const FrameEvent &event)
     copy_name(s_status.last_target, matched->entry.rule.target_name);
     s_status.last_error = ESP_OK;
 
+    const uint32_t action_id = next_action_id();
+    RfAutomationEvent trigger_event{};
+    populate_rule_event(&trigger_event, RfAutomationEventType::kTriggered, *matched, incoming.encoding,
+                        action_us);
+    trigger_event.action_id = action_id;
+    emit_event(trigger_event);
+
     const esp_err_t error = matched->target_signal.encoding == RfStoredEncoding::kDecoded
-                                ? transmit_rf_decoded(matched->target_signal.decoded, matched->entry.rule.repeats)
-                                : transmit_rf_raw(matched->target_signal.raw, matched->entry.rule.repeats);
+                                ? transmit_rf_decoded(matched->target_signal.decoded,
+                                                      matched->entry.rule.repeats)
+                                : transmit_rf_raw(matched->target_signal.raw,
+                                                  matched->entry.rule.repeats);
+    const int64_t completed_us = esp_timer_get_time();
     s_status.last_error = error;
     if (error == ESP_OK) {
         ++s_status.actions_succeeded;
     } else {
         ++s_status.tx_errors;
     }
+
+    RfAutomationEvent completed_event{};
+    populate_rule_event(&completed_event, RfAutomationEventType::kActionCompleted, *matched,
+                        incoming.encoding, completed_us);
+    completed_event.result = static_cast<int32_t>(error);
+    completed_event.action_id = action_id;
+    completed_event.elapsed_ms = elapsed_milliseconds(action_us, completed_us);
+    emit_event(completed_event);
 }
 
 void automation_task(void *)
@@ -304,6 +413,7 @@ esp_err_t initialize_rf_automation()
     if (!rf_storage_is_available()) {
         const esp_err_t error = rf_storage_initialization_error();
         s_initialization_error.store(error, std::memory_order_release);
+        s_initialization_finished.store(true, std::memory_order_release);
         return error;
     }
 
@@ -312,11 +422,16 @@ esp_err_t initialize_rf_automation()
     if (s_mutex == nullptr || s_frame_queue == nullptr) {
         destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        s_initialization_finished.store(true, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
 
     bool enabled = true;
+    uint8_t persisted_log_mode = static_cast<uint8_t>(RfAutomationLogMode::kActions);
     esp_err_t error = rf_storage_rule_enabled_get(&enabled);
+    if (error == ESP_OK) {
+        error = rf_storage_rule_log_mode_get(&persisted_log_mode);
+    }
     if (error == ESP_OK) {
         error = load_runtime_rules();
     }
@@ -325,11 +440,16 @@ esp_err_t initialize_rf_automation()
         s_status.available = true;
         s_status.enabled = enabled;
         s_status.enabled_known = true;
+        s_status.log_mode = static_cast<RfAutomationLogMode>(persisted_log_mode);
+        s_status.log_mode_known = true;
         s_status.rule_count_known = true;
         s_status.rule_count = static_cast<uint16_t>(s_rule_count);
         s_status.initialization_error = ESP_OK;
         s_queue_drops.store(0, std::memory_order_relaxed);
+        s_last_reported_queue_drops = 0;
+        s_next_action_id = 0;
         s_enabled.store(enabled, std::memory_order_release);
+        s_log_mode = static_cast<RfAutomationLogMode>(persisted_log_mode);
         s_generation.store(1, std::memory_order_release);
         s_generation_changed_us.store(esp_timer_get_time(), std::memory_order_release);
         if (xTaskCreate(automation_task, "rf_auto", kTaskStackSize, nullptr, kTaskPriority, &s_task) != pdPASS) {
@@ -340,11 +460,13 @@ esp_err_t initialize_rf_automation()
         s_enabled.store(false, std::memory_order_release);
         destroy_initialization_resources();
         s_initialization_error.store(error, std::memory_order_release);
+        s_initialization_finished.store(true, std::memory_order_release);
         return error;
     }
 
     s_available.store(true, std::memory_order_release);
     s_initialization_error.store(ESP_OK, std::memory_order_release);
+    s_initialization_finished.store(true, std::memory_order_release);
     return ESP_OK;
 }
 
@@ -391,7 +513,9 @@ esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_na
 esp_err_t rf_automation_remove_rule(const char *trigger_name)
 {
     if (!s_available.load(std::memory_order_acquire)) {
-        return rf_storage_rule_remove_recovery(trigger_name);
+        return s_initialization_finished.load(std::memory_order_acquire)
+                   ? rf_storage_rule_remove_recovery(trigger_name)
+                   : ESP_ERR_INVALID_STATE;
     }
     if (!rf_storage_name_is_valid(trigger_name)) {
         return ESP_ERR_INVALID_ARG;
@@ -425,7 +549,9 @@ esp_err_t rf_automation_list_rules(RfStorageRuleEntry *rules, std::size_t capaci
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_available.load(std::memory_order_acquire)) {
-        return rf_storage_rule_list(rules, capacity, count);
+        return s_initialization_finished.load(std::memory_order_acquire)
+                   ? rf_storage_rule_list(rules, capacity, count)
+                   : ESP_ERR_INVALID_STATE;
     }
 
     AutomationLock lock;
@@ -452,6 +578,10 @@ esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t 
 {
     if (count == nullptr || (rules == nullptr && capacity != 0)) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_available.load(std::memory_order_acquire) &&
+        !s_initialization_finished.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
     }
     if (s_available.load(std::memory_order_acquire)) {
         AutomationLock lock;
@@ -573,7 +703,9 @@ esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t 
 esp_err_t rf_automation_set_enabled(bool enabled)
 {
     if (!s_available.load(std::memory_order_acquire)) {
-        return rf_storage_rule_enabled_set(enabled);
+        return s_initialization_finished.load(std::memory_order_acquire)
+                   ? rf_storage_rule_enabled_set(enabled)
+                   : ESP_ERR_INVALID_STATE;
     }
 
     AutomationLock lock;
@@ -587,6 +719,54 @@ esp_err_t rf_automation_set_enabled(bool enabled)
     if (changed) {
         advance_generation();
     }
+    return ESP_OK;
+}
+
+
+esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode)
+{
+    if (!rf_automation_log_mode_is_valid(mode)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_finished.load(std::memory_order_acquire)
+                   ? rf_storage_rule_log_mode_set(static_cast<uint8_t>(mode))
+                   : ESP_ERR_INVALID_STATE;
+    }
+
+    AutomationLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    ESP_RETURN_ON_ERROR(rf_storage_rule_log_mode_set(static_cast<uint8_t>(mode)), "rf_automation",
+                        "persist log mode");
+    const bool changed = s_log_mode != mode;
+    s_log_mode = mode;
+    s_status.log_mode = mode;
+    s_status.log_mode_known = true;
+    if (changed) {
+        s_last_reported_queue_drops = s_queue_drops.load(std::memory_order_relaxed);
+    }
+    return ESP_OK;
+}
+
+esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context)
+{
+    if (!s_available.load(std::memory_order_acquire) &&
+        !s_initialization_finished.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_available.load(std::memory_order_acquire)) {
+        AutomationLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        s_event_sink_context = context;
+        s_event_sink = sink;
+        return ESP_OK;
+    }
+    s_event_sink_context = context;
+    s_event_sink = sink;
     return ESP_OK;
 }
 
@@ -604,6 +784,11 @@ esp_err_t rf_automation_get_status(RfAutomationStatus *status)
             status->enabled = persisted_enabled;
             status->enabled_known = true;
         }
+        uint8_t persisted_log_mode = 0;
+        if (rf_storage_rule_log_mode_get(&persisted_log_mode) == ESP_OK) {
+            status->log_mode = static_cast<RfAutomationLogMode>(persisted_log_mode);
+            status->log_mode_known = true;
+        }
         std::size_t persisted_count = 0;
         if (rf_storage_rule_name_list(nullptr, 0, &persisted_count) == ESP_OK && persisted_count <= UINT16_MAX) {
             status->rule_count = static_cast<uint16_t>(persisted_count);
@@ -619,6 +804,8 @@ esp_err_t rf_automation_get_status(RfAutomationStatus *status)
     status->available = true;
     status->enabled = s_enabled.load(std::memory_order_relaxed);
     status->enabled_known = true;
+    status->log_mode = s_log_mode;
+    status->log_mode_known = true;
     status->rule_count = static_cast<uint16_t>(s_rule_count);
     status->rule_count_known = true;
     status->queue_drops = s_queue_drops.load(std::memory_order_relaxed);

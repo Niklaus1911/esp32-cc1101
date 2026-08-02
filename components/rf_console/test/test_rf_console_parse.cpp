@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 
 #include "rf_console_parse.hpp"
 #include "unity.h"
@@ -73,4 +74,60 @@ TEST_CASE("rule add parser validates names and repeats", "[rf_console][rf_automa
     TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(4, self_rule, 8, &repeats));
     TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(5, bad_repeat, 8, &repeats));
     TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(3, missing_target, 8, &repeats));
+}
+
+
+TEST_CASE("rule log parser accepts exact modes", "[rf_console][rf_automation][logging]")
+{
+    rfbridge::RfAutomationLogMode mode{};
+    TEST_ASSERT_TRUE(rfbridge::parse_rule_log_mode("off", &mode));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfAutomationLogMode::kOff), static_cast<int>(mode));
+    TEST_ASSERT_TRUE(rfbridge::parse_rule_log_mode("actions", &mode));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfAutomationLogMode::kActions), static_cast<int>(mode));
+    TEST_ASSERT_TRUE(rfbridge::parse_rule_log_mode("verbose", &mode));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfAutomationLogMode::kVerbose), static_cast<int>(mode));
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_log_mode("action", &mode));
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_log_mode("VERBOSE", &mode));
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_log_mode(nullptr, &mode));
+}
+
+TEST_CASE("automation events format as stable terminal lines", "[rf_console][rf_automation][logging]")
+{
+    rfbridge::RfAutomationEvent event{};
+    std::strcpy(event.trigger_name, "B");
+    std::strcpy(event.target_name, "A");
+    event.repeats = 8;
+    event.action_id = 42;
+    event.received_encoding = rfbridge::RfStoredEncoding::kRaw;
+    event.target_encoding = rfbridge::RfStoredEncoding::kDecoded;
+    char line[256]{};
+
+    event.type = rfbridge::RfAutomationEventType::kTriggered;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, "ESP_OK", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE TRIGGER id=42 trigger=B target=A repeats=8 rx_encoding=raw tx_encoding=decoded", line);
+
+    event.type = rfbridge::RfAutomationEventType::kActionCompleted;
+    event.elapsed_ms = 742;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, "ESP_OK", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE ACTION id=42 trigger=B target=A result=OK elapsed_ms=742", line);
+    event.result = 0x105;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, "ESP_ERR_NOT_FOUND", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING(
+        "RULE ACTION id=42 trigger=B target=A result=ERROR error=ESP_ERR_NOT_FOUND (0x105) elapsed_ms=742", line);
+
+    event.type = rfbridge::RfAutomationEventType::kCooldownSuppressed;
+    event.value = 418;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, nullptr, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE SUPPRESS trigger=B reason=cooldown remaining_ms=418", line);
+    event.type = rfbridge::RfAutomationEventType::kAmbiguousFrame;
+    event.value = 2;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, nullptr, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE SKIP reason=ambiguous matches=2", line);
+    event.type = rfbridge::RfAutomationEventType::kQueueDrop;
+    event.value = 7;
+    TEST_ASSERT_TRUE(rfbridge::format_rf_automation_event(event, nullptr, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE DROP source=automation_queue total=7", line);
+
+    char short_line[8]{};
+    TEST_ASSERT_FALSE(rfbridge::format_rf_automation_event(event, nullptr, short_line, sizeof(short_line)));
 }

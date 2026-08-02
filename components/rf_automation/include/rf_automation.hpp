@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "rf_automation_event.hpp"
 #include "rf_ook.hpp"
 #include "rf_storage_rule_format.hpp"
 
@@ -14,6 +15,8 @@ struct RfAutomationStatus {
     bool enabled = false;
     bool enabled_known = false;
     bool rule_count_known = false;
+    bool log_mode_known = false;
+    RfAutomationLogMode log_mode = RfAutomationLogMode::kActions;
     uint16_t rule_count = 0;
     uint32_t frames_seen = 0;
     uint32_t stale_frames = 0;
@@ -23,6 +26,8 @@ struct RfAutomationStatus {
     uint32_t cooldown_suppressed = 0;
     uint32_t queue_drops = 0;
     uint32_t tx_errors = 0;
+    uint32_t log_events = 0;
+    uint32_t log_drops = 0;
     esp_err_t initialization_error = ESP_ERR_INVALID_STATE;
     esp_err_t last_error = ESP_OK;
     char last_trigger[kRfStorageNameCapacity]{};
@@ -40,7 +45,9 @@ esp_err_t rf_automation_remove_rule(const char *trigger_name);
 esp_err_t rf_automation_list_rules(RfStorageRuleEntry *rules, std::size_t capacity, std::size_t *count);
 esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t capacity, std::size_t *count);
 esp_err_t rf_automation_set_enabled(bool enabled);
+esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode);
+esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context);
 esp_err_t rf_automation_get_status(RfAutomationStatus *status);
 void rf_automation_on_frame(const RfFrame &frame);
 
-} // namespace rfbridge
+}  // namespace rfbridge

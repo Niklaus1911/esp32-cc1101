@@ -20,5 +20,7 @@ esp_err_t rf_storage_rule_name_list(RfStorageName *names, std::size_t capacity, 
 esp_err_t rf_storage_rule_load(const char *trigger_name, RfStoredRule *rule);
 esp_err_t rf_storage_rule_enabled_get(bool *enabled);
 esp_err_t rf_storage_rule_enabled_set(bool enabled);
+esp_err_t rf_storage_rule_log_mode_get(uint8_t *mode);
+esp_err_t rf_storage_rule_log_mode_set(uint8_t mode);
 
 } // namespace rfbridge

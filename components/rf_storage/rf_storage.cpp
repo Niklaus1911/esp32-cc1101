@@ -18,6 +18,7 @@ constexpr char kCodeNamespace[] = "rf_codes";
 constexpr char kRuleNamespace[] = "rf_rules";
 constexpr char kRuleMetaNamespace[] = "rf_rule_meta";
 constexpr char kRuleEnabledKey[] = "enabled";
+constexpr char kRuleLogModeKey[] = "log_mode";
 constexpr TickType_t kMutexTimeout = pdMS_TO_TICKS(1000);
 
 SemaphoreHandle_t s_mutex = nullptr;
@@ -775,6 +776,65 @@ esp_err_t rf_storage_rule_enabled_set(bool enabled)
         set_error = nvs_set_u8(handle.get(), kRuleEnabledKey, enabled ? 1 : 0);
     }
     ESP_RETURN_ON_ERROR(set_error, "rf_storage", "set rule enabled state");
+    return nvs_commit(handle.get());
+}
+
+
+esp_err_t rf_storage_rule_log_mode_get(uint8_t *mode)
+{
+    if (mode == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t ready = rule_meta_ready_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRuleMetaNamespace, NVS_READONLY, &handle), "rf_storage",
+                        "open rule metadata");
+    uint8_t value = 0;
+    const esp_err_t error = nvs_get_u8(handle.get(), kRuleLogModeKey, &value);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        *mode = 1;
+        return ESP_OK;
+    }
+    if (error != ESP_OK) {
+        return error == ESP_ERR_NVS_TYPE_MISMATCH ? ESP_ERR_INVALID_RESPONSE : error;
+    }
+    if (value > 2) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    *mode = value;
+    return ESP_OK;
+}
+
+esp_err_t rf_storage_rule_log_mode_set(uint8_t mode)
+{
+    if (mode > 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t ready = rule_meta_ready_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRuleMetaNamespace, NVS_READWRITE, &handle), "rf_storage",
+                        "open rule metadata");
+    esp_err_t set_error = nvs_set_u8(handle.get(), kRuleLogModeKey, mode);
+    if (set_error == ESP_ERR_NVS_TYPE_MISMATCH) {
+        ESP_RETURN_ON_ERROR(nvs_erase_key(handle.get(), kRuleLogModeKey), "rf_storage",
+                            "erase malformed log mode");
+        set_error = nvs_set_u8(handle.get(), kRuleLogModeKey, mode);
+    }
+    ESP_RETURN_ON_ERROR(set_error, "rf_storage", "set rule log mode");
     return nvs_commit(handle.get());
 }
 

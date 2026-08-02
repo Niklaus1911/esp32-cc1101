@@ -192,6 +192,33 @@ void test_console_parser()
             "rule add explicit repeats parsed");
     require(!rfbridge::parse_rule_add_arguments(4, rule_self, 8, &rule_repeats),
             "rule self mapping rejected");
+
+    rfbridge::RfAutomationLogMode log_mode{};
+    require(rfbridge::parse_rule_log_mode("actions", &log_mode) &&
+                log_mode == rfbridge::RfAutomationLogMode::kActions,
+            "rule action logging mode parsed");
+    require(rfbridge::parse_rule_log_mode("verbose", &log_mode) &&
+                log_mode == rfbridge::RfAutomationLogMode::kVerbose,
+            "rule verbose logging mode parsed");
+    require(!rfbridge::parse_rule_log_mode("debug", &log_mode), "unknown rule logging mode rejected");
+
+    rfbridge::RfAutomationEvent event{};
+    event.type = rfbridge::RfAutomationEventType::kTriggered;
+    std::strcpy(event.trigger_name, "B");
+    std::strcpy(event.target_name, "A");
+    event.repeats = 8;
+    event.action_id = 42;
+    event.received_encoding = rfbridge::RfStoredEncoding::kRaw;
+    event.target_encoding = rfbridge::RfStoredEncoding::kDecoded;
+    char line[256]{};
+    require(rfbridge::format_rf_automation_event(event, "ESP_OK", line, sizeof(line)) &&
+                std::strcmp(line, "RULE TRIGGER id=42 trigger=B target=A repeats=8 rx_encoding=raw tx_encoding=decoded") == 0,
+            "automation trigger event formatted");
+    event.type = rfbridge::RfAutomationEventType::kActionCompleted;
+    event.elapsed_ms = 742;
+    require(rfbridge::format_rf_automation_event(event, "ESP_OK", line, sizeof(line)) &&
+                std::strcmp(line, "RULE ACTION id=42 trigger=B target=A result=OK elapsed_ms=742") == 0,
+            "automation completion event formatted");
 }
 
 void test_learn_deadline_classification()
@@ -349,6 +376,16 @@ void test_automation_rules()
                 !rfbridge::rf_automation_event_is_current(3, 4, 3000, 2000) &&
                 !rfbridge::rf_automation_event_is_current(4, 4, 2000, 2000),
             "stale rule-generation events are rejected");
+    require(rfbridge::rf_automation_log_mode_allows(rfbridge::RfAutomationLogMode::kActions,
+                                                     rfbridge::RfAutomationEventType::kTriggered) &&
+                !rfbridge::rf_automation_log_mode_allows(rfbridge::RfAutomationLogMode::kActions,
+                                                          rfbridge::RfAutomationEventType::kCooldownSuppressed) &&
+                rfbridge::rf_automation_log_mode_allows(rfbridge::RfAutomationLogMode::kVerbose,
+                                                         rfbridge::RfAutomationEventType::kCooldownSuppressed),
+            "automation log mode filtering is exact");
+    require(rfbridge::rf_automation_cooldown_remaining_ms(1000000, 1499001, 1000) == 501 &&
+                rfbridge::rf_automation_cooldown_remaining_ms(1000000, 2000000, 1000) == 0,
+            "automation cooldown logging remainder is rounded up");
 }
 
 }  // namespace

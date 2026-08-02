@@ -29,6 +29,10 @@ constexpr std::size_t kOutputLineSize = 2048;
 constexpr uint32_t kEventWorkerTaskStackSize = 6144;
 constexpr int64_t kLearnTimeoutUs = 30000000;
 constexpr TickType_t kLearnEnqueueWaitTicks = pdMS_TO_TICKS(100);
+constexpr UBaseType_t kFrameEventQueueDepth = 8;
+constexpr UBaseType_t kAutomationLogQueueDepth = 8;
+constexpr std::size_t kAutomationLogLineSize = 256;
+constexpr uint32_t kCallbackQuiesceAttempts = 100;
 
 enum class ConsoleEventType : uint8_t {
     kFrame,
@@ -51,6 +55,7 @@ struct PendingLearn {
 };
 
 QueueHandle_t s_event_queue = nullptr;
+QueueHandle_t s_automation_log_queue = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
 esp_console_repl_t *s_repl = nullptr;
 bool s_repl_started = false;
@@ -58,6 +63,7 @@ std::atomic<bool> s_started{false};
 std::atomic_flag s_starting = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> s_frame_queue_drops{0};
 std::atomic<uint32_t> s_frame_callbacks_in_flight{0};
+std::atomic<bool> s_accept_frame_callbacks{false};
 RawSignal s_staged_raw{};
 bool s_raw_staging = false;
 
@@ -229,6 +235,30 @@ void process_console_event(const ConsoleEvent &event, PendingLearn *pending)
     }
 }
 
+
+void process_automation_log_event(const RfAutomationEvent &event)
+{
+    char line[kAutomationLogLineSize]{};
+    const esp_err_t result = static_cast<esp_err_t>(event.result);
+    if (format_rf_automation_event(event, esp_err_to_name(result), line, sizeof(line))) {
+        std::printf("\n%s\n", line);
+    } else {
+        std::printf("\nRULE LOG ERROR type=%u\n", static_cast<unsigned>(event.type));
+    }
+    std::fflush(stdout);
+}
+
+bool enqueue_automation_log_event(const RfAutomationEvent &event, void *)
+{
+    if (s_automation_log_queue == nullptr || xQueueSend(s_automation_log_queue, &event, 0) != pdTRUE) {
+        return false;
+    }
+    if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
+    }
+    return true;
+}
+
 TickType_t learn_wait_ticks(int64_t remaining_us)
 {
     const uint64_t ticks = (static_cast<uint64_t>(remaining_us) * configTICK_RATE_HZ + 999999U) / 1000000U;
@@ -253,29 +283,32 @@ void event_worker_task(void *)
             process_console_event(event, &pending);
             continue;
         }
-        if (!pending.active) {
-            if (xQueueReceive(s_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-                process_console_event(event, &pending);
+
+        TickType_t wait_ticks = portMAX_DELAY;
+        if (pending.active) {
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us >= pending.deadline_us) {
+                if (s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
+                    vTaskDelay(1);
+                    continue;
+                }
+                if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
+                    process_console_event(event, &pending);
+                    continue;
+                }
+                print_learn_timeout(&pending);
+                continue;
             }
+            wait_ticks = learn_wait_ticks(pending.deadline_us - now_us);
+        }
+
+        RfAutomationEvent log_event{};
+        if (xQueueReceive(s_automation_log_queue, &log_event, 0) == pdTRUE) {
+            process_automation_log_event(log_event);
             continue;
         }
 
-        const int64_t now_us = esp_timer_get_time();
-        if (now_us >= pending.deadline_us) {
-            if (s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
-                vTaskDelay(1);
-                continue;
-            }
-            if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-                process_console_event(event, &pending);
-                continue;
-            }
-            print_learn_timeout(&pending);
-            continue;
-        }
-        if (xQueueReceive(s_event_queue, &event, learn_wait_ticks(pending.deadline_us - now_us)) == pdTRUE) {
-            process_console_event(event, &pending);
-        }
+        ulTaskNotifyTake(pdTRUE, wait_ticks);
     }
 }
 
@@ -333,21 +366,29 @@ int status_command(int argc, char **)
         std::printf("AUTOMATION unavailable error=%s (0x%x)\n", esp_err_to_name(automation_error),
                     static_cast<unsigned>(automation_error));
     } else if (!automation.available) {
-        std::printf("AUTOMATION available=0 enabled_known=%u enabled=%u rules_known=%u rules=%u error=%s (0x%x) queue_drops=%lu recovery=reboot_after_rule_changes\n",
+        std::printf("AUTOMATION available=0 enabled_known=%u enabled=%u rules_known=%u rules=%u log_mode_known=%u log_mode=%s error=%s (0x%x) queue_drops=%lu log_events=%lu log_drops=%lu recovery=reboot_after_rule_changes\n",
                     automation.enabled_known, automation.enabled, automation.rule_count_known,
-                    automation.rule_count, esp_err_to_name(automation.initialization_error),
+                    automation.rule_count, automation.log_mode_known,
+                    automation.log_mode_known ? rf_automation_log_mode_name(automation.log_mode) : "unknown",
+                    esp_err_to_name(automation.initialization_error),
                     static_cast<unsigned>(automation.initialization_error),
-                    static_cast<unsigned long>(automation.queue_drops));
+                    static_cast<unsigned long>(automation.queue_drops),
+                    static_cast<unsigned long>(automation.log_events),
+                    static_cast<unsigned long>(automation.log_drops));
     } else {
-        std::printf("AUTOMATION available=1 enabled=%u rules=%u frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu last_error=%s last_trigger=%s last_target=%s\n",
-                    automation.enabled, automation.rule_count, static_cast<unsigned long>(automation.frames_seen),
+        std::printf("AUTOMATION available=1 enabled=%u rules=%u log_mode=%s frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu log_events=%lu log_drops=%lu last_error=%s last_trigger=%s last_target=%s\n",
+                    automation.enabled, automation.rule_count,
+                    rf_automation_log_mode_name(automation.log_mode),
+                    static_cast<unsigned long>(automation.frames_seen),
                     static_cast<unsigned long>(automation.stale_frames),
                     static_cast<unsigned long>(automation.ambiguous_frames),
                     static_cast<unsigned long>(automation.matches),
                     static_cast<unsigned long>(automation.actions_succeeded),
                     static_cast<unsigned long>(automation.cooldown_suppressed),
                     static_cast<unsigned long>(automation.queue_drops),
-                    static_cast<unsigned long>(automation.tx_errors), esp_err_to_name(automation.last_error),
+                    static_cast<unsigned long>(automation.tx_errors),
+                    static_cast<unsigned long>(automation.log_events),
+                    static_cast<unsigned long>(automation.log_drops), esp_err_to_name(automation.last_error),
                     automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
                     automation.last_target[0] == '\0' ? "-" : automation.last_target);
     }
@@ -466,6 +507,9 @@ int learn_command(int argc, char **argv)
         std::printf("ERROR learn event queue busy\n");
         return 1;
     }
+    if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
+    }
     return 0;
 }
 
@@ -529,8 +573,9 @@ int list_rules()
             return print_result("rule list", error);
         }
     }
-    std::printf("RULES automation_available=%u enabled_known=%u enabled=%u count=%zu%s\n",
-                status.available, status.enabled_known, status.enabled, count,
+    std::printf("RULES automation_available=%u enabled_known=%u enabled=%u log_mode_known=%u log_mode=%s count=%zu%s\n",
+                status.available, status.enabled_known, status.enabled, status.log_mode_known,
+                status.log_mode_known ? rf_automation_log_mode_name(status.log_mode) : "unknown", count,
                 status.available ? "" : " recovery=reboot_after_changes");
     for (std::size_t index = 0; index < count; ++index) {
         if (rules[index].validation_error != ESP_OK) {
@@ -559,6 +604,23 @@ int print_rule_mutation_result(const char *operation, esp_err_t error)
     return print_result(operation, ESP_OK);
 }
 
+
+int show_rule_log_mode()
+{
+    RfAutomationStatus status{};
+    const esp_err_t error = rf_automation_get_status(&status);
+    if (error != ESP_OK) {
+        return print_result("rule log", error);
+    }
+    if (!status.log_mode_known) {
+        std::printf("RULE_LOG mode=unknown automation_available=%u\n", status.available);
+        return 1;
+    }
+    std::printf("RULE_LOG mode=%s automation_available=%u\n",
+                rf_automation_log_mode_name(status.log_mode), status.available);
+    return 0;
+}
+
 int rule_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "list") == 0) {
@@ -570,6 +632,17 @@ int rule_command(int argc, char **argv)
     if (argc == 2 && std::strcmp(argv[1], "disable") == 0) {
         return print_rule_mutation_result("rule disable", rf_automation_set_enabled(false));
     }
+    if (argc == 2 && std::strcmp(argv[1], "log") == 0) {
+        return show_rule_log_mode();
+    }
+    if (argc == 3 && std::strcmp(argv[1], "log") == 0) {
+        RfAutomationLogMode mode{};
+        if (!parse_rule_log_mode(argv[2], &mode)) {
+            std::printf("usage: rule log <off|actions|verbose>\n");
+            return 1;
+        }
+        return print_rule_mutation_result("rule log", rf_automation_set_log_mode(mode));
+    }
     if (argc == 3 && std::strcmp(argv[1], "remove") == 0) {
         return print_rule_mutation_result("rule remove", rf_automation_remove_rule(argv[2]));
     }
@@ -577,7 +650,7 @@ int rule_command(int argc, char **argv)
     if ((argc == 4 || argc == 5) && parse_rule_add_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &repeats)) {
         return print_result("rule add", rf_automation_add_rule(argv[2], argv[3], repeats));
     }
-    std::printf("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable>\n");
+    std::printf("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable|log [off|actions|verbose]>\n");
     return 1;
 }
 
@@ -745,7 +818,8 @@ constexpr CommandDefinition kCommands[] = {
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
     {"rule", "Configure persistent receive-to-replay automation",
-     "<add <rx> <tx> [repeats]|list|remove <rx>|enable|disable>", rule_command},
+     "<add <rx> <tx> [repeats]|list|remove <rx>|enable|disable|"
+     "log [off|actions|verbose]>", rule_command},
     {"replay", "Replay the latest RAM frame or a learned name", "[repeats] | <name> <repeats>", replay_command},
     {"send", "Send an rc-switch-compatible value", "<code> <bits> <protocol> [pulse_us] [repeats]",
      send_value_command},
@@ -778,13 +852,42 @@ void deregister_commands(std::size_t registered_count)
 
 void cleanup_failed_start(std::size_t registered_count)
 {
-    if (s_event_worker_task != nullptr) {
+    s_accept_frame_callbacks.store(false, std::memory_order_release);
+    for (uint32_t attempt = 0;
+         attempt < kCallbackQuiesceAttempts &&
+         s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0;
+         ++attempt) {
+        vTaskDelay(1);
+    }
+    const bool callbacks_quiesced =
+        s_frame_callbacks_in_flight.load(std::memory_order_acquire) == 0;
+    if (!callbacks_quiesced) {
+        ESP_LOGE(kTag, "Could not quiesce RF frame callbacks; retaining event queues");
+    }
+
+    esp_err_t sink_error = rf_automation_set_event_sink(nullptr, nullptr);
+    if (sink_error != ESP_OK) {
+        vTaskDelay(1);
+        sink_error = rf_automation_set_event_sink(nullptr, nullptr);
+    }
+    const bool sink_detached = sink_error == ESP_OK;
+    const bool safe_to_delete_events = sink_detached && callbacks_quiesced;
+    if (!sink_detached) {
+        ESP_LOGE(kTag, "Could not detach automation log sink: %s; retaining event queues",
+                 esp_err_to_name(sink_error));
+    }
+
+    if (safe_to_delete_events && s_event_worker_task != nullptr) {
         vTaskDelete(s_event_worker_task);
         s_event_worker_task = nullptr;
     }
-    if (s_event_queue != nullptr) {
+    if (safe_to_delete_events && s_event_queue != nullptr) {
         vQueueDelete(s_event_queue);
         s_event_queue = nullptr;
+    }
+    if (safe_to_delete_events && s_automation_log_queue != nullptr) {
+        vQueueDelete(s_automation_log_queue);
+        s_automation_log_queue = nullptr;
     }
 
     deregister_commands(registered_count);
@@ -826,7 +929,7 @@ esp_err_t start_rf_console()
         return ESP_ERR_INVALID_STATE;
     }
     if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
-        s_event_worker_task != nullptr) {
+        s_automation_log_queue != nullptr || s_event_worker_task != nullptr) {
         s_starting.clear(std::memory_order_release);
         return ESP_ERR_INVALID_STATE;
     }
@@ -851,8 +954,9 @@ esp_err_t start_rf_console()
         return fail_start(error, registered_count);
     }
 
-    s_event_queue = xQueueCreate(8, sizeof(ConsoleEvent));
-    if (s_event_queue == nullptr) {
+    s_event_queue = xQueueCreate(kFrameEventQueueDepth, sizeof(ConsoleEvent));
+    s_automation_log_queue = xQueueCreate(kAutomationLogQueueDepth, sizeof(RfAutomationEvent));
+    if (s_event_queue == nullptr || s_automation_log_queue == nullptr) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
     s_frame_queue_drops.store(0, std::memory_order_relaxed);
@@ -860,6 +964,11 @@ esp_err_t start_rf_console()
     if (xTaskCreate(event_worker_task, "rf_events", kEventWorkerTaskStackSize, nullptr, 3,
                     &s_event_worker_task) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
+    }
+    error = rf_automation_set_event_sink(enqueue_automation_log_event, nullptr);
+    if (error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not register automation log sink: %s", esp_err_to_name(error));
+        return fail_start(error, registered_count);
     }
 
     error = esp_console_start_repl(s_repl);
@@ -871,6 +980,7 @@ esp_err_t start_rf_console()
         return fail_start(error, registered_count);
     }
 
+    s_accept_frame_callbacks.store(true, std::memory_order_release);
     s_started.store(true, std::memory_order_release);
     s_starting.clear(std::memory_order_release);
     std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
@@ -880,6 +990,10 @@ esp_err_t start_rf_console()
 void rf_console_on_frame(const RfFrame &frame, void *)
 {
     s_frame_callbacks_in_flight.fetch_add(1, std::memory_order_acq_rel);
+    if (!s_accept_frame_callbacks.load(std::memory_order_acquire)) {
+        s_frame_callbacks_in_flight.fetch_sub(1, std::memory_order_release);
+        return;
+    }
     rf_automation_on_frame(frame);
     ConsoleEvent event{};
     event.type = ConsoleEventType::kFrame;
@@ -887,6 +1001,8 @@ void rf_console_on_frame(const RfFrame &frame, void *)
     event.occurred_us = esp_timer_get_time();
     if (s_event_queue == nullptr || xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
         s_frame_queue_drops.fetch_add(1, std::memory_order_relaxed);
+    } else if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
     }
     s_frame_callbacks_in_flight.fetch_sub(1, std::memory_order_release);
 }

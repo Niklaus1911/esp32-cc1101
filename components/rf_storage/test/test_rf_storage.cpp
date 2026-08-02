@@ -403,10 +403,27 @@ TEST_CASE("RF automation rule storage preserves references and shared targets", 
 
     bool previous_enabled = true;
     const esp_err_t get_previous_enabled = rfbridge::rf_storage_rule_enabled_get(&previous_enabled);
+    uint8_t previous_log_mode = 1;
+    bool previous_log_mode_present = false;
+    nvs_handle_t previous_meta_handle = 0;
+    esp_err_t inspect_previous_log_mode = nvs_open("rf_rule_meta", NVS_READONLY, &previous_meta_handle);
+    if (inspect_previous_log_mode == ESP_OK) {
+        const esp_err_t raw_error = nvs_get_u8(previous_meta_handle, "log_mode", &previous_log_mode);
+        previous_log_mode_present = raw_error == ESP_OK;
+        inspect_previous_log_mode = raw_error == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : raw_error;
+        nvs_close(previous_meta_handle);
+    }
+    const esp_err_t get_previous_log_mode = rfbridge::rf_storage_rule_log_mode_get(&previous_log_mode);
     nvs_handle_t meta_handle = 0;
     esp_err_t malformed_meta_write = nvs_open("rf_rule_meta", NVS_READWRITE, &meta_handle);
     if (malformed_meta_write == ESP_OK) {
         const esp_err_t erase_error = nvs_erase_key(meta_handle, "enabled");
+        malformed_meta_write = erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND
+                                   ? ESP_OK
+                                   : erase_error;
+    }
+    if (malformed_meta_write == ESP_OK) {
+        const esp_err_t erase_error = nvs_erase_key(meta_handle, "log_mode");
         malformed_meta_write = erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND
                                    ? ESP_OK
                                    : erase_error;
@@ -420,6 +437,82 @@ TEST_CASE("RF automation rule storage preserves references and shared targets", 
     if (meta_handle != 0) {
         nvs_close(meta_handle);
     }
+    uint8_t default_log_mode = 0;
+    const esp_err_t default_log_mode_get = rfbridge::rf_storage_rule_log_mode_get(&default_log_mode);
+    nvs_handle_t log_meta_handle = 0;
+    esp_err_t malformed_log_write = nvs_open("rf_rule_meta", NVS_READWRITE, &log_meta_handle);
+    if (malformed_log_write == ESP_OK) {
+        malformed_log_write = nvs_set_u32(log_meta_handle, "log_mode", 2);
+    }
+    if (malformed_log_write == ESP_OK) {
+        malformed_log_write = nvs_commit(log_meta_handle);
+    }
+    if (log_meta_handle != 0) {
+        nvs_close(log_meta_handle);
+    }
+    uint8_t malformed_log_mode = 0;
+    const esp_err_t malformed_log_get = rfbridge::rf_storage_rule_log_mode_get(&malformed_log_mode);
+    const esp_err_t malformed_log_get_again = rfbridge::rf_storage_rule_log_mode_get(&malformed_log_mode);
+    uint32_t preserved_wrong_type_value = 0;
+    nvs_handle_t wrong_type_inspect_handle = 0;
+    esp_err_t inspect_wrong_type =
+        nvs_open("rf_rule_meta", NVS_READONLY, &wrong_type_inspect_handle);
+    if (inspect_wrong_type == ESP_OK) {
+        inspect_wrong_type =
+            nvs_get_u32(wrong_type_inspect_handle, "log_mode", &preserved_wrong_type_value);
+        nvs_close(wrong_type_inspect_handle);
+    }
+    const esp_err_t repair_log_mode = rfbridge::rf_storage_rule_log_mode_set(2);
+    uint8_t verbose_log_mode = 0;
+    const esp_err_t get_verbose_log_mode = rfbridge::rf_storage_rule_log_mode_get(&verbose_log_mode);
+
+    nvs_handle_t out_of_range_handle = 0;
+    esp_err_t write_out_of_range = nvs_open("rf_rule_meta", NVS_READWRITE, &out_of_range_handle);
+    if (write_out_of_range == ESP_OK) {
+        write_out_of_range = nvs_set_u8(out_of_range_handle, "log_mode", 3);
+    }
+    if (write_out_of_range == ESP_OK) {
+        write_out_of_range = nvs_commit(out_of_range_handle);
+    }
+    if (out_of_range_handle != 0) {
+        nvs_close(out_of_range_handle);
+    }
+    uint8_t out_of_range_log_mode = 0;
+    const esp_err_t out_of_range_log_get =
+        rfbridge::rf_storage_rule_log_mode_get(&out_of_range_log_mode);
+    const esp_err_t out_of_range_log_get_again =
+        rfbridge::rf_storage_rule_log_mode_get(&out_of_range_log_mode);
+    const esp_err_t invalid_log_mode = rfbridge::rf_storage_rule_log_mode_set(3);
+    uint8_t preserved_out_of_range_value = 0;
+    nvs_handle_t out_of_range_inspect_handle = 0;
+    esp_err_t inspect_out_of_range =
+        nvs_open("rf_rule_meta", NVS_READONLY, &out_of_range_inspect_handle);
+    if (inspect_out_of_range == ESP_OK) {
+        inspect_out_of_range =
+            nvs_get_u8(out_of_range_inspect_handle, "log_mode", &preserved_out_of_range_value);
+        nvs_close(out_of_range_inspect_handle);
+    }
+
+    esp_err_t restore_log_mode = ESP_OK;
+    if (previous_log_mode_present) {
+        restore_log_mode = rfbridge::rf_storage_rule_log_mode_set(previous_log_mode);
+    } else {
+        nvs_handle_t restore_handle = 0;
+        restore_log_mode = nvs_open("rf_rule_meta", NVS_READWRITE, &restore_handle);
+        if (restore_log_mode == ESP_OK) {
+            const esp_err_t erase_error = nvs_erase_key(restore_handle, "log_mode");
+            restore_log_mode = erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND
+                                   ? ESP_OK
+                                   : erase_error;
+        }
+        if (restore_log_mode == ESP_OK) {
+            restore_log_mode = nvs_commit(restore_handle);
+        }
+        if (restore_handle != 0) {
+            nvs_close(restore_handle);
+        }
+    }
+
     bool malformed_enabled = false;
     const esp_err_t malformed_meta_get = rfbridge::rf_storage_rule_enabled_get(&malformed_enabled);
     const esp_err_t disable_error = rfbridge::rf_storage_rule_enabled_set(false);
@@ -459,7 +552,26 @@ TEST_CASE("RF automation rule storage preserves references and shared targets", 
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, duplicate_trigger);
     TEST_ASSERT_EQUAL(ESP_OK, create_rule_two);
     TEST_ASSERT_EQUAL(ESP_OK, get_previous_enabled);
+    TEST_ASSERT_EQUAL(ESP_OK, inspect_previous_log_mode);
+    TEST_ASSERT_EQUAL(ESP_OK, get_previous_log_mode);
     TEST_ASSERT_EQUAL(ESP_OK, malformed_meta_write);
+    TEST_ASSERT_EQUAL(ESP_OK, default_log_mode_get);
+    TEST_ASSERT_EQUAL_UINT8(1, default_log_mode);
+    TEST_ASSERT_EQUAL(ESP_OK, malformed_log_write);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, malformed_log_get);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, malformed_log_get_again);
+    TEST_ASSERT_EQUAL(ESP_OK, inspect_wrong_type);
+    TEST_ASSERT_EQUAL_UINT32(2, preserved_wrong_type_value);
+    TEST_ASSERT_EQUAL(ESP_OK, repair_log_mode);
+    TEST_ASSERT_EQUAL(ESP_OK, get_verbose_log_mode);
+    TEST_ASSERT_EQUAL_UINT8(2, verbose_log_mode);
+    TEST_ASSERT_EQUAL(ESP_OK, write_out_of_range);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, out_of_range_log_get);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, out_of_range_log_get_again);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, invalid_log_mode);
+    TEST_ASSERT_EQUAL(ESP_OK, inspect_out_of_range);
+    TEST_ASSERT_EQUAL_UINT8(3, preserved_out_of_range_value);
+    TEST_ASSERT_EQUAL(ESP_OK, restore_log_mode);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, malformed_meta_get);
     TEST_ASSERT_EQUAL(ESP_OK, disable_error);
     TEST_ASSERT_EQUAL(ESP_OK, get_disabled);
