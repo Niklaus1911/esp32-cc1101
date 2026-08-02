@@ -1,5 +1,6 @@
 #include "rf_console_format.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -60,6 +61,16 @@ bool write_repeated(char value, std::size_t count, char *output, std::size_t cap
 bool fits(const char *text, std::size_t width)
 {
     return text != nullptr && std::strlen(text) <= width;
+}
+
+bool is_blank(const char *text)
+{
+    for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+        if (std::isspace(static_cast<unsigned char>(*cursor)) == 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -159,10 +170,16 @@ bool format_console_tagged_line(ConsoleStyle style, ConsoleTone tone, const char
         capacity == 0) {
         return false;
     }
-    const int written = style == ConsoleStyle::kPlain
-                            ? std::snprintf(output, capacity, "%s", plain_line)
-                            : std::snprintf(output, capacity, "%s[%-5.5s]%s %s%s", tone_sequence(tone),
-                                            tag, kAnsiReset, pretty_message, kAnsiReset);
+    int written = -1;
+    if (style == ConsoleStyle::kPlain) {
+        written = std::snprintf(output, capacity, "%s", plain_line);
+    } else if (is_blank(tag)) {
+        written = std::snprintf(output, capacity, "      %s|%s %s%s", tone_sequence(tone),
+                                kAnsiReset, pretty_message, kAnsiReset);
+    } else {
+        written = std::snprintf(output, capacity, "%s[%-5.5s]%s %s%s", tone_sequence(tone), tag,
+                                kAnsiReset, pretty_message, kAnsiReset);
+    }
     return written >= 0 && static_cast<std::size_t>(written) < capacity;
 }
 

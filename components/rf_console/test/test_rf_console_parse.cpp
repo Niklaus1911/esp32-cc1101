@@ -60,6 +60,18 @@ TEST_CASE("console formatter resets ANSI and rejects dashboard truncation", "[rf
         ConsoleStyle::kPlain, ConsoleTone::kSuccess, " OK ", "OK rx on", "RX enabled", line,
         sizeof(line)));
     TEST_ASSERT_EQUAL_STRING("OK rx on", line);
+    TEST_ASSERT_TRUE(rfbridge::format_console_tagged_line(
+        ConsoleStyle::kPretty, ConsoleTone::kInfo, "", "", "confidence=repeated", line,
+        sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("      \x1b[1;36m|\x1b[0m confidence=repeated\x1b[0m", line);
+    TEST_ASSERT_TRUE(rfbridge::format_console_tagged_line(
+        ConsoleStyle::kPretty, ConsoleTone::kInfo, "     ", "", "elapsed_ms=170", line,
+        sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("      \x1b[1;36m|\x1b[0m elapsed_ms=170\x1b[0m", line);
+    TEST_ASSERT_TRUE(rfbridge::format_console_tagged_line(
+        ConsoleStyle::kPlain, ConsoleTone::kInfo, "", "RULE ACTION elapsed_ms=170",
+        "elapsed_ms=170", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RULE ACTION elapsed_ms=170", line);
     std::strcpy(line, "RC code=7");
     TEST_ASSERT_TRUE(rfbridge::decorate_console_message(
         ConsoleStyle::kPlain, ConsoleTone::kInfo, "RF RX", "RX ", line, sizeof(line)));

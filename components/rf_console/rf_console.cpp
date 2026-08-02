@@ -206,8 +206,8 @@ void print_tagged_line(ConsoleTone tone, const char *tag, const char *plain_line
         char chunk[kPrettyBodyWidth + 1U]{};
         std::memcpy(chunk, cursor, chunk_length);
         char output[192]{};
-        if (!format_console_tagged_line(ConsoleStyle::kPretty, tone, first ? tag : "     ", "",
-                                        chunk, output, sizeof(output))) {
+        if (!format_console_tagged_line(ConsoleStyle::kPretty, tone, first ? tag : "", "", chunk,
+                                         output, sizeof(output))) {
             ESP_LOGE(kTag, "Could not format console event tag=%s", tag);
             return;
         }

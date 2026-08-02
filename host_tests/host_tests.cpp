@@ -273,6 +273,22 @@ void test_console_formatter()
                 std::strstr(line, "\x1b[1;32m[ OK  ]\x1b[0m RX enabled") != nullptr &&
                 std::strcmp(line + std::strlen(line) - 4U, "\x1b[0m") == 0,
             "pretty tag uses semantic color and reset");
+    require(rfbridge::format_console_tagged_line(
+                ConsoleStyle::kPretty, ConsoleTone::kInfo, "", "", "confidence=repeated", line,
+                sizeof(line)) &&
+                std::strcmp(line,
+                            "      \x1b[1;36m|\x1b[0m confidence=repeated\x1b[0m") == 0,
+            "pretty continuation uses aligned colored gutter");
+    require(rfbridge::format_console_tagged_line(
+                ConsoleStyle::kPretty, ConsoleTone::kInfo, "     ", "", "elapsed_ms=170", line,
+                sizeof(line)) &&
+                std::strcmp(line, "      \x1b[1;36m|\x1b[0m elapsed_ms=170\x1b[0m") == 0,
+            "whitespace tag also uses continuation gutter");
+    require(rfbridge::format_console_tagged_line(
+                ConsoleStyle::kPlain, ConsoleTone::kInfo, "", "RULE ACTION elapsed_ms=170",
+                "elapsed_ms=170", line, sizeof(line)) &&
+                std::strcmp(line, "RULE ACTION elapsed_ms=170") == 0,
+            "plain continuation input preserves stable line");
     std::strcpy(line, "RC code=7");
     require(rfbridge::decorate_console_message(ConsoleStyle::kPlain, ConsoleTone::kInfo,
                                                 "RF RX", "RX ", line, sizeof(line)) &&
