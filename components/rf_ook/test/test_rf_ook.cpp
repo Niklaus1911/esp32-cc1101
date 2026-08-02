@@ -1,7 +1,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <iterator>
 
+#include "../private_include/rf_activity_led_policy.hpp"
 #include "rf_ook.hpp"
 #include "unity.h"
 
@@ -43,6 +45,46 @@ void append_protocol2_frame(uint8_t *levels, uint16_t *durations, std::size_t *c
 }
 
 }  // namespace
+
+TEST_CASE("RF activity LED policy validates GPIO polarity and deadlines", "[rf_ook][led]")
+{
+    const int radio_gpios[] = {18, 19, 23, 27, 26, 25};
+    rfbridge::RfActivityLedConfig config{
+        .enabled = true,
+        .gpio = 2,
+        .active_high = true,
+        .pulse_ms = 25,
+    };
+    TEST_ASSERT_TRUE(rfbridge::rf_activity_led_config_is_valid(
+        config, radio_gpios, std::size(radio_gpios)));
+    TEST_ASSERT_EQUAL_UINT8(1, rfbridge::rf_activity_led_active_level(config));
+    TEST_ASSERT_EQUAL_UINT8(0, rfbridge::rf_activity_led_inactive_level(config));
+    TEST_ASSERT_EQUAL_UINT64(25000, rfbridge::rf_activity_led_pulse_us(config));
+
+    config.active_high = false;
+    TEST_ASSERT_EQUAL_UINT8(0, rfbridge::rf_activity_led_active_level(config));
+    TEST_ASSERT_EQUAL_UINT8(1, rfbridge::rf_activity_led_inactive_level(config));
+    config.gpio = 25;
+    TEST_ASSERT_FALSE(rfbridge::rf_activity_led_config_is_valid(
+        config, radio_gpios, std::size(radio_gpios)));
+    for (const int unsupported_strapping_gpio : {0, 5, 12, 15}) {
+        config.gpio = unsupported_strapping_gpio;
+        TEST_ASSERT_FALSE(rfbridge::rf_activity_led_config_is_valid(
+            config, radio_gpios, std::size(radio_gpios)));
+    }
+    config.enabled = false;
+    config.gpio = -1;
+    TEST_ASSERT_TRUE(rfbridge::rf_activity_led_config_is_valid(config, nullptr, 0));
+
+    const rfbridge::RfActivityLedDeadlineDecision pending =
+        rfbridge::rf_activity_led_deadline_decision(5000, 5001);
+    const rfbridge::RfActivityLedDeadlineDecision expired =
+        rfbridge::rf_activity_led_deadline_decision(5000, 5000);
+    TEST_ASSERT_FALSE(pending.turn_off);
+    TEST_ASSERT_EQUAL_UINT64(1, pending.rearm_us);
+    TEST_ASSERT_TRUE(expired.turn_off);
+    TEST_ASSERT_EQUAL_UINT64(0, expired.rearm_us);
+}
 
 TEST_CASE("one idle-bounded protocol 1 frame is marked single decoded", "[rf_ook][short_tap]")
 {

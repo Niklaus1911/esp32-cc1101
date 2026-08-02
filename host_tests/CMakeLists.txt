@@ -13,6 +13,7 @@ add_executable(rf_host_tests
     ../components/rf_codec/rf_codec.cpp
     ../components/rf_console/rf_console_format.cpp
     ../components/rf_console/rf_console_parse.cpp
+    ../components/rf_ook/rf_activity_led_policy.cpp
     ../components/rf_storage/rf_storage_format.cpp
     ../components/rf_storage/rf_storage_rule_format.cpp
 )
@@ -22,6 +23,7 @@ target_include_directories(rf_host_tests PRIVATE
     ../components/rf_automation/include
     ../components/rf_codec/include
     ../components/rf_console/include
+    ../components/rf_ook/private_include
     ../components/rf_storage/include
 )
 target_compile_features(rf_host_tests PRIVATE cxx_std_17)

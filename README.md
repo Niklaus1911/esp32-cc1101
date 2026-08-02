@@ -38,6 +38,12 @@ Recommended hardware details:
 - Attach the 433 MHz SMA antenna **before transmitting**.
 - Never power or drive the CC1101 at 5 V. Avoid powering one board while the other is unpowered.
 
+### RF activity LED
+
+By default, GPIO2 pulses active-high for 25 ms whenever a decoded or raw frame is accepted. Many DOIT/clone ESP32 DevKit V1 boards connect a blue LED to GPIO2. The official Espressif ESP32-DevKitC V4 does not: its onboard red LED is a non-programmable 5 V power indicator. On that board, disable the feature or connect an external active-high LED as `GPIO2 -> 220-1000 ohm resistor -> LED anode`, with the LED cathode connected to GND.
+
+GPIO2 is a boot-strapping pin. The firmware does not configure it until application startup, but external circuitry must not force an incompatible level while the ESP32 resets. `RF_ACTIVITY_LED_ENABLE`, `RF_ACTIVITY_LED_GPIO`, `RF_ACTIVITY_LED_ACTIVE_HIGH`, and `RF_ACTIVITY_LED_PULSE_MS` configure the feature. GPIO0, GPIO5, GPIO12, and GPIO15 are rejected because external LED wiring on those strapping pins can prevent boot or select an unsafe flash voltage. The selected output must not overlap UART0, flash/PSRAM, or any configured CC1101 pin. An invalid software configuration is nonfatal and never prevents RF reception.
+
 ## Build
 
 Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build:
@@ -58,7 +64,7 @@ tools/verify-production.sh
 
 The verifier uses isolated build and log directories under `/tmp`; it never accesses a serial port or flashes hardware.
 
-To configure pins, center frequency, nominal power, RX inversion, repeat count, or duplicate window:
+To configure pins, center frequency, nominal power, RX inversion, repeat count, duplicate window, or the RF activity LED:
 
 ```bash
 idf.py menuconfig
@@ -177,7 +183,7 @@ Unknown stable repeated frames are printed in copyable form:
 RX RAW start=1 count=20 repeats=3 fingerprint=0x... durations=210,740,330,...
 ```
 
-Repeated observations from one hold are suppressed for 350 ms by default. A single complete decoded frame is accepted only when its capture boundary is trusted and is marked `confidence=single`. Raw fallback requires at least two aligned periods and is never accepted from a truncation-suspected capture. A final delimiter stopped by the 30 ms RMT threshold is treated as censored timing evidence rather than an exact duration.
+Repeated observations from one hold are suppressed for 350 ms by default. The activity LED pulses once per accepted logical `RX` event after this duplicate suppression, so malformed noise and repeated packets from the same button hold do not cause extra flashes. Accepted frames arriving within the 25 ms LED pulse extend it to 25 ms after the newest frame. A single complete decoded frame is accepted only when its capture boundary is trusted and is marked `confidence=single`. Raw fallback requires at least two aligned periods and is never accepted from a truncation-suspected capture. A final delimiter stopped by the 30 ms RMT threshold is treated as censored timing evidence rather than an exact duration.
 
 Control reception with:
 

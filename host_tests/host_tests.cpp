@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <iterator>
 #include <cstdlib>
 
@@ -11,6 +12,7 @@
 #include "rf_codec.hpp"
 #include "rf_console_format.hpp"
 #include "rf_console_parse.hpp"
+#include "rf_activity_led_policy.hpp"
 #include "rf_storage_format.hpp"
 
 namespace {
@@ -319,6 +321,61 @@ void test_console_formatter()
             "pretty Wi-Fi disconnect omits stale state");
 }
 
+void test_rf_activity_led_policy()
+{
+    const int radio_gpios[] = {18, 19, 23, 27, 26, 25};
+    rfbridge::RfActivityLedConfig config{
+        .enabled = true,
+        .gpio = 2,
+        .active_high = true,
+        .pulse_ms = 25,
+    };
+    require(rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,
+                                                       std::size(radio_gpios)),
+            "GPIO2 activity LED defaults are valid");
+    require(rfbridge::rf_activity_led_active_level(config) == 1 &&
+                rfbridge::rf_activity_led_inactive_level(config) == 0 &&
+                rfbridge::rf_activity_led_pulse_us(config) == 25000,
+            "active-high LED levels and pulse conversion are exact");
+    config.active_high = false;
+    require(rfbridge::rf_activity_led_active_level(config) == 0 &&
+                rfbridge::rf_activity_led_inactive_level(config) == 1,
+            "active-low LED levels are exact");
+    config.active_high = true;
+    config.gpio = 25;
+    require(!rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,
+                                                        std::size(radio_gpios)),
+            "activity LED rejects CC1101 pin conflicts");
+    for (const int reserved_gpio : {0, 1, 3, 5, 6, 11, 12, 15, 16, 17, 20, 24, 28, 34}) {
+        config.gpio = reserved_gpio;
+        require(!rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,
+                                                            std::size(radio_gpios)),
+                "activity LED rejects unavailable output GPIO");
+    }
+    config.gpio = 2;
+    config.pulse_ms = rfbridge::kRfActivityLedMinimumPulseMs - 1U;
+    require(!rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,
+                                                        std::size(radio_gpios)),
+            "activity LED rejects short pulses");
+    config.pulse_ms = rfbridge::kRfActivityLedMaximumPulseMs + 1U;
+    require(!rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,
+                                                        std::size(radio_gpios)),
+            "activity LED rejects long pulses");
+    config.enabled = false;
+    config.gpio = -1;
+    require(rfbridge::rf_activity_led_config_is_valid(config, nullptr, 0),
+            "disabled activity LED ignores hardware configuration");
+
+    const rfbridge::RfActivityLedDeadlineDecision pending =
+        rfbridge::rf_activity_led_deadline_decision(1000, 1001);
+    const rfbridge::RfActivityLedDeadlineDecision expired =
+        rfbridge::rf_activity_led_deadline_decision(1000, 1000);
+    require(!pending.turn_off && pending.rearm_us == 1,
+            "activity LED rearms until the latest deadline");
+    require(expired.turn_off && expired.rearm_us == 0,
+            "activity LED turns off at the latest deadline");
+}
+
 void test_learn_deadline_classification()
 {
     using rfbridge::LearnFrameDisposition;
@@ -550,6 +607,7 @@ int main()
     test_protocol_alias_policy();
     test_console_parser();
     test_console_formatter();
+    test_rf_activity_led_policy();
     test_learn_deadline_classification();
     test_storage_format();
     test_wifi_config();

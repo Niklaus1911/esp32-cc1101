@@ -18,6 +18,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "rf_activity_led_private.hpp"
 #include "sdkconfig.h"
 
 namespace rfbridge {
@@ -139,6 +140,7 @@ int64_t s_last_reported_us = 0;
 std::atomic<uint32_t> s_accepted_frames{0};
 std::atomic<uint32_t> s_suppressed_duplicates{0};
 std::atomic<uint32_t> s_truncated_captures{0};
+std::atomic<bool> s_activity_led_warning_logged{false};
 
 class LifecycleGuard {
 public:
@@ -996,6 +998,7 @@ void process_receive_item(const RxQueueItem &item)
     s_has_last_frame = true;
     s_last_reported_us = item.captured_us;
     ++s_accepted_frames;
+    notify_rf_activity_led();
     if (s_frame_callback != nullptr) {
         s_frame_callback(frame, s_callback_context);
     }
@@ -1528,6 +1531,12 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
     s_rx_rearm_required.store(false, std::memory_order_relaxed);
     s_rmt_tx_faulted.store(false, std::memory_order_relaxed);
     s_maintenance_active.store(false, std::memory_order_relaxed);
+
+    const esp_err_t activity_led_error = initialize_rf_activity_led();
+    if (activity_led_error != ESP_OK &&
+        !s_activity_led_warning_logged.exchange(true, std::memory_order_acq_rel)) {
+        ESP_LOGW(kTag, "RX activity LED unavailable: %s", esp_err_to_name(activity_led_error));
+    }
 
     const Cc1101Config radio_config{
         .sclk_gpio = CONFIG_CC1101_SPI_SCLK_GPIO,

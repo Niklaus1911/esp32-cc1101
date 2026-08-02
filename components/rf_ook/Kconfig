@@ -10,4 +10,35 @@ menu "OOK service configuration"
         range 0 2000
         default 350
 
+    config RF_ACTIVITY_LED_ENABLE
+        bool "Blink an activity LED for accepted RF receive frames"
+        default y
+        help
+            Pulses a GPIO after a decoded or raw frame passes validation and duplicate
+            suppression. Official Espressif DevKitC V4 boards do not have a controllable
+            GPIO LED; disable this option or attach an external LED on those boards.
+
+    if RF_ACTIVITY_LED_ENABLE
+
+        config RF_ACTIVITY_LED_GPIO
+            int "RF activity LED GPIO"
+            range 0 33
+            default 2
+            help
+                GPIO2 drives the active-high blue LED on many DOIT/clone DevKit V1 boards.
+                GPIO2 is a boot-strapping pin, so external circuitry must not force an
+                incompatible level during reset. Other ESP32 strapping outputs GPIO0,
+                GPIO5, GPIO12, and GPIO15 are rejected at runtime.
+
+        config RF_ACTIVITY_LED_ACTIVE_HIGH
+            bool "RF activity LED is active-high"
+            default y
+
+        config RF_ACTIVITY_LED_PULSE_MS
+            int "RF activity LED pulse duration (ms)"
+            range 5 250
+            default 25
+
+    endif
+
 endmenu

@@ -124,6 +124,10 @@ require_log_pattern "$PARTITION_INFO_LOG" '^ota_1,app,ota_1,0x200000,1920K,$' 's
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 1$' 'bootloader rollback configuration'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_LOG_COLORS 1$' 'application log colors'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_BOOTLOADER_LOG_COLORS 1$' 'bootloader log colors'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_ENABLE 1$' 'RF activity LED enabled'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_GPIO 2$' 'RF activity LED GPIO2 default'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_ACTIVE_HIGH 1$' 'RF activity LED active-high default'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_PULSE_MS 25$' 'RF activity LED pulse duration'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_PORT 8032$' 'bounded LAN OTA HTTP port'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_TASK_STACK_SIZE 10240$' 'bounded OTA HTTP task stack'
 
