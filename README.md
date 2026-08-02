@@ -69,7 +69,7 @@ Exit the monitor with `Ctrl+]`. The software build and host-test results do not 
 
 ## Serial console
 
-UART0 runs at 115200 baud. Type `help` to list commands. The console uses linenoise dumb mode because RF events arrive asynchronously; command history, arrow-key editing, and tab completion are intentionally disabled so event output cannot corrupt the active input line.
+UART0 runs at 115200 baud. Type `help` to list commands.
 
 ### Receive
 
