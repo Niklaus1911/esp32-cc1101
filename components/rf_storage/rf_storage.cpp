@@ -1,6 +1,8 @@
 #include "rf_storage.hpp"
 #include "rf_storage_rule_backend.hpp"
 
+#include "platform_nvs.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -9,7 +11,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
-#include "nvs_flash.h"
 
 namespace rfbridge {
 namespace {
@@ -271,7 +272,7 @@ esp_err_t initialize_rf_storage()
         return ESP_ERR_NO_MEM;
     }
 
-    const esp_err_t nvs_error = nvs_flash_init();
+    const esp_err_t nvs_error = initialize_platform_nvs();
     esp_err_t code_error = nvs_error;
     esp_err_t rule_error = nvs_error;
     esp_err_t meta_error = nvs_error;

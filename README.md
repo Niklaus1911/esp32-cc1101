@@ -10,7 +10,7 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- No Wi-Fi or MQTT.
+- Optional runtime Wi-Fi station mode with DHCP and direct PC-initiated LAN OTA; MQTT is not included.
 
 ## Hardware
 
@@ -65,7 +65,7 @@ idf.py menuconfig
 # CC1101 RF configuration
 ```
 
-Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. The project defaults to the 4 MB flash detected on the target DevKit; select the real size in `menuconfig` before flashing a board with different flash capacity.
+Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. This firmware targets the classic ESP32 with a 4 MB flash header and a two-slot OTA table. Each application slot is `0x1e0000` bytes.
 
 Flash only when the correct serial port and wiring have been verified:
 
@@ -75,9 +75,65 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 Exit the monitor with `Ctrl+]`. The software build and host-test results do not imply that a particular CC1101 module has been RF-tested.
 
+### One-time OTA partition migration
+
+The first OTA-capable installation must be a wired flash because the previous single-app partition table cannot receive this image over OTA. Back up the existing NVS partition first, then use an ordinary `idf.py flash` without erasing flash:
+
+```bash
+esptool --chip esp32 --port /dev/ttyUSB0 read-flash 0x9000 0x6000 nvs-backup.bin
+idf.py -p /dev/ttyUSB0 flash
+```
+
+The new table deliberately preserves NVS at offset `0x9000` with size `0x6000`, so learned signals, automation rules, logging mode, and other existing NVS records remain in place. It adds `otadata` at `0xf000`, `phy_init` at `0x11000`, and `ota_0`/`ota_1` at `0x20000`/`0x200000`. Do not run `erase-flash` for this migration. Confirm the port, board, backup file, and no-erase procedure before accessing hardware.
+
 ## Serial console
 
 UART0 runs at 115200 baud. Type `help` to list commands.
+
+### Wi-Fi
+
+Wi-Fi is optional and uses station mode with DHCP. With no saved network, the Wi-Fi driver remains off. Configure it from UART:
+
+```text
+wifi status
+wifi scan
+wifi connect <ssid>
+wifi start
+wifi stop
+wifi forget
+```
+
+`wifi connect <ssid>` prompts for a bounded password without echo and does not place the password in command history. An open network uses an empty password. Candidate credentials are committed to the versioned, checksummed `net_cfg/station` NVS record only after DHCP succeeds; a failed candidate leaves the previously saved network unchanged. A valid saved network starts connecting asynchronously after normal console and RF startup on later boots. `wifi stop` is temporary, `wifi start` reconnects the saved network, and `wifi forget` deletes the saved record, stops Wi-Fi, and prevents boot reconnection.
+
+Every successful DHCP connection or reconnection emits:
+
+```text
+WIFI CONNECTED ssid=<ssid> ip=<ip> netmask=<netmask> gateway=<gateway>
+```
+
+Use `wifi status` or the global `status` command for driver, saved-record, DHCP, retry, scan, OTA-lock, persistence-error, and event-drop state. Network failures are nonfatal to RF, storage, automation, and the UART console. Firmware never erases NVS to repair Wi-Fi data; a malformed network record disables only saved-network startup until `wifi forget` or a later successful connection replaces it.
+
+### LAN OTA
+
+When Wi-Fi has a DHCP address, the device serves:
+
+```text
+GET  /api/v1/ota/status
+POST /api/v1/ota
+```
+
+Build and verify the application, then upload it directly from the PC:
+
+```bash
+tools/verify-production.sh
+tools/push-ota.sh <esp32-ip> /tmp/esp32-cc1101-production-build/esp32-cc1101.bin
+```
+
+The upload endpoint requires `application/octet-stream` and an exact positive `Content-Length`. It rejects oversized images and validates the classic ESP32 image header, chip revision bounds, project name, complete ESP-IDF image structure, checksum, and appended hash before selecting the inactive slot. A successful response is sent before a delayed reboot. The next boot confirms the image only after platform/NVS setup, partition sanity, console startup, and bounded RF startup attempts; a crash or reset before confirmation allows the bootloader rollback policy to select the previous slot. External AP availability and CC1101 wiring are not image-health requirements.
+
+OTA temporarily locks disruptive Wi-Fi commands, pauses automation, drains current radio work, and disables RX/TX/replay. A short body, disconnect, timeout, validation failure, or flash-write error aborts the inactive update and restores the prior runtime state. `ota status` and global `status` expose server, slot, progress, rollback, and maintenance cleanup state.
+
+The OTA server is intentionally plain, unauthenticated HTTP for a trusted personal LAN. It provides compatibility and corruption checks, not origin authentication. TLS, passwords, firmware signing, Secure Boot, flash encryption, and eFuse anti-rollback are not enabled. Any host that can reach the OTA port can replace the firmware; do not expose port 8032 to an untrusted network or the Internet.
 
 ### Receive
 
@@ -278,4 +334,4 @@ idf.py -B build build
 # idf.py -B build -p /dev/ttyUSB0 flash monitor
 ```
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed—only the on-device `0 Failures` summary does. The suite covers the hardened decoder vectors, raw matching, parser/deadline bounds, versioned storage records, frequency calculation, and PA selection; CC1101 SPI/RMT lifecycle, NVS persistence across reboot, and RF behavior still require hardware testing. RF timing/range and recovery claims are not proven by compilation alone.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw matching, parser/deadline bounds, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, OTA power interruption, rollback, RF maintenance restoration, timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

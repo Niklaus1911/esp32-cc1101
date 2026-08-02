@@ -16,6 +16,7 @@ struct RfAutomationStatus {
     bool enabled_known = false;
     bool rule_count_known = false;
     bool log_mode_known = false;
+    bool runtime_paused = false;
     RfAutomationLogMode log_mode = RfAutomationLogMode::kActions;
     uint16_t rule_count = 0;
     uint32_t frames_seen = 0;
@@ -46,6 +47,7 @@ esp_err_t rf_automation_list_rules(RfStorageRuleEntry *rules, std::size_t capaci
 esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t capacity, std::size_t *count);
 esp_err_t rf_automation_set_enabled(bool enabled);
 esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode);
+esp_err_t rf_automation_set_runtime_paused(bool paused);
 esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context);
 esp_err_t rf_automation_get_status(RfAutomationStatus *status);
 void rf_automation_on_frame(const RfFrame &frame);

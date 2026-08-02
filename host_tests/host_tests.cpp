@@ -4,6 +4,9 @@
 #include <iterator>
 #include <cstdlib>
 
+#include "network_wifi_config.hpp"
+#include "network_wifi_state.hpp"
+#include "ota_update_policy.hpp"
 #include "rf_automation_engine.hpp"
 #include "rf_codec.hpp"
 #include "rf_console_parse.hpp"
@@ -305,6 +308,59 @@ rfbridge::RfStorageRuleEntry make_rule(const char *trigger, const char *target)
     return entry;
 }
 
+void test_wifi_config()
+{
+    rfbridge::WifiCredentials credentials{};
+    std::strcpy(credentials.ssid, "Workshop WiFi");
+    std::strcpy(credentials.password, "personal-password");
+    uint8_t record[rfbridge::kWifiConfigMaxRecordSize]{};
+    std::size_t size = 0;
+    require(rfbridge::wifi_credentials_are_valid(credentials) &&
+                rfbridge::encode_wifi_config_record(credentials, record, sizeof(record), &size) ==
+                    rfbridge::WifiConfigFormatResult::kOk,
+            "Wi-Fi credentials encode");
+    rfbridge::WifiCredentials decoded{};
+    require(rfbridge::decode_wifi_config_record(record, size, &decoded) ==
+                    rfbridge::WifiConfigFormatResult::kOk &&
+                std::strcmp(decoded.ssid, credentials.ssid) == 0 &&
+                std::strcmp(decoded.password, credentials.password) == 0,
+            "Wi-Fi credentials round trip");
+    record[8] ^= 1U;
+    require(rfbridge::decode_wifi_config_record(record, size, &decoded) ==
+                rfbridge::WifiConfigFormatResult::kInvalidCrc,
+            "Wi-Fi credential CRC rejects corruption");
+    std::strcpy(credentials.password, "short");
+    require(!rfbridge::wifi_credentials_are_valid(credentials), "short Wi-Fi passphrase rejected");
+    credentials.password[0] = '\0';
+    require(rfbridge::wifi_credentials_are_valid(credentials), "open Wi-Fi credentials accepted");
+    require(rfbridge::network_wifi_retry_delay_ms(0) == 0 &&
+                rfbridge::network_wifi_retry_delay_ms(1) == 1000 &&
+                rfbridge::network_wifi_retry_delay_ms(5) == 16000 &&
+                rfbridge::network_wifi_retry_delay_ms(6) == 30000 &&
+                rfbridge::network_wifi_retry_delay_ms(20) == 30000,
+            "Wi-Fi reconnect backoff is bounded");
+    char connected_line[192]{};
+    require(rfbridge::format_network_wifi_connected_line(
+                "Workshop WiFi", 0x2a01a8c0U, 0x00ffffffU, 0x0101a8c0U,
+                connected_line, sizeof(connected_line)) &&
+                std::strcmp(connected_line,
+                            "WIFI CONNECTED ssid=Workshop WiFi ip=192.168.1.42 "
+                            "netmask=255.255.255.0 gateway=192.168.1.1") == 0,
+            "Wi-Fi DHCP success line is stable");
+}
+
+void test_ota_policy()
+{
+    require(rfbridge::ota_http_upload_request_is_valid("application/octet-stream", 4096, 8192, 512) &&
+                !rfbridge::ota_http_upload_request_is_valid("application/json", 4096, 8192, 512) &&
+                !rfbridge::ota_http_upload_request_is_valid("application/octet-stream", 511, 8192, 512) &&
+                !rfbridge::ota_http_upload_request_is_valid("application/octet-stream", 8193, 8192, 512),
+            "OTA HTTP upload policy is strict");
+    require(rfbridge::ota_project_name_is_compatible("esp32-cc1101", "esp32-cc1101") &&
+                !rfbridge::ota_project_name_is_compatible("other", "esp32-cc1101"),
+            "OTA project identity is exact");
+}
+
 void test_automation_rules()
 {
     rfbridge::RfStoredRule rule{};
@@ -400,6 +456,8 @@ int main()
     test_console_parser();
     test_learn_deadline_classification();
     test_storage_format();
+    test_wifi_config();
+    test_ota_policy();
     test_automation_rules();
     std::puts("All host RF tests passed");
     return 0;

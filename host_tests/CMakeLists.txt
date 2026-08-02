@@ -5,6 +5,9 @@ enable_testing()
 
 add_executable(rf_host_tests
     host_tests.cpp
+    ../components/network_wifi/network_wifi_config.cpp
+    ../components/network_wifi/network_wifi_state.cpp
+    ../components/ota_update/ota_update_policy.cpp
     ../components/rf_automation/rf_automation_engine.cpp
     ../components/rf_codec/rf_codec.cpp
     ../components/rf_console/rf_console_parse.cpp
@@ -12,6 +15,8 @@ add_executable(rf_host_tests
     ../components/rf_storage/rf_storage_rule_format.cpp
 )
 target_include_directories(rf_host_tests PRIVATE
+    ../components/network_wifi/include
+    ../components/ota_update/include
     ../components/rf_automation/include
     ../components/rf_codec/include
     ../components/rf_console/include

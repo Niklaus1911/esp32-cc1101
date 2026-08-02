@@ -72,6 +72,8 @@ enum class RadioCommandType : uint8_t {
     kGetLast,
     kGetStatus,
     kReset,
+    kEnterMaintenance,
+    kExitMaintenance,
     kStop,
 };
 
@@ -115,6 +117,8 @@ void *s_callback_context = nullptr;
 std::atomic<ServiceState> s_service_state{ServiceState::kStopped};
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_transmitting{false};
+std::atomic<bool> s_maintenance_requested{false};
+std::atomic<bool> s_maintenance_active{false};
 std::atomic<bool> s_rx_rearm_required{false};
 std::atomic<bool> s_rmt_tx_faulted{false};
 std::atomic<uint32_t> s_rx_generation{0};
@@ -677,7 +681,9 @@ bool IRAM_ATTR rx_done_callback(rmt_channel_handle_t, const rmt_rx_done_event_da
 esp_err_t arm_receiver_owned()
 {
     if (s_rx_channel == nullptr || !s_receive_enabled || s_receive_active ||
-        s_transmitting.load(std::memory_order_relaxed) || !s_running.load(std::memory_order_relaxed)) {
+        s_transmitting.load(std::memory_order_relaxed) ||
+        s_maintenance_active.load(std::memory_order_relaxed) ||
+        !s_running.load(std::memory_order_relaxed)) {
         return ESP_ERR_INVALID_STATE;
     }
     const std::size_t buffer_index = s_next_rx_buffer;
@@ -753,7 +759,8 @@ esp_err_t set_receive_enabled_owned(bool enabled)
 
 void recover_dropped_receive_owned()
 {
-    if (!s_rx_rearm_required.exchange(false, std::memory_order_acq_rel)) {
+    if (!s_rx_rearm_required.exchange(false, std::memory_order_acq_rel) ||
+        s_maintenance_requested.load(std::memory_order_acquire)) {
         return;
     }
     ESP_LOGW(kTag, "Recovering RX after a completed capture could not be queued");
@@ -833,6 +840,9 @@ esp_err_t transmit_symbols_owned(const rmt_symbol_word_t *symbols, std::size_t c
     if (symbols == nullptr || count == 0 || repeats == 0 || repeats > 20 || s_tx_channel == nullptr ||
         s_copy_encoder == nullptr) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (s_maintenance_requested.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
     }
     uint64_t frame_duration_us = 0;
     for (std::size_t index = 0; index < count; ++index) {
@@ -930,6 +940,7 @@ esp_err_t transmit_raw_owned(const RawSignal &raw, uint16_t repeats)
 void process_receive_item(const RxQueueItem &item)
 {
     if (!s_receive_enabled || s_transmitting.load(std::memory_order_relaxed) ||
+        s_maintenance_requested.load(std::memory_order_relaxed) ||
         item.generation != s_rx_generation.load(std::memory_order_relaxed)) {
         return;
     }
@@ -997,6 +1008,7 @@ void fill_software_status(RfRadioStatus *status)
     status->receive_enabled = s_receive_enabled.load(std::memory_order_relaxed);
     status->receive_active = s_receive_active.load(std::memory_order_relaxed);
     status->transmitting = s_transmitting.load(std::memory_order_relaxed);
+    status->maintenance_active = s_maintenance_requested.load(std::memory_order_relaxed);
     status->has_last_frame = s_has_last_frame.load(std::memory_order_relaxed);
     status->accepted_frames = s_accepted_frames.load(std::memory_order_relaxed);
     status->suppressed_duplicates = s_suppressed_duplicates.load(std::memory_order_relaxed);
@@ -1082,6 +1094,33 @@ bool execute_command(const RadioCommand &command)
             }
             break;
         }
+        case RadioCommandType::kEnterMaintenance: {
+            if (s_maintenance_active.exchange(true, std::memory_order_acq_rel)) {
+                reply.result = ESP_ERR_INVALID_STATE;
+                break;
+            }
+            const esp_err_t receive_error = stop_rmt_receive_owned();
+            const esp_err_t idle_error = s_radio.enter_idle(50);
+            reply.result = receive_error != ESP_OK ? receive_error : idle_error;
+            if (reply.result != ESP_OK) {
+                s_maintenance_active.store(false, std::memory_order_release);
+                if (s_receive_enabled) {
+                    restore_receive_owned();
+                }
+            }
+            break;
+        }
+        case RadioCommandType::kExitMaintenance:
+            if (!s_maintenance_active.load(std::memory_order_acquire)) {
+                reply.result = ESP_ERR_INVALID_STATE;
+                break;
+            }
+            s_maintenance_active.store(false, std::memory_order_release);
+            reply.result = s_receive_enabled ? restore_receive_owned() : s_radio.enter_idle(50);
+            if (reply.result != ESP_OK) {
+                s_maintenance_active.store(true, std::memory_order_release);
+            }
+            break;
         case RadioCommandType::kStop: {
             const esp_err_t receive_error = stop_rmt_receive_owned();
             const esp_err_t idle_error = s_radio.enter_idle(50);
@@ -1125,7 +1164,8 @@ void radio_task(void *)
             }
         }
         recover_dropped_receive_owned();
-        if (ready == nullptr && s_receive_enabled && !s_receive_active) {
+        if (ready == nullptr && s_receive_enabled && !s_receive_active &&
+            !s_maintenance_requested.load(std::memory_order_relaxed)) {
             const esp_err_t recovery_error = restore_receive_owned();
             if (recovery_error != ESP_OK) {
                 ESP_LOGW(kTag, "Periodic RX recovery failed: %s", esp_err_to_name(recovery_error));
@@ -1280,6 +1320,7 @@ esp_err_t cleanup_resources()
     }
     s_frame_callback = nullptr;
     s_callback_context = nullptr;
+    s_maintenance_active.store(false, std::memory_order_release);
     set_active_command(0, CommandState::kIdle);
     s_service_state.store(ServiceState::kStopped, std::memory_order_release);
     return cleanup_error;
@@ -1301,8 +1342,19 @@ bool capture_input_is_valid(const uint8_t *levels, const uint16_t *durations, st
     return true;
 }
 
+bool command_is_blocked_by_maintenance(RadioCommandType type)
+{
+    return type == RadioCommandType::kSetReceive || type == RadioCommandType::kTransmitDecoded ||
+           type == RadioCommandType::kTransmitRaw || type == RadioCommandType::kReplayLast ||
+           type == RadioCommandType::kReset;
+}
+
 esp_err_t send_command(RadioCommand command, RadioReply *reply, bool internal = false)
 {
+    if (s_maintenance_requested.load(std::memory_order_acquire) &&
+        command_is_blocked_by_maintenance(command.type)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     const ServiceState initial_state = s_service_state.load(std::memory_order_acquire);
     if ((!internal && initial_state != ServiceState::kRunning) ||
         (internal && initial_state == ServiceState::kStopped) || s_api_mutex == nullptr ||
@@ -1317,7 +1369,9 @@ esp_err_t send_command(RadioCommand command, RadioReply *reply, bool internal = 
     const ServiceState locked_state = s_service_state.load(std::memory_order_acquire);
     if ((!internal && locked_state != ServiceState::kRunning) ||
         (internal && locked_state == ServiceState::kStopped) || s_command_queue == nullptr ||
-        s_reply_queue == nullptr || !s_running.load(std::memory_order_acquire)) {
+        s_reply_queue == nullptr || !s_running.load(std::memory_order_acquire) ||
+        (s_maintenance_requested.load(std::memory_order_acquire) &&
+         command_is_blocked_by_maintenance(command.type))) {
         xSemaphoreGive(s_api_mutex);
         return ESP_ERR_INVALID_STATE;
     }
@@ -1432,7 +1486,8 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
     if (callback == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_service_state.load(std::memory_order_acquire) != ServiceState::kStopped ||
+    if (s_maintenance_requested.load(std::memory_order_acquire) ||
+        s_service_state.load(std::memory_order_acquire) != ServiceState::kStopped ||
         s_running.load(std::memory_order_relaxed) ||
         s_radio_task.load(std::memory_order_acquire) != nullptr || s_rx_queue != nullptr) {
         return ESP_ERR_INVALID_STATE;
@@ -1472,6 +1527,7 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
     s_command_timeouts.store(0, std::memory_order_relaxed);
     s_rx_rearm_required.store(false, std::memory_order_relaxed);
     s_rmt_tx_faulted.store(false, std::memory_order_relaxed);
+    s_maintenance_active.store(false, std::memory_order_relaxed);
 
     const Cc1101Config radio_config{
         .sclk_gpio = CONFIG_CC1101_SPI_SCLK_GPIO,
@@ -1648,6 +1704,63 @@ esp_err_t reset_rf_radio()
     RadioCommand command{};
     command.type = RadioCommandType::kReset;
     return send_command(command, nullptr);
+}
+
+esp_err_t begin_rf_maintenance()
+{
+    bool expected = false;
+    if (!s_maintenance_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired()) {
+        s_maintenance_requested.store(false, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const ServiceState state = s_service_state.load(std::memory_order_acquire);
+    if (state == ServiceState::kStopped) {
+        return ESP_OK;
+    }
+    if (state != ServiceState::kRunning) {
+        s_maintenance_requested.store(false, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    RadioCommand command{};
+    command.type = RadioCommandType::kEnterMaintenance;
+    const esp_err_t error = send_command(command, nullptr, true);
+    if (error != ESP_OK) {
+        s_maintenance_requested.store(false, std::memory_order_release);
+    }
+    return error;
+}
+
+esp_err_t end_rf_maintenance()
+{
+    if (!s_maintenance_requested.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const ServiceState state = s_service_state.load(std::memory_order_acquire);
+    esp_err_t error = ESP_OK;
+    if (state == ServiceState::kRunning) {
+        RadioCommand command{};
+        command.type = RadioCommandType::kExitMaintenance;
+        error = send_command(command, nullptr, true);
+    } else if (state != ServiceState::kStopped) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (error == ESP_OK) {
+        s_maintenance_requested.store(false, std::memory_order_release);
+    }
+    return error;
+}
+
+bool rf_maintenance_is_active()
+{
+    return s_maintenance_requested.load(std::memory_order_acquire);
 }
 
 }  // namespace rfbridge

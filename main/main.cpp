@@ -2,6 +2,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "network_wifi.hpp"
+#include "ota_update.hpp"
+#include "platform_nvs.hpp"
 #include "rf_automation.hpp"
 #include "rf_console.hpp"
 #include "rf_ook.hpp"
@@ -11,19 +14,39 @@ namespace {
 
 constexpr char kTag[] = "app";
 
+void network_online_changed(bool online, void *)
+{
+    rfbridge::set_ota_network_online(online);
+}
+
 }  // namespace
 
 extern "C" void app_main(void)
 {
+    const esp_err_t nvs_error = rfbridge::initialize_platform_nvs();
+    if (nvs_error != ESP_OK) {
+        ESP_LOGE(kTag, "Platform NVS unavailable: %s; NVS was not erased", esp_err_to_name(nvs_error));
+    }
     const esp_err_t storage_error = rfbridge::initialize_rf_storage();
     if (storage_error != ESP_OK) {
         ESP_LOGE(kTag, "Persistent RF storage unavailable: %s; NVS was not erased",
                  esp_err_to_name(storage_error));
     }
+    const esp_err_t network_error = rfbridge::initialize_network_wifi();
+    if (network_error != ESP_OK) {
+        ESP_LOGE(kTag, "Optional Wi-Fi unavailable: %s", esp_err_to_name(network_error));
+    }
     const esp_err_t automation_error = rfbridge::initialize_rf_automation();
     if (automation_error != ESP_OK) {
         ESP_LOGE(kTag, "RF automation unavailable: %s; ordinary RF remains enabled",
                  esp_err_to_name(automation_error));
+    }
+    const esp_err_t ota_error = rfbridge::initialize_ota_update();
+    if (ota_error != ESP_OK) {
+        ESP_LOGE(kTag, "LAN OTA unavailable: %s", esp_err_to_name(ota_error));
+    }
+    if (network_error == ESP_OK && ota_error == ESP_OK) {
+        ESP_ERROR_CHECK(rfbridge::set_network_wifi_online_sink(network_online_changed, nullptr));
     }
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;
@@ -43,5 +66,18 @@ extern "C" void app_main(void)
     }
     if (error != ESP_OK) {
         ESP_LOGE(kTag, "RF remains stopped; fix wiring and use 'radio start' to retry");
+    }
+    if (ota_error == ESP_OK) {
+        const esp_err_t confirm_error = rfbridge::confirm_running_ota_image();
+        if (confirm_error != ESP_OK) {
+            ESP_LOGE(kTag, "Could not confirm the running OTA image: %s", esp_err_to_name(confirm_error));
+        }
+    }
+    if (network_error == ESP_OK) {
+        const esp_err_t start_wifi_error = rfbridge::start_saved_network_wifi();
+        if (start_wifi_error != ESP_OK && start_wifi_error != ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(kTag, "Could not queue saved Wi-Fi connection: %s",
+                     esp_err_to_name(start_wifi_error));
+        }
     }
 }

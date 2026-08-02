@@ -6,12 +6,17 @@
 #include <memory>
 #include <new>
 
+#include <sys/select.h>
+#include <unistd.h>
+
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "network_wifi.hpp"
+#include "ota_update.hpp"
 #include "rf_automation.hpp"
 #include "rf_console_parse.hpp"
 #include "rf_storage.hpp"
@@ -31,7 +36,10 @@ constexpr int64_t kLearnTimeoutUs = 30000000;
 constexpr TickType_t kLearnEnqueueWaitTicks = pdMS_TO_TICKS(100);
 constexpr UBaseType_t kFrameEventQueueDepth = 8;
 constexpr UBaseType_t kAutomationLogQueueDepth = 8;
+constexpr UBaseType_t kNetworkEventQueueDepth = 8;
+constexpr UBaseType_t kOtaEventQueueDepth = 8;
 constexpr std::size_t kAutomationLogLineSize = 256;
+constexpr std::size_t kSystemEventLineSize = 256;
 constexpr uint32_t kCallbackQuiesceAttempts = 100;
 
 enum class ConsoleEventType : uint8_t {
@@ -56,9 +64,13 @@ struct PendingLearn {
 
 QueueHandle_t s_event_queue = nullptr;
 QueueHandle_t s_automation_log_queue = nullptr;
+QueueHandle_t s_network_event_queue = nullptr;
+QueueHandle_t s_ota_event_queue = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
 esp_console_repl_t *s_repl = nullptr;
 bool s_repl_started = false;
+bool s_network_sink_registered = false;
+bool s_ota_sink_registered = false;
 std::atomic<bool> s_started{false};
 std::atomic_flag s_starting = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> s_frame_queue_drops{0};
@@ -80,6 +92,14 @@ bool append_to_line(char *line, std::size_t capacity, std::size_t *length, const
     }
     *length += static_cast<std::size_t>(written);
     return true;
+}
+
+void format_ipv4(uint32_t address, char *output, std::size_t capacity)
+{
+    std::snprintf(output, capacity, "%u.%u.%u.%u", static_cast<unsigned>(address & 0xffU),
+                  static_cast<unsigned>((address >> 8U) & 0xffU),
+                  static_cast<unsigned>((address >> 16U) & 0xffU),
+                  static_cast<unsigned>((address >> 24U) & 0xffU));
 }
 
 void print_frame(const char *prefix, const RfFrame &frame)
@@ -259,6 +279,101 @@ bool enqueue_automation_log_event(const RfAutomationEvent &event, void *)
     return true;
 }
 
+void process_network_event(const NetworkWifiEvent &event)
+{
+    char line[kSystemEventLineSize]{};
+    switch (event.type) {
+        case NetworkWifiEventType::kConnected:
+            if (format_network_wifi_connected_line(event.ssid, event.ip, event.netmask, event.gateway,
+                                                   line, sizeof(line))) {
+                std::printf("\n%s\n", line);
+            }
+            if (event.error != ESP_OK) {
+                std::printf("WIFI SAVE ERROR error=%s (0x%x)\n", esp_err_to_name(event.error),
+                            static_cast<unsigned>(event.error));
+            }
+            break;
+        case NetworkWifiEventType::kDisconnected:
+            std::printf("\nWIFI DISCONNECTED ssid=%s reason=%ld state=%s\n", event.ssid,
+                        static_cast<long>(event.reason), network_wifi_state_name(event.state));
+            break;
+        case NetworkWifiEventType::kScanResult:
+            std::printf("\nWIFI AP ssid=%s rssi=%d channel=%u auth=%u\n", event.ssid, event.rssi,
+                        event.channel, event.auth_mode);
+            break;
+        case NetworkWifiEventType::kScanCompleted:
+            std::printf("\nWIFI SCAN COMPLETE count=%ld\n", static_cast<long>(event.reason));
+            break;
+        case NetworkWifiEventType::kError:
+            std::printf("\nWIFI ERROR state=%s error=%s (0x%x)\n", network_wifi_state_name(event.state),
+                        esp_err_to_name(event.error), static_cast<unsigned>(event.error));
+            break;
+        case NetworkWifiEventType::kStateChanged:
+            std::printf("\nWIFI STATE state=%s\n", network_wifi_state_name(event.state));
+            break;
+    }
+    std::fflush(stdout);
+}
+
+bool enqueue_network_event(const NetworkWifiEvent &event, void *)
+{
+    if (s_network_event_queue == nullptr || xQueueSend(s_network_event_queue, &event, 0) != pdTRUE) {
+        return false;
+    }
+    if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
+    }
+    return true;
+}
+
+void process_ota_event(const OtaUpdateEvent &event)
+{
+    switch (event.type) {
+        case OtaUpdateEventType::kServerStarted: {
+            NetworkWifiStatus wifi{};
+            OtaUpdateStatus ota{};
+            char ip[16]{};
+            if (get_network_wifi_status(&wifi) == ESP_OK && get_ota_update_status(&ota) == ESP_OK) {
+                format_ipv4(wifi.ip, ip, sizeof(ip));
+                std::printf("\nOTA READY url=http://%s:%u/api/v1/ota\n", ip, ota.port);
+            }
+            break;
+        }
+        case OtaUpdateEventType::kServerStopped:
+            std::printf("\nOTA SERVER STOPPED\n");
+            break;
+        case OtaUpdateEventType::kProgress:
+            std::printf("\nOTA PROGRESS bytes=%lu total=%lu\n",
+                        static_cast<unsigned long>(event.bytes_received),
+                        static_cast<unsigned long>(event.content_length));
+            break;
+        case OtaUpdateEventType::kCompleted:
+            std::printf("\nOTA COMPLETE version=%s bytes=%lu rebooting=1\n", event.candidate_version,
+                        static_cast<unsigned long>(event.bytes_received));
+            break;
+        case OtaUpdateEventType::kFailed:
+            std::printf("\nOTA ERROR error=%s (0x%x) maintenance_error=%s (0x%x) bytes=%lu total=%lu\n",
+                        esp_err_to_name(event.error), static_cast<unsigned>(event.error),
+                        esp_err_to_name(event.maintenance_error),
+                        static_cast<unsigned>(event.maintenance_error),
+                        static_cast<unsigned long>(event.bytes_received),
+                        static_cast<unsigned long>(event.content_length));
+            break;
+    }
+    std::fflush(stdout);
+}
+
+bool enqueue_ota_event(const OtaUpdateEvent &event, void *)
+{
+    if (s_ota_event_queue == nullptr || xQueueSend(s_ota_event_queue, &event, 0) != pdTRUE) {
+        return false;
+    }
+    if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
+    }
+    return true;
+}
+
 TickType_t learn_wait_ticks(int64_t remaining_us)
 {
     const uint64_t ticks = (static_cast<uint64_t>(remaining_us) * configTICK_RATE_HZ + 999999U) / 1000000U;
@@ -302,6 +417,16 @@ void event_worker_task(void *)
             wait_ticks = learn_wait_ticks(pending.deadline_us - now_us);
         }
 
+        NetworkWifiEvent network_event{};
+        if (xQueueReceive(s_network_event_queue, &network_event, 0) == pdTRUE) {
+            process_network_event(network_event);
+            continue;
+        }
+        OtaUpdateEvent ota_event{};
+        if (xQueueReceive(s_ota_event_queue, &ota_event, 0) == pdTRUE) {
+            process_ota_event(ota_event);
+            continue;
+        }
         RfAutomationEvent log_event{};
         if (xQueueReceive(s_automation_log_queue, &log_event, 0) == pdTRUE) {
             process_automation_log_event(log_event);
@@ -338,9 +463,10 @@ int status_command(int argc, char **)
     if (error != ESP_OK) {
         return print_result("status", error);
     }
-    std::printf("STATUS running=%u rx_enabled=%u rx_active=%u tx=%u has_last=%u accepted=%lu duplicates=%lu rx_drops=%lu truncated=%lu command_timeouts=%lu console_drops=%lu\n",
+    std::printf("STATUS running=%u rx_enabled=%u rx_active=%u tx=%u maintenance=%u has_last=%u accepted=%lu duplicates=%lu rx_drops=%lu truncated=%lu command_timeouts=%lu console_drops=%lu\n",
                 status.running, status.receive_enabled, status.receive_active, status.transmitting,
-                status.has_last_frame, static_cast<unsigned long>(status.accepted_frames),
+                status.maintenance_active, status.has_last_frame,
+                static_cast<unsigned long>(status.accepted_frames),
                 static_cast<unsigned long>(status.suppressed_duplicates),
                 static_cast<unsigned long>(status.rx_queue_drops),
                 static_cast<unsigned long>(status.truncated_captures),
@@ -376,8 +502,8 @@ int status_command(int argc, char **)
                     static_cast<unsigned long>(automation.log_events),
                     static_cast<unsigned long>(automation.log_drops));
     } else {
-        std::printf("AUTOMATION available=1 enabled=%u rules=%u log_mode=%s frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu log_events=%lu log_drops=%lu last_error=%s last_trigger=%s last_target=%s\n",
-                    automation.enabled, automation.rule_count,
+        std::printf("AUTOMATION available=1 enabled=%u paused=%u rules=%u log_mode=%s frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu log_events=%lu log_drops=%lu last_error=%s last_trigger=%s last_target=%s\n",
+                    automation.enabled, automation.runtime_paused, automation.rule_count,
                     rf_automation_log_mode_name(automation.log_mode),
                     static_cast<unsigned long>(automation.frames_seen),
                     static_cast<unsigned long>(automation.stale_frames),
@@ -392,7 +518,154 @@ int status_command(int argc, char **)
                     automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
                     automation.last_target[0] == '\0' ? "-" : automation.last_target);
     }
+    NetworkWifiStatus wifi{};
+    const esp_err_t wifi_error = get_network_wifi_status(&wifi);
+    if (wifi_error != ESP_OK) {
+        std::printf("WIFI available=0 error=%s (0x%x)\n", esp_err_to_name(wifi_error),
+                    static_cast<unsigned>(wifi_error));
+    } else {
+        char ip[16]{};
+        char netmask[16]{};
+        char gateway[16]{};
+        char dns[16]{};
+        format_ipv4(wifi.ip, ip, sizeof(ip));
+        format_ipv4(wifi.netmask, netmask, sizeof(netmask));
+        format_ipv4(wifi.gateway, gateway, sizeof(gateway));
+        format_ipv4(wifi.dns, dns, sizeof(dns));
+        std::printf("WIFI available=%u state=%s driver=%u started=%u saved_known=%u saved=%u active_saved=%u ota_locked=%u ssid=%s saved_ssid=%s ip=%s netmask=%s gateway=%s dns=%s rssi=%d retries=%lu reason=%ld persistence=%s last_error=%s drops=%lu\n",
+                    wifi.available, network_wifi_state_name(wifi.state), wifi.driver_initialized,
+                    wifi.driver_started, wifi.saved_known, wifi.saved, wifi.active_saved,
+                    wifi.ota_locked, wifi.active_ssid[0] == '\0' ? "-" : wifi.active_ssid,
+                    wifi.saved_ssid[0] == '\0' ? "-" : wifi.saved_ssid, ip, netmask, gateway,
+                    dns, wifi.rssi, static_cast<unsigned long>(wifi.retry_count),
+                    static_cast<long>(wifi.disconnect_reason), esp_err_to_name(wifi.persistence_error),
+                    esp_err_to_name(wifi.last_error), static_cast<unsigned long>(wifi.event_drops));
+    }
+
+    OtaUpdateStatus ota{};
+    const esp_err_t ota_error = get_ota_update_status(&ota);
+    if (ota_error != ESP_OK) {
+        std::printf("OTA available=0 error=%s (0x%x)\n", esp_err_to_name(ota_error),
+                    static_cast<unsigned>(ota_error));
+    } else {
+        std::printf("OTA available=%u state=%s server=%u upload=%u port=%u running=%s update=%s version=%s candidate=%s bytes=%lu total=%lu pending_verify=%u rollback=%u last_error=%s maintenance_error=%s\n",
+                    ota.available, ota_update_state_name(ota.state), ota.server_running,
+                    ota.upload_active, ota.port, ota.running_partition, ota.update_partition,
+                    ota.running_version, ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
+                    static_cast<unsigned long>(ota.bytes_received),
+                    static_cast<unsigned long>(ota.content_length), ota.pending_verification,
+                     ota.rollback_possible, esp_err_to_name(ota.last_error),
+                     esp_err_to_name(ota.maintenance_error));
+    }
     return 0;
+}
+
+bool read_wifi_password(WifiCredentials *credentials)
+{
+    char input[kWifiPasswordCapacity]{};
+    const int input_fd = fileno(stdin);
+    if (input_fd < 0) {
+        std::printf("ERROR wifi password input unavailable\n");
+        return false;
+    }
+
+    std::printf("WiFi password: ");
+    std::fflush(stdout);
+    std::size_t length = 0;
+    bool too_long = false;
+    while (true) {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(input_fd, &read_set);
+        const int ready = select(input_fd + 1, &read_set, nullptr, nullptr, nullptr);
+        if (ready < 0) {
+            std::memset(input, 0, sizeof(input));
+            std::printf("\nERROR wifi password input failed\n");
+            return false;
+        }
+
+        uint8_t value = 0;
+        const ssize_t received = read(input_fd, &value, sizeof(value));
+        if (received <= 0) {
+            continue;
+        }
+        if (value == '\r' || value == '\n') {
+            break;
+        }
+        if (value == 0x03U) {
+            std::memset(input, 0, sizeof(input));
+            std::printf("\nERROR wifi password input cancelled\n");
+            return false;
+        }
+        if (value == 0x08U || value == 0x7fU) {
+            if (!too_long && length > 0) {
+                input[--length] = '\0';
+            }
+            continue;
+        }
+        if (too_long || length + 1U >= sizeof(input)) {
+            too_long = true;
+            continue;
+        }
+        input[length++] = static_cast<char>(value);
+    }
+
+    if (too_long) {
+        std::memset(input, 0, sizeof(input));
+        std::printf("\nERROR wifi password is too long\n");
+        return false;
+    }
+    std::memcpy(credentials->password, input, length + 1U);
+    std::memset(input, 0, sizeof(input));
+    std::printf("\n");
+    return true;
+}
+
+int wifi_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
+        return status_command(1, argv);
+    }
+    if (argc == 2 && std::strcmp(argv[1], "start") == 0) {
+        return print_result("wifi start", start_saved_network_wifi());
+    }
+    if (argc == 2 && std::strcmp(argv[1], "stop") == 0) {
+        return print_result("wifi stop", stop_network_wifi());
+    }
+    if (argc == 2 && std::strcmp(argv[1], "forget") == 0) {
+        return print_result("wifi forget", forget_network_wifi());
+    }
+    if (argc == 2 && std::strcmp(argv[1], "scan") == 0) {
+        return print_result("wifi scan", scan_network_wifi());
+    }
+    if (argc == 3 && std::strcmp(argv[1], "connect") == 0) {
+        const std::size_t ssid_length = std::strlen(argv[2]);
+        if (ssid_length == 0 || ssid_length >= kWifiSsidCapacity) {
+            std::printf("ERROR wifi SSID must contain 1..32 printable characters\n");
+            return 1;
+        }
+        WifiCredentials credentials{};
+        std::memcpy(credentials.ssid, argv[2], ssid_length + 1U);
+        if (!read_wifi_password(&credentials) || !wifi_credentials_are_valid(credentials)) {
+            std::memset(&credentials, 0, sizeof(credentials));
+            std::printf("ERROR wifi password must be empty, 8..63 printable characters, or 64 hex digits\n");
+            return 1;
+        }
+        const esp_err_t error = connect_network_wifi(credentials);
+        std::memset(&credentials, 0, sizeof(credentials));
+        return print_result("wifi connect", error);
+    }
+    std::printf("usage: wifi <status|connect <ssid>|start|stop|forget|scan>\n");
+    return 1;
+}
+
+int ota_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
+        return status_command(1, argv);
+    }
+    std::printf("usage: ota status (updates are uploaded from the PC HTTP client)\n");
+    return 1;
 }
 
 int radio_command(int argc, char **argv)
@@ -811,7 +1084,9 @@ struct CommandDefinition {
 };
 
 constexpr CommandDefinition kCommands[] = {
-    {"status", "Show RF and CC1101 diagnostics", nullptr, status_command},
+    {"status", "Show RF, network, and OTA diagnostics", nullptr, status_command},
+    {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
+    {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
     {"rx", "Enable or disable reception", "<on|off>", rx_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
@@ -870,11 +1145,29 @@ void cleanup_failed_start(std::size_t registered_count)
         vTaskDelay(1);
         sink_error = rf_automation_set_event_sink(nullptr, nullptr);
     }
-    const bool sink_detached = sink_error == ESP_OK;
-    const bool safe_to_delete_events = sink_detached && callbacks_quiesced;
-    if (!sink_detached) {
+    const bool automation_sink_detached = sink_error == ESP_OK;
+    if (!automation_sink_detached) {
         ESP_LOGE(kTag, "Could not detach automation log sink: %s; retaining event queues",
                  esp_err_to_name(sink_error));
+    }
+    esp_err_t network_sink_error = ESP_OK;
+    if (s_network_sink_registered) {
+        network_sink_error = set_network_wifi_event_sink(nullptr, nullptr);
+        if (network_sink_error == ESP_OK) {
+            s_network_sink_registered = false;
+        }
+    }
+    esp_err_t ota_sink_error = ESP_OK;
+    if (s_ota_sink_registered) {
+        ota_sink_error = set_ota_update_event_sink(nullptr, nullptr);
+        if (ota_sink_error == ESP_OK) {
+            s_ota_sink_registered = false;
+        }
+    }
+    const bool safe_to_delete_events = automation_sink_detached && network_sink_error == ESP_OK &&
+                                       ota_sink_error == ESP_OK && callbacks_quiesced;
+    if (network_sink_error != ESP_OK || ota_sink_error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not detach network/OTA event sinks; retaining event queues");
     }
 
     if (safe_to_delete_events && s_event_worker_task != nullptr) {
@@ -888,6 +1181,14 @@ void cleanup_failed_start(std::size_t registered_count)
     if (safe_to_delete_events && s_automation_log_queue != nullptr) {
         vQueueDelete(s_automation_log_queue);
         s_automation_log_queue = nullptr;
+    }
+    if (safe_to_delete_events && s_network_event_queue != nullptr) {
+        vQueueDelete(s_network_event_queue);
+        s_network_event_queue = nullptr;
+    }
+    if (safe_to_delete_events && s_ota_event_queue != nullptr) {
+        vQueueDelete(s_ota_event_queue);
+        s_ota_event_queue = nullptr;
     }
 
     deregister_commands(registered_count);
@@ -929,7 +1230,8 @@ esp_err_t start_rf_console()
         return ESP_ERR_INVALID_STATE;
     }
     if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
-        s_automation_log_queue != nullptr || s_event_worker_task != nullptr) {
+        s_automation_log_queue != nullptr || s_network_event_queue != nullptr ||
+        s_ota_event_queue != nullptr || s_event_worker_task != nullptr) {
         s_starting.clear(std::memory_order_release);
         return ESP_ERR_INVALID_STATE;
     }
@@ -956,7 +1258,10 @@ esp_err_t start_rf_console()
 
     s_event_queue = xQueueCreate(kFrameEventQueueDepth, sizeof(ConsoleEvent));
     s_automation_log_queue = xQueueCreate(kAutomationLogQueueDepth, sizeof(RfAutomationEvent));
-    if (s_event_queue == nullptr || s_automation_log_queue == nullptr) {
+    s_network_event_queue = xQueueCreate(kNetworkEventQueueDepth, sizeof(NetworkWifiEvent));
+    s_ota_event_queue = xQueueCreate(kOtaEventQueueDepth, sizeof(OtaUpdateEvent));
+    if (s_event_queue == nullptr || s_automation_log_queue == nullptr ||
+        s_network_event_queue == nullptr || s_ota_event_queue == nullptr) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
     s_frame_queue_drops.store(0, std::memory_order_relaxed);
@@ -969,6 +1274,22 @@ esp_err_t start_rf_console()
     if (error != ESP_OK) {
         ESP_LOGE(kTag, "Could not register automation log sink: %s", esp_err_to_name(error));
         return fail_start(error, registered_count);
+    }
+    NetworkWifiStatus network_status{};
+    if (get_network_wifi_status(&network_status) == ESP_OK && network_status.available) {
+        error = set_network_wifi_event_sink(enqueue_network_event, nullptr);
+        if (error != ESP_OK) {
+            return fail_start(error, registered_count);
+        }
+        s_network_sink_registered = true;
+    }
+    OtaUpdateStatus ota_status{};
+    if (get_ota_update_status(&ota_status) == ESP_OK && ota_status.available) {
+        error = set_ota_update_event_sink(enqueue_ota_event, nullptr);
+        if (error != ESP_OK) {
+            return fail_start(error, registered_count);
+        }
+        s_ota_sink_registered = true;
     }
 
     error = esp_console_start_repl(s_repl);

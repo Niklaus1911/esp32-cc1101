@@ -34,6 +34,7 @@ struct RfRadioStatus {
     bool receive_enabled;
     bool receive_active;
     bool transmitting;
+    bool maintenance_active;
     bool has_last_frame;
     uint32_t accepted_frames;
     uint32_t suppressed_duplicates;
@@ -56,6 +57,9 @@ esp_err_t replay_last_rf_frame(uint16_t repeats);
 esp_err_t get_last_rf_frame(RfFrame *frame);
 esp_err_t get_rf_radio_status(RfRadioStatus *status);
 esp_err_t reset_rf_radio();
+esp_err_t begin_rf_maintenance();
+esp_err_t end_rf_maintenance();
+bool rf_maintenance_is_active();
 
 bool decode_rf_pulses(const uint8_t *levels, const uint16_t *durations_us, std::size_t count, RfFrame *frame,
                       bool capture_may_be_truncated = false, bool capture_started_after_idle = false);

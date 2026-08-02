@@ -76,6 +76,7 @@ std::atomic<bool> s_initialization_started{false};
 std::atomic<bool> s_initialization_finished{false};
 std::atomic<bool> s_available{false};
 std::atomic<bool> s_enabled{false};
+std::atomic<bool> s_runtime_paused{false};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<int64_t> s_generation_changed_us{0};
 std::atomic<uint32_t> s_queue_drops{0};
@@ -246,7 +247,8 @@ void process_frame(const FrameEvent &event)
 {
     AutomationLock lock;
     if (!lock.locked() || !s_available.load(std::memory_order_acquire) ||
-        !s_enabled.load(std::memory_order_relaxed)) {
+        !s_enabled.load(std::memory_order_relaxed) ||
+        s_runtime_paused.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -449,6 +451,7 @@ esp_err_t initialize_rf_automation()
         s_last_reported_queue_drops = 0;
         s_next_action_id = 0;
         s_enabled.store(enabled, std::memory_order_release);
+        s_runtime_paused.store(false, std::memory_order_release);
         s_log_mode = static_cast<RfAutomationLogMode>(persisted_log_mode);
         s_generation.store(1, std::memory_order_release);
         s_generation_changed_us.store(esp_timer_get_time(), std::memory_order_release);
@@ -472,6 +475,9 @@ esp_err_t initialize_rf_automation()
 
 esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_name, uint8_t repeats)
 {
+    if (s_runtime_paused.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_available.load(std::memory_order_acquire)) {
         return s_initialization_error.load(std::memory_order_acquire);
     }
@@ -512,6 +518,9 @@ esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_na
 
 esp_err_t rf_automation_remove_rule(const char *trigger_name)
 {
+    if (s_runtime_paused.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_available.load(std::memory_order_acquire)) {
         return s_initialization_finished.load(std::memory_order_acquire)
                    ? rf_storage_rule_remove_recovery(trigger_name)
@@ -702,6 +711,9 @@ esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t 
 
 esp_err_t rf_automation_set_enabled(bool enabled)
 {
+    if (s_runtime_paused.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_available.load(std::memory_order_acquire)) {
         return s_initialization_finished.load(std::memory_order_acquire)
                    ? rf_storage_rule_enabled_set(enabled)
@@ -746,6 +758,24 @@ esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode)
     s_status.log_mode_known = true;
     if (changed) {
         s_last_reported_queue_drops = s_queue_drops.load(std::memory_order_relaxed);
+    }
+    return ESP_OK;
+}
+
+esp_err_t rf_automation_set_runtime_paused(bool paused)
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return ESP_OK;
+    }
+    AutomationLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    const bool changed = s_runtime_paused.load(std::memory_order_relaxed) != paused;
+    s_runtime_paused.store(paused, std::memory_order_release);
+    s_status.runtime_paused = paused;
+    if (changed) {
+        advance_generation();
     }
     return ESP_OK;
 }
@@ -806,6 +836,7 @@ esp_err_t rf_automation_get_status(RfAutomationStatus *status)
     status->enabled_known = true;
     status->log_mode = s_log_mode;
     status->log_mode_known = true;
+    status->runtime_paused = s_runtime_paused.load(std::memory_order_relaxed);
     status->rule_count = static_cast<uint16_t>(s_rule_count);
     status->rule_count_known = true;
     status->queue_drops = s_queue_drops.load(std::memory_order_relaxed);
@@ -814,7 +845,8 @@ esp_err_t rf_automation_get_status(RfAutomationStatus *status)
 
 void rf_automation_on_frame(const RfFrame &frame)
 {
-    if (!s_available.load(std::memory_order_acquire) || !s_enabled.load(std::memory_order_acquire)) {
+    if (!s_available.load(std::memory_order_acquire) || !s_enabled.load(std::memory_order_acquire) ||
+        s_runtime_paused.load(std::memory_order_acquire)) {
         return;
     }
     FrameEvent event{};
