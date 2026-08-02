@@ -14,6 +14,7 @@ readonly PARTITION_INFO_LOG="$LOG_DIR/partition-info.log"
 readonly IMAGE="$BUILD_DIR/esp32-cc1101.bin"
 readonly PARTITION_BIN="$BUILD_DIR/partition_table/partition-table.bin"
 readonly SDKCONFIG_HEADER="$BUILD_DIR/config/sdkconfig.h"
+readonly PRODUCTION_SDKCONFIG="$LOG_DIR/sdkconfig"
 readonly OTA_SLOT_SIZE=$((0x1e0000))
 readonly OTA_MIN_FREE=$((OTA_SLOT_SIZE / 4))
 
@@ -92,7 +93,8 @@ require_log_pattern() {
     fi
 }
 
-run_logged "ESP-IDF production build" "$BUILD_LOG" "$IDF_PYTHON" "$IDF_CLI" -B "$BUILD_DIR" build
+run_logged "ESP-IDF production build" "$BUILD_LOG" "$IDF_PYTHON" "$IDF_CLI" -B "$BUILD_DIR" \
+    -DSDKCONFIG="$PRODUCTION_SDKCONFIG" build
 run_logged "ESP-IDF size report" "$SIZE_LOG" "$IDF_PYTHON" "$IDF_CLI" -B "$BUILD_DIR" size
 
 if [[ ! -f "$IMAGE" || ! -f "$PARTITION_BIN" || ! -f "$SDKCONFIG_HEADER" ]]; then
@@ -120,6 +122,8 @@ require_log_pattern "$PARTITION_INFO_LOG" '^phy_init,data,phy,0x11000,4K,$' 'PHY
 require_log_pattern "$PARTITION_INFO_LOG" '^ota_0,app,ota_0,0x20000,1920K,$' 'first OTA application slot'
 require_log_pattern "$PARTITION_INFO_LOG" '^ota_1,app,ota_1,0x200000,1920K,$' 'second OTA application slot'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 1$' 'bootloader rollback configuration'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_LOG_COLORS 1$' 'application log colors'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_BOOTLOADER_LOG_COLORS 1$' 'bootloader log colors'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_PORT 8032$' 'bounded LAN OTA HTTP port'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_TASK_STACK_SIZE 10240$' 'bounded OTA HTTP task stack'
 

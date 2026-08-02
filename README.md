@@ -88,7 +88,27 @@ The new table deliberately preserves NVS at offset `0x9000` with size `0x6000`, 
 
 ## Serial console
 
-UART0 runs at 115200 baud. Type `help` to list commands.
+UART0 runs at 115200 baud. Type `help` to list commands. For `tio`, use normal output mode with local echo left disabled:
+
+```bash
+tio --baudrate 115200 --color none /dev/ttyUSB0
+```
+
+`--color none` disables coloring of tio's own connection messages; firmware ANSI colors still pass through. To keep a plain-text session log while retaining colors on screen:
+
+```bash
+tio --baudrate 115200 --color none --log --log-file rf-console.log --log-strip /dev/ttyUSB0
+```
+
+The console starts in the nonpersistent `pretty` style after every reboot. It uses bounded ASCII sections and semantic ANSI colors: green for success/online, cyan for RF receive and information, magenta for TX/automation, yellow for waiting/maintenance/warnings, red for failures, and dim white for metadata. Change or inspect the runtime style with:
+
+```text
+console style
+console style plain
+console style pretty
+```
+
+`plain` removes application-console ANSI sequences and preserves stable machine-readable `RX`, `RULE`, `WIFI`, and `OTA` records. ESP-IDF application and bootloader severity logs embed their own ANSI colors; `tio --log-strip` removes all control sequences from saved logs. An OTA upload installs the colored application console and application logs, but it does not rewrite the second-stage bootloader. Colored bootloader logs take effect only after a later approved wired bootloader flash. The ESP-IDF console renders the prompt as `rf> ` using its native informational color. Linenoise accounts for those escape sequences, preserving history, arrows, editing, hints, and completion. ESP-IDF framework logging is asynchronous, so native log lines can appear after an idle prompt or between application event records; the firmware does not delay local console access for optional RF or Wi-Fi startup and does not manipulate linenoise's private edit buffer to redraw around those logs.
 
 ### Wi-Fi
 
@@ -128,6 +148,14 @@ Build and verify the application, then upload it directly from the PC:
 tools/verify-production.sh
 tools/push-ota.sh <esp32-ip> /tmp/esp32-cc1101-production-build/esp32-cc1101.bin
 ```
+
+In an interactive PC terminal, the uploader shows curl's live percentage, transferred bytes, speed, and ETA while retaining the final device JSON separately. Redirected/noninteractive runs suppress the carriage-return meter but keep errors visible. The UART prints bounded discrete progress records so asynchronous RF and ESP-IDF logs cannot corrupt an in-place line. The first record starts on a fresh line to move past an idle prompt; later records in the same upload are contiguous unless framework logs interleave:
+
+```text
+[OTA  ]  42% [########------------] 394 KiB / 936 KiB
+```
+
+Plain console style retains the exact byte record `OTA PROGRESS bytes=<received> total=<length>`.
 
 The upload endpoint requires `application/octet-stream` and an exact positive `Content-Length`. It rejects oversized images and validates the classic ESP32 image header, chip revision bounds, project name, complete ESP-IDF image structure, checksum, and appended hash before selecting the inactive slot. A successful response is sent before a delayed reboot. The next boot confirms the image only after platform/NVS setup, partition sanity, console startup, and bounded RF startup attempts; a crash or reset before confirmation allows the bootloader rollback policy to select the previous slot. External AP availability and CC1101 wiring are not image-health requirements.
 
@@ -264,9 +292,13 @@ Raw rules:
 ```text
 status
 radio info
+wifi status
+ota status
 radio reset
 radio start
 ```
+
+`status` renders the complete System/RF, Automation, Wi-Fi, and OTA dashboard. `radio info`, `wifi status`, and `ota status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
 
 Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled/logging state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, emitted log events, dropped log events, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
 
@@ -334,4 +366,4 @@ idf.py -B build build
 # idf.py -B build -p /dev/ttyUSB0 flash monitor
 ```
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw matching, parser/deadline bounds, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, OTA power interruption, rollback, RF maintenance restoration, timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw matching, parser/deadline bounds, console style/ANSI bounds, OTA percentage/bar formatting, uploader success/error behavior, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, OTA power interruption, rollback, RF maintenance restoration, timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

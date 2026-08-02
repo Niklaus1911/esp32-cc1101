@@ -9,6 +9,7 @@
 #include "ota_update_policy.hpp"
 #include "rf_automation_engine.hpp"
 #include "rf_codec.hpp"
+#include "rf_console_format.hpp"
 #include "rf_console_parse.hpp"
 #include "rf_storage_format.hpp"
 
@@ -222,6 +223,100 @@ void test_console_parser()
     require(rfbridge::format_rf_automation_event(event, "ESP_OK", line, sizeof(line)) &&
                 std::strcmp(line, "RULE ACTION id=42 trigger=B target=A result=OK elapsed_ms=742") == 0,
             "automation completion event formatted");
+}
+
+void test_console_formatter()
+{
+    using rfbridge::ConsoleStyle;
+    using rfbridge::ConsoleTone;
+    ConsoleStyle style{};
+    require(rfbridge::parse_console_style("pretty", &style) && style == ConsoleStyle::kPretty,
+            "pretty console style parsed");
+    require(rfbridge::parse_console_style("plain", &style) && style == ConsoleStyle::kPlain,
+            "plain console style parsed");
+    require(!rfbridge::parse_console_style("ansi", &style), "unknown console style rejected");
+    require(rfbridge::ota_progress_percent(420, 1000) == 42, "OTA percentage computed");
+    require(rfbridge::ota_progress_percent(UINT32_MAX, UINT32_MAX) == 100,
+            "OTA percentage handles uint32 maximum");
+    require(rfbridge::ota_progress_percent(UINT32_MAX, 1) == 100,
+            "OTA percentage clamps oversized received count");
+    std::size_t chunk_length = 0;
+    std::size_t consumed_length = 0;
+    require(rfbridge::console_wrap_chunk("alpha beta gamma", 10, &chunk_length,
+                                         &consumed_length) &&
+                chunk_length == 10 && consumed_length == 11,
+            "console wrapping uses boundary delimiter");
+    require(rfbridge::console_wrap_chunk("123,456,789", 7, &chunk_length,
+                                         &consumed_length) &&
+                chunk_length == 4 && consumed_length == 4,
+            "console wrapping preserves comma-delimited values");
+
+    char line[256]{};
+    require(rfbridge::format_ota_progress_line(ConsoleStyle::kPlain, 420, 1000, line,
+                                                sizeof(line)) &&
+                std::strcmp(line, "OTA PROGRESS bytes=420 total=1000") == 0,
+            "plain OTA progress remains exact");
+    require(rfbridge::format_ota_progress_line(ConsoleStyle::kPretty, 420, 1000, line,
+                                                sizeof(line)) &&
+                std::strstr(line, " 42% [########------------]") != nullptr &&
+                std::strcmp(line + std::strlen(line) - 4U, "\x1b[0m") == 0,
+            "pretty OTA progress has fixed bar and reset");
+    require(rfbridge::format_ota_progress_line(ConsoleStyle::kPretty, 957680, 957680, line,
+                                                sizeof(line)) &&
+                std::strstr(line, "100% [####################] 936 KiB / 936 KiB") != nullptr,
+            "completed OTA progress uses consistent KiB rounding");
+    require(rfbridge::format_console_tagged_line(
+                ConsoleStyle::kPretty, ConsoleTone::kSuccess, " OK ", "OK rx on", "RX enabled",
+                line, sizeof(line)) &&
+                std::strstr(line, "\x1b[1;32m[ OK  ]\x1b[0m RX enabled") != nullptr &&
+                std::strcmp(line + std::strlen(line) - 4U, "\x1b[0m") == 0,
+            "pretty tag uses semantic color and reset");
+    std::strcpy(line, "RC code=7");
+    require(rfbridge::decorate_console_message(ConsoleStyle::kPlain, ConsoleTone::kInfo,
+                                                "RF RX", "RX ", line, sizeof(line)) &&
+                std::strcmp(line, "RX RC code=7") == 0,
+            "plain in-place message preserves legacy prefix");
+    std::strcpy(line, "RC code=7");
+    require(rfbridge::decorate_console_message(ConsoleStyle::kPretty, ConsoleTone::kInfo,
+                                                "RF RX", "RX ", line, sizeof(line)) &&
+                std::strstr(line, "[RF RX]\x1b[0m RC code=7") != nullptr &&
+                std::strcmp(line + std::strlen(line) - 4U, "\x1b[0m") == 0,
+            "pretty in-place message decorates one bounded buffer");
+    require(rfbridge::format_console_section_header("Wi-Fi", line, sizeof(line)) &&
+                std::strstr(line, "+-- Wi-Fi ") != nullptr,
+            "dashboard section header formatted");
+    require(rfbridge::format_console_dashboard_row(
+                "Last frame", "available", ConsoleTone::kInfo, "Console drops", "0",
+                ConsoleTone::kMuted, line, sizeof(line)) &&
+                std::strstr(line, "Console drops") != nullptr,
+            "system dashboard row accepts existing labels");
+    require(rfbridge::format_console_dashboard_row(
+                "1234567890123", "1234567890123456789012", ConsoleTone::kSuccess,
+                "1234567890123", "1234567890123456789012", ConsoleTone::kInfo, line,
+                sizeof(line)),
+            "dashboard accepts exact label and value limits");
+    require(!rfbridge::format_console_dashboard_row(
+                "12345678901234", "value", ConsoleTone::kSuccess, "label", "value",
+                ConsoleTone::kInfo, line, sizeof(line)),
+            "dashboard rejects overlong labels");
+    require(!rfbridge::format_console_dashboard_row(
+                "label", "12345678901234567890123", ConsoleTone::kSuccess, "label", "value",
+                ConsoleTone::kInfo, line, sizeof(line)),
+            "dashboard rejects overlong two-column values");
+    require(!rfbridge::format_console_dashboard_value(
+                "Network", "this value is deliberately longer than the sixty character dashboard limit 123",
+                ConsoleTone::kInfo, line, sizeof(line)),
+            "dashboard refuses truncation");
+    require(rfbridge::format_console_wifi_disconnected_message(
+                ConsoleStyle::kPlain, "iliadbox-2.4ghz", 8, "online", line, sizeof(line)) &&
+                std::strcmp(line,
+                            "WIFI DISCONNECTED ssid=iliadbox-2.4ghz reason=8 state=online") == 0,
+            "plain Wi-Fi disconnect remains exact");
+    require(rfbridge::format_console_wifi_disconnected_message(
+                ConsoleStyle::kPretty, "iliadbox-2.4ghz", 8, "online", line, sizeof(line)) &&
+                std::strcmp(line, "Disconnected from iliadbox-2.4ghz | reason 8") == 0 &&
+                std::strstr(line, "ONLINE") == nullptr,
+            "pretty Wi-Fi disconnect omits stale state");
 }
 
 void test_learn_deadline_classification()
@@ -454,6 +549,7 @@ int main()
     test_raw_identity_rules();
     test_protocol_alias_policy();
     test_console_parser();
+    test_console_formatter();
     test_learn_deadline_classification();
     test_storage_format();
     test_wifi_config();

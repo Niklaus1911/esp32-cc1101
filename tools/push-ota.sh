@@ -96,15 +96,31 @@ curl --silent --show-error --fail-with-body \
 printf 'Device status: '
 tr -d '\r\n' <"$response_file"
 printf '\nUploading %s bytes from %s...\n' "$IMAGE_SIZE" "$IMAGE"
-
-curl --silent --show-error --fail-with-body \
+upload_progress=(--no-progress-meter)
+if [[ -t 2 ]]; then
+    upload_progress=()
+fi
+: >"$response_file"
+if curl --show-error --fail-with-body \
+    "${upload_progress[@]}" \
     --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
     --max-time "$UPLOAD_TIMEOUT_SECONDS" \
     --header 'Content-Type: application/octet-stream' \
     --header 'Expect:' \
     --data-binary "@$IMAGE" \
     --output "$response_file" \
-    "$BASE_URL/api/v1/ota"
+    "$BASE_URL/api/v1/ota"; then
+    :
+else
+    curl_status=$?
+    printf '\nOTA upload failed' >&2
+    if [[ -s "$response_file" ]]; then
+        printf ': ' >&2
+        tr -d '\r\n' <"$response_file" >&2
+    fi
+    printf '\n' >&2
+    exit "$curl_status"
+fi
 
 if ! grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response_file"; then
     printf 'OTA service did not confirm success: ' >&2

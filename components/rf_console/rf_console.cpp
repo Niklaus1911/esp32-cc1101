@@ -18,6 +18,7 @@
 #include "network_wifi.hpp"
 #include "ota_update.hpp"
 #include "rf_automation.hpp"
+#include "rf_console_format.hpp"
 #include "rf_console_parse.hpp"
 #include "rf_storage.hpp"
 #include "sdkconfig.h"
@@ -41,6 +42,7 @@ constexpr UBaseType_t kOtaEventQueueDepth = 8;
 constexpr std::size_t kAutomationLogLineSize = 256;
 constexpr std::size_t kSystemEventLineSize = 256;
 constexpr uint32_t kCallbackQuiesceAttempts = 100;
+constexpr uint8_t kFrameEventBurst = 4;
 
 enum class ConsoleEventType : uint8_t {
     kFrame,
@@ -52,6 +54,11 @@ struct ConsoleEvent {
     int64_t occurred_us = 0;
     RfFrame frame{};
     char name[kRfStorageNameCapacity]{};
+};
+
+struct ConsoleOtaEvent {
+    OtaUpdateEvent event{};
+    uint32_t series_generation = 0;
 };
 
 struct PendingLearn {
@@ -66,6 +73,7 @@ QueueHandle_t s_event_queue = nullptr;
 QueueHandle_t s_automation_log_queue = nullptr;
 QueueHandle_t s_network_event_queue = nullptr;
 QueueHandle_t s_ota_event_queue = nullptr;
+SemaphoreHandle_t s_output_mutex = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
 esp_console_repl_t *s_repl = nullptr;
 bool s_repl_started = false;
@@ -75,9 +83,32 @@ std::atomic<bool> s_started{false};
 std::atomic_flag s_starting = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> s_frame_queue_drops{0};
 std::atomic<uint32_t> s_frame_callbacks_in_flight{0};
+std::atomic<uint32_t> s_ota_series_generation{0};
 std::atomic<bool> s_accept_frame_callbacks{false};
+std::atomic<ConsoleStyle> s_console_style{ConsoleStyle::kPretty};
 RawSignal s_staged_raw{};
 bool s_raw_staging = false;
+bool s_ota_progress_series_active = false;
+uint32_t s_rendered_ota_series_generation = 0;
+
+class OutputGuard {
+public:
+    OutputGuard()
+        : locked_(s_output_mutex != nullptr &&
+                  xSemaphoreTakeRecursive(s_output_mutex, portMAX_DELAY) == pdTRUE)
+    {
+    }
+    ~OutputGuard()
+    {
+        if (locked_) {
+            xSemaphoreGiveRecursive(s_output_mutex);
+        }
+    }
+    bool locked() const { return locked_; }
+
+private:
+    bool locked_;
+};
 
 template <typename... Args>
 bool append_to_line(char *line, std::size_t capacity, std::size_t *length, const char *format, Args... args)
@@ -102,39 +133,194 @@ void format_ipv4(uint32_t address, char *output, std::size_t capacity)
                   static_cast<unsigned>((address >> 24U) & 0xffU));
 }
 
+ConsoleStyle current_console_style()
+{
+    return s_console_style.load(std::memory_order_acquire);
+}
+
+const char *wifi_state_display(NetworkWifiState state);
+const char *ota_state_display(OtaUpdateState state);
+
+ConsoleTone wifi_state_tone(NetworkWifiState state)
+{
+    switch (state) {
+        case NetworkWifiState::kOnline:
+            return ConsoleTone::kSuccess;
+        case NetworkWifiState::kFault:
+            return ConsoleTone::kError;
+        case NetworkWifiState::kWaitingDhcp:
+        case NetworkWifiState::kRetryWait:
+        case NetworkWifiState::kStopping:
+            return ConsoleTone::kWarning;
+        case NetworkWifiState::kOff:
+            return ConsoleTone::kMuted;
+        case NetworkWifiState::kStarting:
+        case NetworkWifiState::kConnecting:
+            return ConsoleTone::kInfo;
+    }
+    return ConsoleTone::kError;
+}
+
+ConsoleTone ota_state_tone(OtaUpdateState state)
+{
+    switch (state) {
+        case OtaUpdateState::kIdle:
+            return ConsoleTone::kSuccess;
+        case OtaUpdateState::kReceiving:
+        case OtaUpdateState::kValidating:
+            return ConsoleTone::kWarning;
+        case OtaUpdateState::kPendingReboot:
+            return ConsoleTone::kAction;
+        case OtaUpdateState::kFailed:
+        case OtaUpdateState::kUnavailable:
+            return ConsoleTone::kError;
+    }
+    return ConsoleTone::kError;
+}
+
+void print_tagged_line(ConsoleTone tone, const char *tag, const char *plain_line,
+                       const char *pretty_message, bool separate = true)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf(separate ? "\n%s\n" : "%s\n", plain_line);
+        return;
+    }
+
+    constexpr std::size_t kPrettyBodyWidth = 66;
+    const char *cursor = pretty_message;
+    bool first = true;
+    do {
+        std::size_t chunk_length = 0;
+        std::size_t consumed = 0;
+        if (!console_wrap_chunk(cursor, kPrettyBodyWidth, &chunk_length, &consumed)) {
+            ESP_LOGE(kTag, "Could not wrap console event tag=%s", tag);
+            return;
+        }
+        while (chunk_length > 0 && cursor[chunk_length - 1U] == ' ') {
+            --chunk_length;
+        }
+        char chunk[kPrettyBodyWidth + 1U]{};
+        std::memcpy(chunk, cursor, chunk_length);
+        char output[192]{};
+        if (!format_console_tagged_line(ConsoleStyle::kPretty, tone, first ? tag : "     ", "",
+                                        chunk, output, sizeof(output))) {
+            ESP_LOGE(kTag, "Could not format console event tag=%s", tag);
+            return;
+        }
+        std::printf(first && separate ? "\n%s\n" : "%s\n", output);
+        cursor += consumed;
+        while (*cursor == ' ') {
+            ++cursor;
+        }
+        first = false;
+    } while (*cursor != '\0');
+}
+
+void print_dashboard_header(const char *title)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    char line[192]{};
+    if (format_console_section_header(title, line, sizeof(line))) {
+        std::printf("%s\n", line);
+    }
+}
+
+void print_dashboard_footer()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    char line[192]{};
+    if (format_console_section_footer(line, sizeof(line))) {
+        std::printf("%s\n", line);
+    }
+}
+
+void print_dashboard_row(const char *left_label, const char *left_value, ConsoleTone left_tone,
+                         const char *right_label, const char *right_value, ConsoleTone right_tone)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    char line[256]{};
+    if (format_console_dashboard_row(left_label, left_value, left_tone, right_label, right_value,
+                                     right_tone, line, sizeof(line))) {
+        std::printf("%s\n", line);
+    } else {
+        ESP_LOGE(kTag, "Could not format dashboard row labels=%s,%s", left_label, right_label);
+    }
+}
+
+void print_dashboard_value(const char *label, const char *value, ConsoleTone tone)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    char line[256]{};
+    if (format_console_dashboard_value(label, value, tone, line, sizeof(line))) {
+        std::printf("%s\n", line);
+    } else {
+        ESP_LOGE(kTag, "Could not format dashboard value label=%s", label);
+    }
+}
+
 void print_frame(const char *prefix, const RfFrame &frame)
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
     char line[kOutputLineSize]{};
     std::size_t length = 0;
     bool formatted = false;
     if (frame.encoding == RfEncoding::kDecoded) {
         formatted = append_to_line(
             line, sizeof(line), &length,
-            "\n%s RC code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u confidence=%s repeats=%u "
-            "fingerprint=0x%08lX\n",
-            prefix, static_cast<unsigned long long>(frame.decoded.code),
-            static_cast<unsigned long long>(frame.decoded.code), frame.decoded.bits, frame.decoded.protocol,
-            frame.decoded.pulse_us,
+            "RC code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u confidence=%s repeats=%u "
+            "fingerprint=0x%08lX",
+            static_cast<unsigned long long>(frame.decoded.code),
+            static_cast<unsigned long long>(frame.decoded.code), frame.decoded.bits,
+            frame.decoded.protocol, frame.decoded.pulse_us,
             frame.confidence == RfFrameConfidence::kRepeatedEvidence ? "repeated" : "single",
             frame.observed_repeats, static_cast<unsigned long>(frame.fingerprint));
     } else {
         formatted = append_to_line(line, sizeof(line), &length,
-                                   "\n%s RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=", prefix,
+                                   "RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=",
                                    frame.raw.start_level, frame.raw.count, frame.observed_repeats,
                                    static_cast<unsigned long>(frame.fingerprint));
         for (std::size_t index = 0; formatted && index < frame.raw.count; ++index) {
             formatted = append_to_line(line, sizeof(line), &length, "%s%u", index == 0 ? "" : ",",
                                        frame.raw.durations_us[index]);
         }
-        if (formatted) {
-            formatted = append_to_line(line, sizeof(line), &length, "\n");
-        }
     }
     if (!formatted) {
         ESP_LOGE(kTag, "Could not format %s frame output without truncation", prefix);
         return;
     }
-    std::printf("%s", line);
+    const char *pretty_tag = std::strcmp(prefix, "LAST") == 0 ? "LAST" : "RF RX";
+    if (current_console_style() == ConsoleStyle::kPretty) {
+        print_tagged_line(ConsoleTone::kInfo, pretty_tag, "", line);
+    } else {
+        char plain_prefix[8]{};
+        const int prefix_written = std::snprintf(plain_prefix, sizeof(plain_prefix), "%s ", prefix);
+        if (prefix_written < 0 || static_cast<std::size_t>(prefix_written) >= sizeof(plain_prefix) ||
+            !decorate_console_message(ConsoleStyle::kPlain, ConsoleTone::kInfo, pretty_tag,
+                                      plain_prefix, line, sizeof(line))) {
+            ESP_LOGE(kTag, "Could not format %s frame prefix", prefix);
+            return;
+        }
+        std::printf("\n%s\n", line);
+    }
     std::fflush(stdout);
 }
 
@@ -148,7 +334,11 @@ void print_learn_timeout(PendingLearn *pending)
     char name[kRfStorageNameCapacity]{};
     std::memcpy(name, pending->name, sizeof(name));
     clear_pending_learn(pending);
-    std::printf("\nLEARN TIMEOUT name=%s\n", name);
+    char plain[96]{};
+    char pretty[96]{};
+    std::snprintf(plain, sizeof(plain), "LEARN TIMEOUT name=%s", name);
+    std::snprintf(pretty, sizeof(pretty), "Timed out waiting for %s", name);
+    print_tagged_line(ConsoleTone::kWarning, "LEARN", plain, pretty);
     std::fflush(stdout);
 }
 
@@ -171,8 +361,13 @@ void process_learn_request(const ConsoleEvent &event, PendingLearn *pending)
     const esp_err_t status_error = get_rf_radio_status(&status);
     if (status_error != ESP_OK || !status.running || !status.receive_enabled) {
         const esp_err_t error = status_error == ESP_OK ? ESP_ERR_INVALID_STATE : status_error;
-        std::printf("\nERROR learn name=%s: RF/RX unavailable: %s (0x%x)\n", event.name,
-                    esp_err_to_name(error), static_cast<unsigned>(error));
+        char plain[160]{};
+        char pretty[160]{};
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: RF/RX unavailable: %s (0x%x)",
+                      event.name, esp_err_to_name(error), static_cast<unsigned>(error));
+        std::snprintf(pretty, sizeof(pretty), "Cannot arm %s: RF/RX unavailable (%s)", event.name,
+                      esp_err_to_name(error));
+        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
         std::fflush(stdout);
         return;
     }
@@ -180,21 +375,39 @@ void process_learn_request(const ConsoleEvent &event, PendingLearn *pending)
     bool exists = false;
     const esp_err_t exists_error = rf_storage_exists(event.name, &exists);
     if (exists_error != ESP_OK) {
-        std::printf("\nERROR learn name=%s: %s (0x%x)\n", event.name, esp_err_to_name(exists_error),
-                    static_cast<unsigned>(exists_error));
+        char plain[128]{};
+        char pretty[128]{};
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: %s (0x%x)", event.name,
+                      esp_err_to_name(exists_error), static_cast<unsigned>(exists_error));
+        std::snprintf(pretty, sizeof(pretty), "Cannot check %s: %s", event.name,
+                      esp_err_to_name(exists_error));
+        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
         return;
     }
     if (exists) {
-        std::printf("\nERROR learn name=%s already exists\n", event.name);
+        char plain[96]{};
+        char pretty[96]{};
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", event.name);
+        std::snprintf(pretty, sizeof(pretty), "%s already exists", event.name);
+        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
         return;
     }
     if (pending->active) {
         char old_name[kRfStorageNameCapacity]{};
         std::memcpy(old_name, pending->name, sizeof(old_name));
         clear_pending_learn(pending);
-        std::printf("\nLEARN REPLACED old=%s new=%s\n", old_name, event.name);
+        char plain[112]{};
+        char pretty[112]{};
+        std::snprintf(plain, sizeof(plain), "LEARN REPLACED old=%s new=%s", old_name,
+                      event.name);
+        std::snprintf(pretty, sizeof(pretty), "Replaced pending %s with %s", old_name, event.name);
+        print_tagged_line(ConsoleTone::kWarning, "LEARN", plain, pretty);
     }
-    std::printf("\nLEARN ARMED name=%s timeout=30s\n", event.name);
+    char plain[96]{};
+    char pretty[96]{};
+    std::snprintf(plain, sizeof(plain), "LEARN ARMED name=%s timeout=30s", event.name);
+    std::snprintf(pretty, sizeof(pretty), "Armed for %s | timeout 30 s", event.name);
+    print_tagged_line(ConsoleTone::kInfo, "LEARN", plain, pretty);
     std::fflush(stdout);
 
     // Open the capture window only after the marker has been emitted.
@@ -232,19 +445,32 @@ void process_frame_event(const ConsoleEvent &event, PendingLearn *pending)
     print_frame("RX", event.frame);
     const RfStoredSignal stored = stored_signal_from_frame(event.frame);
     const esp_err_t error = rf_storage_create(name, stored);
+    char plain[128]{};
+    char pretty[128]{};
     if (error == ESP_OK) {
-        std::printf("\nLEARNED name=%s\n", name);
+        std::snprintf(plain, sizeof(plain), "LEARNED name=%s", name);
+        std::snprintf(pretty, sizeof(pretty), "Saved %s", name);
+        print_tagged_line(ConsoleTone::kSuccess, "LEARN", plain, pretty);
     } else if (error == ESP_ERR_INVALID_STATE) {
-        std::printf("\nERROR learn name=%s already exists\n", name);
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", name);
+        std::snprintf(pretty, sizeof(pretty), "%s already exists", name);
+        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
     } else {
-        std::printf("\nERROR learn name=%s: %s (0x%x)\n", name, esp_err_to_name(error),
-                    static_cast<unsigned>(error));
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: %s (0x%x)", name,
+                      esp_err_to_name(error), static_cast<unsigned>(error));
+        std::snprintf(pretty, sizeof(pretty), "Could not save %s: %s", name,
+                      esp_err_to_name(error));
+        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
     }
     std::fflush(stdout);
 }
 
 void process_console_event(const ConsoleEvent &event, PendingLearn *pending)
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
     if (event.type == ConsoleEventType::kLearnRequest) {
         if (pending->active && event.occurred_us >= pending->deadline_us) {
             print_learn_timeout(pending);
@@ -258,13 +484,28 @@ void process_console_event(const ConsoleEvent &event, PendingLearn *pending)
 
 void process_automation_log_event(const RfAutomationEvent &event)
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
     char line[kAutomationLogLineSize]{};
     const esp_err_t result = static_cast<esp_err_t>(event.result);
-    if (format_rf_automation_event(event, esp_err_to_name(result), line, sizeof(line))) {
-        std::printf("\n%s\n", line);
-    } else {
-        std::printf("\nRULE LOG ERROR type=%u\n", static_cast<unsigned>(event.type));
+    if (!format_rf_automation_event(event, esp_err_to_name(result), line, sizeof(line))) {
+        print_tagged_line(ConsoleTone::kError, "RULE", "RULE LOG ERROR type=invalid",
+                          "Could not format automation event");
+        std::fflush(stdout);
+        return;
     }
+    ConsoleTone tone = ConsoleTone::kWarning;
+    if (event.type == RfAutomationEventType::kTriggered) {
+        tone = ConsoleTone::kAction;
+    } else if (event.type == RfAutomationEventType::kActionCompleted) {
+        tone = result == ESP_OK ? ConsoleTone::kSuccess : ConsoleTone::kError;
+    } else if (event.type == RfAutomationEventType::kQueueDrop) {
+        tone = ConsoleTone::kError;
+    }
+    const char *pretty = std::strncmp(line, "RULE ", 5U) == 0 ? line + 5U : line;
+    print_tagged_line(tone, "RULE", line, pretty);
     std::fflush(stdout);
 }
 
@@ -281,35 +522,79 @@ bool enqueue_automation_log_event(const RfAutomationEvent &event, void *)
 
 void process_network_event(const NetworkWifiEvent &event)
 {
-    char line[kSystemEventLineSize]{};
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    char plain[kSystemEventLineSize]{};
+    char pretty[kSystemEventLineSize]{};
+    char ip[16]{};
+    char gateway[16]{};
     switch (event.type) {
         case NetworkWifiEventType::kConnected:
-            if (format_network_wifi_connected_line(event.ssid, event.ip, event.netmask, event.gateway,
-                                                   line, sizeof(line))) {
-                std::printf("\n%s\n", line);
+            if (!format_network_wifi_connected_line(event.ssid, event.ip, event.netmask,
+                                                     event.gateway, plain, sizeof(plain))) {
+                ESP_LOGE(kTag, "Could not format connected Wi-Fi event");
+                break;
+            }
+            format_ipv4(event.ip, ip, sizeof(ip));
+            format_ipv4(event.gateway, gateway, sizeof(gateway));
+            if (current_console_style() == ConsoleStyle::kPretty) {
+                std::snprintf(pretty, sizeof(pretty), "Connected to %s", event.ssid);
+                print_tagged_line(ConsoleTone::kSuccess, "WIFI", plain, pretty);
+                std::snprintf(pretty, sizeof(pretty), "IP %s | gateway %s", ip, gateway);
+                print_tagged_line(ConsoleTone::kInfo, "", "", pretty, false);
+            } else {
+                print_tagged_line(ConsoleTone::kSuccess, "WIFI", plain, plain);
             }
             if (event.error != ESP_OK) {
-                std::printf("WIFI SAVE ERROR error=%s (0x%x)\n", esp_err_to_name(event.error),
-                            static_cast<unsigned>(event.error));
+                std::snprintf(plain, sizeof(plain), "WIFI SAVE ERROR error=%s (0x%x)",
+                              esp_err_to_name(event.error), static_cast<unsigned>(event.error));
+                std::snprintf(pretty, sizeof(pretty), "Credential save failed: %s (0x%x)",
+                              esp_err_to_name(event.error), static_cast<unsigned>(event.error));
+                print_tagged_line(ConsoleTone::kError, "WIFI", plain, pretty);
             }
             break;
         case NetworkWifiEventType::kDisconnected:
-            std::printf("\nWIFI DISCONNECTED ssid=%s reason=%ld state=%s\n", event.ssid,
-                        static_cast<long>(event.reason), network_wifi_state_name(event.state));
+            if (format_console_wifi_disconnected_message(
+                    ConsoleStyle::kPlain, event.ssid, event.reason,
+                    network_wifi_state_name(event.state), plain, sizeof(plain)) &&
+                format_console_wifi_disconnected_message(
+                    ConsoleStyle::kPretty, event.ssid, event.reason,
+                    network_wifi_state_name(event.state), pretty, sizeof(pretty))) {
+                print_tagged_line(ConsoleTone::kWarning, "WIFI", plain, pretty);
+            } else {
+                ESP_LOGE(kTag, "Could not format disconnected Wi-Fi event");
+            }
             break;
         case NetworkWifiEventType::kScanResult:
-            std::printf("\nWIFI AP ssid=%s rssi=%d channel=%u auth=%u\n", event.ssid, event.rssi,
-                        event.channel, event.auth_mode);
+            std::snprintf(plain, sizeof(plain), "WIFI AP ssid=%s rssi=%d channel=%u auth=%u",
+                          event.ssid, event.rssi, event.channel, event.auth_mode);
+            std::snprintf(pretty, sizeof(pretty), "AP %-32s %4d dBm | channel %u | auth %u",
+                          event.ssid, event.rssi, event.channel, event.auth_mode);
+            print_tagged_line(ConsoleTone::kInfo, "WIFI", plain, pretty);
             break;
         case NetworkWifiEventType::kScanCompleted:
-            std::printf("\nWIFI SCAN COMPLETE count=%ld\n", static_cast<long>(event.reason));
+            std::snprintf(plain, sizeof(plain), "WIFI SCAN COMPLETE count=%ld",
+                          static_cast<long>(event.reason));
+            std::snprintf(pretty, sizeof(pretty), "Scan complete | %ld network(s)",
+                          static_cast<long>(event.reason));
+            print_tagged_line(ConsoleTone::kSuccess, "WIFI", plain, pretty);
             break;
         case NetworkWifiEventType::kError:
-            std::printf("\nWIFI ERROR state=%s error=%s (0x%x)\n", network_wifi_state_name(event.state),
-                        esp_err_to_name(event.error), static_cast<unsigned>(event.error));
+            std::snprintf(plain, sizeof(plain), "WIFI ERROR state=%s error=%s (0x%x)",
+                          network_wifi_state_name(event.state), esp_err_to_name(event.error),
+                          static_cast<unsigned>(event.error));
+            std::snprintf(pretty, sizeof(pretty), "%s failed: %s (0x%x)",
+                          wifi_state_display(event.state), esp_err_to_name(event.error),
+                          static_cast<unsigned>(event.error));
+            print_tagged_line(ConsoleTone::kError, "WIFI", plain, pretty);
             break;
         case NetworkWifiEventType::kStateChanged:
-            std::printf("\nWIFI STATE state=%s\n", network_wifi_state_name(event.state));
+            std::snprintf(plain, sizeof(plain), "WIFI STATE state=%s",
+                          network_wifi_state_name(event.state));
+            std::snprintf(pretty, sizeof(pretty), "State: %s", wifi_state_display(event.state));
+            print_tagged_line(wifi_state_tone(event.state), "WIFI", plain, pretty);
             break;
     }
     std::fflush(stdout);
@@ -326,38 +611,71 @@ bool enqueue_network_event(const NetworkWifiEvent &event, void *)
     return true;
 }
 
-void process_ota_event(const OtaUpdateEvent &event)
+void process_ota_event(const ConsoleOtaEvent &queued_event)
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
+    const OtaUpdateEvent &event = queued_event.event;
+    char plain[kSystemEventLineSize]{};
+    char pretty[kSystemEventLineSize]{};
     switch (event.type) {
         case OtaUpdateEventType::kServerStarted: {
+            s_ota_progress_series_active = false;
             NetworkWifiStatus wifi{};
             OtaUpdateStatus ota{};
             char ip[16]{};
             if (get_network_wifi_status(&wifi) == ESP_OK && get_ota_update_status(&ota) == ESP_OK) {
                 format_ipv4(wifi.ip, ip, sizeof(ip));
-                std::printf("\nOTA READY url=http://%s:%u/api/v1/ota\n", ip, ota.port);
+                std::snprintf(plain, sizeof(plain), "OTA READY url=http://%s:%u/api/v1/ota", ip,
+                              ota.port);
+                std::snprintf(pretty, sizeof(pretty), "Ready: http://%s:%u/api/v1/ota", ip,
+                              ota.port);
+                print_tagged_line(ConsoleTone::kSuccess, "OTA", plain, pretty);
             }
             break;
         }
         case OtaUpdateEventType::kServerStopped:
-            std::printf("\nOTA SERVER STOPPED\n");
+            s_ota_progress_series_active = false;
+            print_tagged_line(ConsoleTone::kMuted, "OTA", "OTA SERVER STOPPED", "Server stopped");
             break;
         case OtaUpdateEventType::kProgress:
-            std::printf("\nOTA PROGRESS bytes=%lu total=%lu\n",
-                        static_cast<unsigned long>(event.bytes_received),
-                        static_cast<unsigned long>(event.content_length));
+            if (format_ota_progress_line(current_console_style(), event.bytes_received,
+                                         event.content_length, pretty, sizeof(pretty))) {
+                const bool continuing_series =
+                    s_ota_progress_series_active &&
+                    s_rendered_ota_series_generation == queued_event.series_generation;
+                std::printf(continuing_series ? "%s\n" : "\n%s\n", pretty);
+                s_ota_progress_series_active = true;
+                s_rendered_ota_series_generation = queued_event.series_generation;
+            }
             break;
         case OtaUpdateEventType::kCompleted:
-            std::printf("\nOTA COMPLETE version=%s bytes=%lu rebooting=1\n", event.candidate_version,
-                        static_cast<unsigned long>(event.bytes_received));
+            s_ota_progress_series_active = false;
+            std::snprintf(plain, sizeof(plain), "OTA COMPLETE version=%s bytes=%lu rebooting=1",
+                          event.candidate_version,
+                          static_cast<unsigned long>(event.bytes_received));
+            std::snprintf(pretty, sizeof(pretty), "Complete | version %s | %lu bytes | rebooting",
+                          event.candidate_version,
+                          static_cast<unsigned long>(event.bytes_received));
+            print_tagged_line(ConsoleTone::kSuccess, "OTA", plain, pretty);
             break;
         case OtaUpdateEventType::kFailed:
-            std::printf("\nOTA ERROR error=%s (0x%x) maintenance_error=%s (0x%x) bytes=%lu total=%lu\n",
-                        esp_err_to_name(event.error), static_cast<unsigned>(event.error),
-                        esp_err_to_name(event.maintenance_error),
-                        static_cast<unsigned>(event.maintenance_error),
-                        static_cast<unsigned long>(event.bytes_received),
-                        static_cast<unsigned long>(event.content_length));
+            s_ota_progress_series_active = false;
+            std::snprintf(plain, sizeof(plain),
+                          "OTA ERROR error=%s (0x%x) maintenance_error=%s (0x%x) bytes=%lu total=%lu",
+                          esp_err_to_name(event.error), static_cast<unsigned>(event.error),
+                          esp_err_to_name(event.maintenance_error),
+                          static_cast<unsigned>(event.maintenance_error),
+                          static_cast<unsigned long>(event.bytes_received),
+                          static_cast<unsigned long>(event.content_length));
+            std::snprintf(pretty, sizeof(pretty), "Failed: %s (0x%x) | maintenance %s | %lu/%lu bytes",
+                          esp_err_to_name(event.error), static_cast<unsigned>(event.error),
+                          esp_err_to_name(event.maintenance_error),
+                          static_cast<unsigned long>(event.bytes_received),
+                          static_cast<unsigned long>(event.content_length));
+            print_tagged_line(ConsoleTone::kError, "OTA", plain, pretty);
             break;
     }
     std::fflush(stdout);
@@ -365,7 +683,14 @@ void process_ota_event(const OtaUpdateEvent &event)
 
 bool enqueue_ota_event(const OtaUpdateEvent &event, void *)
 {
-    if (s_ota_event_queue == nullptr || xQueueSend(s_ota_event_queue, &event, 0) != pdTRUE) {
+    ConsoleOtaEvent queued_event{};
+    queued_event.event = event;
+    // Advance at every boundary even if its display event is dropped, so a later upload starts fresh.
+    queued_event.series_generation = event.type == OtaUpdateEventType::kProgress
+                                         ? s_ota_series_generation.load(std::memory_order_acquire)
+                                         : s_ota_series_generation.fetch_add(1, std::memory_order_acq_rel);
+    if (s_ota_event_queue == nullptr ||
+        xQueueSend(s_ota_event_queue, &queued_event, 0) != pdTRUE) {
         return false;
     }
     if (s_event_worker_task != nullptr) {
@@ -383,6 +708,8 @@ TickType_t learn_wait_ticks(int64_t remaining_us)
 void event_worker_task(void *)
 {
     PendingLearn pending{};
+    uint8_t frame_budget = kFrameEventBurst;
+    uint8_t system_cursor = 0;
     while (true) {
         ConsoleEvent event{};
         if (pending.active &&
@@ -390,12 +717,13 @@ void event_worker_task(void *)
             char name[kRfStorageNameCapacity]{};
             std::memcpy(name, pending.name, sizeof(name));
             clear_pending_learn(&pending);
-            std::printf("\nLEARN ERROR name=%s: frame event queue overflowed; retry\n", name);
+            char plain[128]{};
+            char pretty[128]{};
+            std::snprintf(plain, sizeof(plain),
+                          "LEARN ERROR name=%s: frame event queue overflowed; retry", name);
+            std::snprintf(pretty, sizeof(pretty), "Cancelled %s: frame queue overflow; retry", name);
+            print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
             std::fflush(stdout);
-            continue;
-        }
-        if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-            process_console_event(event, &pending);
             continue;
         }
 
@@ -409,6 +737,9 @@ void event_worker_task(void *)
                 }
                 if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
                     process_console_event(event, &pending);
+                    if (frame_budget > 0) {
+                        --frame_budget;
+                    }
                     continue;
                 }
                 print_learn_timeout(&pending);
@@ -417,22 +748,49 @@ void event_worker_task(void *)
             wait_ticks = learn_wait_ticks(pending.deadline_us - now_us);
         }
 
-        NetworkWifiEvent network_event{};
-        if (xQueueReceive(s_network_event_queue, &network_event, 0) == pdTRUE) {
-            process_network_event(network_event);
-            continue;
-        }
-        OtaUpdateEvent ota_event{};
-        if (xQueueReceive(s_ota_event_queue, &ota_event, 0) == pdTRUE) {
-            process_ota_event(ota_event);
-            continue;
-        }
-        RfAutomationEvent log_event{};
-        if (xQueueReceive(s_automation_log_queue, &log_event, 0) == pdTRUE) {
-            process_automation_log_event(log_event);
+        if (frame_budget > 0 && xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
+            process_console_event(event, &pending);
+            --frame_budget;
             continue;
         }
 
+        bool processed_system_event = false;
+        for (uint8_t offset = 0; offset < 3U && !processed_system_event; ++offset) {
+            const uint8_t queue_index = static_cast<uint8_t>((system_cursor + offset) % 3U);
+            if (queue_index == 0) {
+                NetworkWifiEvent network_event{};
+                if (xQueueReceive(s_network_event_queue, &network_event, 0) == pdTRUE) {
+                    process_network_event(network_event);
+                    processed_system_event = true;
+                }
+            } else if (queue_index == 1) {
+                ConsoleOtaEvent ota_event{};
+                if (xQueueReceive(s_ota_event_queue, &ota_event, 0) == pdTRUE) {
+                    process_ota_event(ota_event);
+                    processed_system_event = true;
+                }
+            } else {
+                RfAutomationEvent log_event{};
+                if (xQueueReceive(s_automation_log_queue, &log_event, 0) == pdTRUE) {
+                    process_automation_log_event(log_event);
+                    processed_system_event = true;
+                }
+            }
+            if (processed_system_event) {
+                system_cursor = static_cast<uint8_t>((queue_index + 1U) % 3U);
+                frame_budget = kFrameEventBurst;
+            }
+        }
+        if (processed_system_event) {
+            continue;
+        }
+
+        frame_budget = kFrameEventBurst;
+        if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
+            process_console_event(event, &pending);
+            --frame_budget;
+            continue;
+        }
         ulTaskNotifyTake(pdTRUE, wait_ticks);
     }
 }
@@ -444,18 +802,205 @@ bool parse_bounded(const char *text, uint64_t minimum, uint64_t maximum, uint64_
 
 int print_result(const char *operation, esp_err_t error)
 {
-    if (error == ESP_OK) {
-        std::printf("OK %s\n", operation);
-        return 0;
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
     }
-    std::printf("ERROR %s: %s (0x%x)\n", operation, esp_err_to_name(error), static_cast<unsigned>(error));
+    char plain[192]{};
+    char pretty[192]{};
+    char output[256]{};
+    if (error == ESP_OK) {
+        std::snprintf(plain, sizeof(plain), "OK %s", operation);
+        std::snprintf(pretty, sizeof(pretty), "%s completed", operation);
+    } else {
+        std::snprintf(plain, sizeof(plain), "ERROR %s: %s (0x%x)", operation,
+                      esp_err_to_name(error), static_cast<unsigned>(error));
+        std::snprintf(pretty, sizeof(pretty), "%s failed: %s (0x%x)", operation,
+                      esp_err_to_name(error), static_cast<unsigned>(error));
+    }
+    if (format_console_tagged_line(current_console_style(),
+                                   error == ESP_OK ? ConsoleTone::kSuccess : ConsoleTone::kError,
+                                   error == ESP_OK ? " OK " : "FAIL", plain, pretty, output,
+                                   sizeof(output))) {
+        std::printf("%s\n", output);
+    }
+    return error == ESP_OK ? 0 : 1;
+}
+
+int print_usage(const char *usage)
+{
+    print_tagged_line(ConsoleTone::kMuted, "HELP", usage, usage, false);
     return 1;
 }
 
-int status_command(int argc, char **)
+int print_validation_error(const char *plain, const char *pretty)
 {
-    if (argc != 1) {
-        std::printf("usage: status\n");
+    print_tagged_line(ConsoleTone::kError, "FAIL", plain, pretty, false);
+    return 1;
+}
+
+const char *wifi_state_display(NetworkWifiState state)
+{
+    switch (state) {
+        case NetworkWifiState::kOff:
+            return "OFF";
+        case NetworkWifiState::kStarting:
+            return "STARTING";
+        case NetworkWifiState::kConnecting:
+            return "CONNECTING";
+        case NetworkWifiState::kWaitingDhcp:
+            return "WAITING DHCP";
+        case NetworkWifiState::kOnline:
+            return "ONLINE";
+        case NetworkWifiState::kRetryWait:
+            return "RETRY WAIT";
+        case NetworkWifiState::kStopping:
+            return "STOPPING";
+        case NetworkWifiState::kFault:
+            return "FAULT";
+    }
+    return "INVALID";
+}
+
+const char *ota_state_display(OtaUpdateState state)
+{
+    switch (state) {
+        case OtaUpdateState::kUnavailable:
+            return "UNAVAILABLE";
+        case OtaUpdateState::kIdle:
+            return "IDLE";
+        case OtaUpdateState::kReceiving:
+            return "RECEIVING";
+        case OtaUpdateState::kValidating:
+            return "VALIDATING";
+        case OtaUpdateState::kPendingReboot:
+            return "PENDING REBOOT";
+        case OtaUpdateState::kFailed:
+            return "FAILED";
+    }
+    return "INVALID";
+}
+
+void format_half_dbm(int16_t value_x2, char *output, std::size_t capacity)
+{
+    const bool negative = value_x2 < 0;
+    const uint16_t magnitude = static_cast<uint16_t>(negative ? -value_x2 : value_x2);
+    std::snprintf(output, capacity, "%s%u.%u dBm", negative ? "-" : "", magnitude / 2U,
+                  (magnitude % 2U) * 5U);
+}
+
+void print_plain_radio_status(const RfRadioStatus &status, bool include_summary)
+{
+    if (include_summary) {
+        std::printf("STATUS running=%u rx_enabled=%u rx_active=%u tx=%u maintenance=%u has_last=%u accepted=%lu duplicates=%lu rx_drops=%lu truncated=%lu command_timeouts=%lu console_drops=%lu\n",
+                    status.running, status.receive_enabled, status.receive_active, status.transmitting,
+                    status.maintenance_active, status.has_last_frame,
+                    static_cast<unsigned long>(status.accepted_frames),
+                    static_cast<unsigned long>(status.suppressed_duplicates),
+                    static_cast<unsigned long>(status.rx_queue_drops),
+                    static_cast<unsigned long>(status.truncated_captures),
+                    static_cast<unsigned long>(status.command_timeouts),
+                    static_cast<unsigned long>(s_frame_queue_drops.load(std::memory_order_relaxed)));
+    }
+    if (status.cc1101_info_valid) {
+        std::printf("RADIO part=0x%02X version=0x%02X state=0x%02X rssi_x2=%d cs=%u cca=%u resets=%lu recoveries=%lu ready_timeouts=%lu state_timeouts=%lu frequency_hz=%d power_dbm=%d\n",
+                    status.cc1101.part_number, status.cc1101.version, status.cc1101.marc_state,
+                    status.cc1101.rssi_dbm_x2, status.cc1101.carrier_sense,
+                    status.cc1101.clear_channel,
+                    static_cast<unsigned long>(status.cc1101.reset_count),
+                    static_cast<unsigned long>(status.cc1101.recovery_count),
+                    static_cast<unsigned long>(status.cc1101.ready_timeout_count),
+                    static_cast<unsigned long>(status.cc1101.state_timeout_count),
+                    CONFIG_CC1101_FREQUENCY_HZ, CONFIG_CC1101_TX_POWER_DBM);
+    } else {
+        std::printf("RADIO unavailable error=%s (0x%x) frequency_hz=%d power_dbm=%d\n",
+                    esp_err_to_name(status.cc1101_error),
+                    static_cast<unsigned>(status.cc1101_error), CONFIG_CC1101_FREQUENCY_HZ,
+                    CONFIG_CC1101_TX_POWER_DBM);
+    }
+}
+
+void print_pretty_radio_status(const RfRadioStatus &status, bool include_summary)
+{
+    char left[64]{};
+    char right[64]{};
+    if (include_summary) {
+        print_dashboard_header("System / Console");
+        print_dashboard_row("Style", console_style_name(current_console_style()), ConsoleTone::kInfo,
+                            "RF service", status.running ? "RUNNING" : "STOPPED",
+                            status.running ? ConsoleTone::kSuccess : ConsoleTone::kError);
+        std::snprintf(left, sizeof(left), "%lu", static_cast<unsigned long>(
+                                                   s_frame_queue_drops.load(std::memory_order_relaxed)));
+        print_dashboard_row("Last frame", status.has_last_frame ? "available" : "none",
+                            status.has_last_frame ? ConsoleTone::kInfo : ConsoleTone::kMuted,
+                            "Console drops", left,
+                            std::strcmp(left, "0") == 0 ? ConsoleTone::kMuted : ConsoleTone::kError);
+        print_dashboard_footer();
+    }
+
+    print_dashboard_header("RF / CC1101");
+    const char *receive = status.receive_active
+                              ? "ACTIVE"
+                              : (status.receive_enabled ? "ENABLED" : "OFF");
+    print_dashboard_row("Service", status.running ? "RUNNING" : "STOPPED",
+                        status.running ? ConsoleTone::kSuccess : ConsoleTone::kError,
+                        "Receive", receive,
+                        status.receive_active ? ConsoleTone::kSuccess : ConsoleTone::kWarning);
+    print_dashboard_row("Transmit", status.transmitting ? "ACTIVE" : "idle",
+                        status.transmitting ? ConsoleTone::kAction : ConsoleTone::kMuted,
+                        "Maintenance", status.maintenance_active ? "ACTIVE" : "no",
+                        status.maintenance_active ? ConsoleTone::kWarning : ConsoleTone::kMuted);
+    std::snprintf(left, sizeof(left), "%d.%03d MHz", CONFIG_CC1101_FREQUENCY_HZ / 1000000,
+                  (CONFIG_CC1101_FREQUENCY_HZ % 1000000) / 1000);
+    std::snprintf(right, sizeof(right), "%+d dBm", CONFIG_CC1101_TX_POWER_DBM);
+    print_dashboard_row("Frequency", left, ConsoleTone::kInfo, "TX power", right,
+                        ConsoleTone::kAction);
+    if (status.cc1101_info_valid) {
+        std::snprintf(left, sizeof(left), "part 0x%02X / ver 0x%02X", status.cc1101.part_number,
+                      status.cc1101.version);
+        std::snprintf(right, sizeof(right), "0x%02X", status.cc1101.marc_state);
+        print_dashboard_row("Chip", left, ConsoleTone::kInfo, "Radio state", right,
+                            ConsoleTone::kInfo);
+        format_half_dbm(status.cc1101.rssi_dbm_x2, left, sizeof(left));
+        std::snprintf(right, sizeof(right), "CS %u / CCA %u", status.cc1101.carrier_sense,
+                      status.cc1101.clear_channel);
+        print_dashboard_row("Signal", left, ConsoleTone::kInfo, "Channel", right,
+                            ConsoleTone::kInfo);
+        std::snprintf(left, sizeof(left), "reset %lu / recovery %lu",
+                      static_cast<unsigned long>(status.cc1101.reset_count),
+                      static_cast<unsigned long>(status.cc1101.recovery_count));
+        std::snprintf(right, sizeof(right), "ready %lu / state %lu",
+                      static_cast<unsigned long>(status.cc1101.ready_timeout_count),
+                      static_cast<unsigned long>(status.cc1101.state_timeout_count));
+        print_dashboard_value("Lifecycle", left, ConsoleTone::kMuted);
+        print_dashboard_value("Timeouts", right,
+                              (status.cc1101.ready_timeout_count == 0 &&
+                               status.cc1101.state_timeout_count == 0)
+                                  ? ConsoleTone::kMuted
+                                  : ConsoleTone::kError);
+    } else {
+        std::snprintf(left, sizeof(left), "%s (0x%x)", esp_err_to_name(status.cc1101_error),
+                      static_cast<unsigned>(status.cc1101_error));
+        print_dashboard_value("Hardware", left, ConsoleTone::kError);
+    }
+    std::snprintf(left, sizeof(left), "accepted %lu / duplicate %lu",
+                  static_cast<unsigned long>(status.accepted_frames),
+                  static_cast<unsigned long>(status.suppressed_duplicates));
+    std::snprintf(right, sizeof(right), "queue %lu / truncated %lu",
+                  static_cast<unsigned long>(status.rx_queue_drops),
+                  static_cast<unsigned long>(status.truncated_captures));
+    print_dashboard_value("Frames", left, ConsoleTone::kInfo);
+    print_dashboard_value("RX faults", right,
+                          (status.rx_queue_drops == 0 && status.truncated_captures == 0)
+                              ? ConsoleTone::kMuted
+                              : ConsoleTone::kWarning);
+    print_dashboard_footer();
+}
+
+int render_radio_status(bool include_summary)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
         return 1;
     }
     RfRadioStatus status{};
@@ -463,67 +1008,133 @@ int status_command(int argc, char **)
     if (error != ESP_OK) {
         return print_result("status", error);
     }
-    std::printf("STATUS running=%u rx_enabled=%u rx_active=%u tx=%u maintenance=%u has_last=%u accepted=%lu duplicates=%lu rx_drops=%lu truncated=%lu command_timeouts=%lu console_drops=%lu\n",
-                status.running, status.receive_enabled, status.receive_active, status.transmitting,
-                status.maintenance_active, status.has_last_frame,
-                static_cast<unsigned long>(status.accepted_frames),
-                static_cast<unsigned long>(status.suppressed_duplicates),
-                static_cast<unsigned long>(status.rx_queue_drops),
-                static_cast<unsigned long>(status.truncated_captures),
-                static_cast<unsigned long>(status.command_timeouts),
-                static_cast<unsigned long>(s_frame_queue_drops.load(std::memory_order_relaxed)));
-    if (status.cc1101_info_valid) {
-        std::printf("RADIO part=0x%02X version=0x%02X state=0x%02X rssi_x2=%d cs=%u cca=%u resets=%lu recoveries=%lu ready_timeouts=%lu state_timeouts=%lu frequency_hz=%d power_dbm=%d\n",
-                    status.cc1101.part_number, status.cc1101.version, status.cc1101.marc_state,
-                    status.cc1101.rssi_dbm_x2, status.cc1101.carrier_sense, status.cc1101.clear_channel,
-                    static_cast<unsigned long>(status.cc1101.reset_count),
-                    static_cast<unsigned long>(status.cc1101.recovery_count),
-                    static_cast<unsigned long>(status.cc1101.ready_timeout_count),
-                    static_cast<unsigned long>(status.cc1101.state_timeout_count), CONFIG_CC1101_FREQUENCY_HZ,
-                    CONFIG_CC1101_TX_POWER_DBM);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        print_plain_radio_status(status, include_summary);
     } else {
-        std::printf("RADIO unavailable error=%s (0x%x) frequency_hz=%d power_dbm=%d\n",
-                    esp_err_to_name(status.cc1101_error), static_cast<unsigned>(status.cc1101_error),
-                    CONFIG_CC1101_FREQUENCY_HZ, CONFIG_CC1101_TX_POWER_DBM);
+        print_pretty_radio_status(status, include_summary);
     }
-    RfAutomationStatus automation{};
-    const esp_err_t automation_error = rf_automation_get_status(&automation);
-    if (automation_error != ESP_OK) {
-        std::printf("AUTOMATION unavailable error=%s (0x%x)\n", esp_err_to_name(automation_error),
-                    static_cast<unsigned>(automation_error));
-    } else if (!automation.available) {
+    return 0;
+}
+
+void print_plain_automation_status(const RfAutomationStatus &automation)
+{
+    if (!automation.available) {
         std::printf("AUTOMATION available=0 enabled_known=%u enabled=%u rules_known=%u rules=%u log_mode_known=%u log_mode=%s error=%s (0x%x) queue_drops=%lu log_events=%lu log_drops=%lu recovery=reboot_after_rule_changes\n",
                     automation.enabled_known, automation.enabled, automation.rule_count_known,
                     automation.rule_count, automation.log_mode_known,
-                    automation.log_mode_known ? rf_automation_log_mode_name(automation.log_mode) : "unknown",
+                    automation.log_mode_known ? rf_automation_log_mode_name(automation.log_mode)
+                                              : "unknown",
                     esp_err_to_name(automation.initialization_error),
                     static_cast<unsigned>(automation.initialization_error),
                     static_cast<unsigned long>(automation.queue_drops),
                     static_cast<unsigned long>(automation.log_events),
                     static_cast<unsigned long>(automation.log_drops));
-    } else {
-        std::printf("AUTOMATION available=1 enabled=%u paused=%u rules=%u log_mode=%s frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu log_events=%lu log_drops=%lu last_error=%s last_trigger=%s last_target=%s\n",
-                    automation.enabled, automation.runtime_paused, automation.rule_count,
-                    rf_automation_log_mode_name(automation.log_mode),
-                    static_cast<unsigned long>(automation.frames_seen),
-                    static_cast<unsigned long>(automation.stale_frames),
-                    static_cast<unsigned long>(automation.ambiguous_frames),
-                    static_cast<unsigned long>(automation.matches),
-                    static_cast<unsigned long>(automation.actions_succeeded),
-                    static_cast<unsigned long>(automation.cooldown_suppressed),
-                    static_cast<unsigned long>(automation.queue_drops),
-                    static_cast<unsigned long>(automation.tx_errors),
-                    static_cast<unsigned long>(automation.log_events),
-                    static_cast<unsigned long>(automation.log_drops), esp_err_to_name(automation.last_error),
-                    automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
-                    automation.last_target[0] == '\0' ? "-" : automation.last_target);
+        return;
+    }
+    std::printf("AUTOMATION available=1 enabled=%u paused=%u rules=%u log_mode=%s frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu log_events=%lu log_drops=%lu last_error=%s last_trigger=%s last_target=%s\n",
+                automation.enabled, automation.runtime_paused, automation.rule_count,
+                rf_automation_log_mode_name(automation.log_mode),
+                static_cast<unsigned long>(automation.frames_seen),
+                static_cast<unsigned long>(automation.stale_frames),
+                static_cast<unsigned long>(automation.ambiguous_frames),
+                static_cast<unsigned long>(automation.matches),
+                static_cast<unsigned long>(automation.actions_succeeded),
+                static_cast<unsigned long>(automation.cooldown_suppressed),
+                static_cast<unsigned long>(automation.queue_drops),
+                static_cast<unsigned long>(automation.tx_errors),
+                static_cast<unsigned long>(automation.log_events),
+                static_cast<unsigned long>(automation.log_drops),
+                esp_err_to_name(automation.last_error),
+                automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
+                automation.last_target[0] == '\0' ? "-" : automation.last_target);
+}
+
+int render_automation_status()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    RfAutomationStatus automation{};
+    const esp_err_t error = rf_automation_get_status(&automation);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        if (error != ESP_OK) {
+            std::printf("AUTOMATION unavailable error=%s (0x%x)\n", esp_err_to_name(error),
+                        static_cast<unsigned>(error));
+        } else {
+            print_plain_automation_status(automation);
+        }
+        return error == ESP_OK ? 0 : 1;
+    }
+
+    print_dashboard_header("Automation");
+    if (error != ESP_OK || !automation.available) {
+        const esp_err_t shown_error = error == ESP_OK ? automation.initialization_error : error;
+        char value[64]{};
+        std::snprintf(value, sizeof(value), "%s (0x%x)", esp_err_to_name(shown_error),
+                      static_cast<unsigned>(shown_error));
+        print_dashboard_value("State", "UNAVAILABLE", ConsoleTone::kError);
+        print_dashboard_value("Error", value, ConsoleTone::kError);
+        print_dashboard_footer();
+        return 1;
+    }
+    char left[64]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%u", automation.rule_count);
+    print_dashboard_row("Enabled", automation.enabled ? "yes" : "no",
+                        automation.enabled ? ConsoleTone::kSuccess : ConsoleTone::kWarning,
+                        "Rules", left, ConsoleTone::kInfo);
+    print_dashboard_row("Runtime", automation.runtime_paused ? "PAUSED" : "ACTIVE",
+                        automation.runtime_paused ? ConsoleTone::kWarning : ConsoleTone::kSuccess,
+                        "Log mode", rf_automation_log_mode_name(automation.log_mode),
+                        ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "frames %lu / matches %lu",
+                  static_cast<unsigned long>(automation.frames_seen),
+                  static_cast<unsigned long>(automation.matches));
+    std::snprintf(right, sizeof(right), "ok %lu / errors %lu",
+                  static_cast<unsigned long>(automation.actions_succeeded),
+                  static_cast<unsigned long>(automation.tx_errors));
+    print_dashboard_value("Activity", left, ConsoleTone::kInfo);
+    print_dashboard_value("Actions", right,
+                          automation.tx_errors == 0 ? ConsoleTone::kSuccess : ConsoleTone::kError);
+    std::snprintf(left, sizeof(left), "stale %lu / ambiguous %lu",
+                  static_cast<unsigned long>(automation.stale_frames),
+                  static_cast<unsigned long>(automation.ambiguous_frames));
+    std::snprintf(right, sizeof(right), "cooldown %lu / queue %lu",
+                  static_cast<unsigned long>(automation.cooldown_suppressed),
+                  static_cast<unsigned long>(automation.queue_drops));
+    print_dashboard_value("Skipped", left,
+                          (automation.stale_frames == 0 && automation.ambiguous_frames == 0)
+                              ? ConsoleTone::kMuted
+                              : ConsoleTone::kWarning);
+    print_dashboard_value("Suppressed", right,
+                          automation.queue_drops == 0 ? ConsoleTone::kMuted
+                                                      : ConsoleTone::kError);
+    std::snprintf(left, sizeof(left), "%s -> %s",
+                  automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
+                  automation.last_target[0] == '\0' ? "-" : automation.last_target);
+    print_dashboard_value("Last rule", left, ConsoleTone::kAction);
+    print_dashboard_value("Last result", esp_err_to_name(automation.last_error),
+                          automation.last_error == ESP_OK ? ConsoleTone::kSuccess
+                                                          : ConsoleTone::kError);
+    print_dashboard_footer();
+    return 0;
+}
+
+int render_wifi_status()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
     }
     NetworkWifiStatus wifi{};
-    const esp_err_t wifi_error = get_network_wifi_status(&wifi);
-    if (wifi_error != ESP_OK) {
-        std::printf("WIFI available=0 error=%s (0x%x)\n", esp_err_to_name(wifi_error),
-                    static_cast<unsigned>(wifi_error));
-    } else {
+    const esp_err_t error = get_network_wifi_status(&wifi);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        if (error != ESP_OK) {
+            std::printf("WIFI available=0 error=%s (0x%x)\n", esp_err_to_name(error),
+                        static_cast<unsigned>(error));
+            return 1;
+        }
         char ip[16]{};
         char netmask[16]{};
         char gateway[16]{};
@@ -538,26 +1149,142 @@ int status_command(int argc, char **)
                     wifi.ota_locked, wifi.active_ssid[0] == '\0' ? "-" : wifi.active_ssid,
                     wifi.saved_ssid[0] == '\0' ? "-" : wifi.saved_ssid, ip, netmask, gateway,
                     dns, wifi.rssi, static_cast<unsigned long>(wifi.retry_count),
-                    static_cast<long>(wifi.disconnect_reason), esp_err_to_name(wifi.persistence_error),
-                    esp_err_to_name(wifi.last_error), static_cast<unsigned long>(wifi.event_drops));
+                    static_cast<long>(wifi.disconnect_reason),
+                    esp_err_to_name(wifi.persistence_error), esp_err_to_name(wifi.last_error),
+                    static_cast<unsigned long>(wifi.event_drops));
+        return 0;
     }
 
+    print_dashboard_header("Wi-Fi");
+    if (error != ESP_OK) {
+        char value[64]{};
+        std::snprintf(value, sizeof(value), "%s (0x%x)", esp_err_to_name(error),
+                      static_cast<unsigned>(error));
+        print_dashboard_value("State", "UNAVAILABLE", ConsoleTone::kError);
+        print_dashboard_value("Error", value, ConsoleTone::kError);
+        print_dashboard_footer();
+        return 1;
+    }
+    char left[64]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%d dBm", wifi.rssi);
+    print_dashboard_row("State", wifi_state_display(wifi.state), wifi_state_tone(wifi.state),
+                        "Signal", wifi.state == NetworkWifiState::kOnline ? left : "-",
+                        wifi.state == NetworkWifiState::kOnline ? ConsoleTone::kInfo
+                                                               : ConsoleTone::kMuted);
+    print_dashboard_value("Network", wifi.active_ssid[0] == '\0' ? "-" : wifi.active_ssid,
+                          wifi.state == NetworkWifiState::kOnline ? ConsoleTone::kSuccess
+                                                                 : ConsoleTone::kMuted);
+    print_dashboard_value("Saved SSID", wifi.saved_ssid[0] == '\0' ? "-" : wifi.saved_ssid,
+                          wifi.saved ? ConsoleTone::kInfo : ConsoleTone::kMuted);
+    format_ipv4(wifi.ip, left, sizeof(left));
+    format_ipv4(wifi.netmask, right, sizeof(right));
+    print_dashboard_row("Address", left, ConsoleTone::kInfo, "Netmask", right,
+                        ConsoleTone::kMuted);
+    format_ipv4(wifi.gateway, left, sizeof(left));
+    format_ipv4(wifi.dns, right, sizeof(right));
+    print_dashboard_row("Gateway", left, ConsoleTone::kMuted, "DNS", right,
+                        ConsoleTone::kMuted);
+    print_dashboard_row("Saved", wifi.saved ? "yes" : "no",
+                        wifi.saved ? ConsoleTone::kSuccess : ConsoleTone::kWarning,
+                        "OTA lock", wifi.ota_locked ? "ACTIVE" : "no",
+                        wifi.ota_locked ? ConsoleTone::kWarning : ConsoleTone::kMuted);
+    std::snprintf(left, sizeof(left), "%lu", static_cast<unsigned long>(wifi.retry_count));
+    std::snprintf(right, sizeof(right), "%lu", static_cast<unsigned long>(wifi.event_drops));
+    print_dashboard_row("Retries", left,
+                        wifi.retry_count == 0 ? ConsoleTone::kMuted : ConsoleTone::kWarning,
+                        "Event drops", right,
+                        wifi.event_drops == 0 ? ConsoleTone::kMuted : ConsoleTone::kError);
+    print_dashboard_value("Persistence", esp_err_to_name(wifi.persistence_error),
+                          wifi.persistence_error == ESP_OK ? ConsoleTone::kSuccess
+                                                           : ConsoleTone::kError);
+    print_dashboard_footer();
+    return 0;
+}
+
+int render_ota_status()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
     OtaUpdateStatus ota{};
-    const esp_err_t ota_error = get_ota_update_status(&ota);
-    if (ota_error != ESP_OK) {
-        std::printf("OTA available=0 error=%s (0x%x)\n", esp_err_to_name(ota_error),
-                    static_cast<unsigned>(ota_error));
-    } else {
+    const esp_err_t error = get_ota_update_status(&ota);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        if (error != ESP_OK) {
+            std::printf("OTA available=0 error=%s (0x%x)\n", esp_err_to_name(error),
+                        static_cast<unsigned>(error));
+            return 1;
+        }
         std::printf("OTA available=%u state=%s server=%u upload=%u port=%u running=%s update=%s version=%s candidate=%s bytes=%lu total=%lu pending_verify=%u rollback=%u last_error=%s maintenance_error=%s\n",
                     ota.available, ota_update_state_name(ota.state), ota.server_running,
                     ota.upload_active, ota.port, ota.running_partition, ota.update_partition,
-                    ota.running_version, ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
+                    ota.running_version,
+                    ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
                     static_cast<unsigned long>(ota.bytes_received),
                     static_cast<unsigned long>(ota.content_length), ota.pending_verification,
-                     ota.rollback_possible, esp_err_to_name(ota.last_error),
-                     esp_err_to_name(ota.maintenance_error));
+                    ota.rollback_possible, esp_err_to_name(ota.last_error),
+                    esp_err_to_name(ota.maintenance_error));
+        return 0;
     }
+
+    print_dashboard_header("LAN OTA");
+    if (error != ESP_OK) {
+        char value[64]{};
+        std::snprintf(value, sizeof(value), "%s (0x%x)", esp_err_to_name(error),
+                      static_cast<unsigned>(error));
+        print_dashboard_value("State", "UNAVAILABLE", ConsoleTone::kError);
+        print_dashboard_value("Error", value, ConsoleTone::kError);
+        print_dashboard_footer();
+        return 1;
+    }
+    char left[64]{};
+    std::snprintf(left, sizeof(left), "%s : %u", ota.server_running ? "LISTENING" : "stopped",
+                  ota.port);
+    print_dashboard_row("State", ota_state_display(ota.state), ota_state_tone(ota.state),
+                        "Server", left,
+                        ota.server_running ? ConsoleTone::kSuccess : ConsoleTone::kMuted);
+    print_dashboard_row("Running", ota.running_partition, ConsoleTone::kSuccess,
+                        "Next slot", ota.update_partition, ConsoleTone::kInfo);
+    print_dashboard_value("Version", ota.running_version, ConsoleTone::kInfo);
+    print_dashboard_value("Candidate",
+                          ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
+                          ota.candidate_version[0] == '\0' ? ConsoleTone::kMuted
+                                                           : ConsoleTone::kAction);
+    std::snprintf(left, sizeof(left), "%u%% (%lu / %lu bytes)",
+                  ota_progress_percent(ota.bytes_received, ota.content_length),
+                  static_cast<unsigned long>(ota.bytes_received),
+                  static_cast<unsigned long>(ota.content_length));
+    print_dashboard_value("Progress", left,
+                          ota.upload_active ? ConsoleTone::kWarning : ConsoleTone::kMuted);
+    print_dashboard_row("Pending", ota.pending_verification ? "VERIFY" : "no",
+                        ota.pending_verification ? ConsoleTone::kWarning : ConsoleTone::kMuted,
+                        "Rollback", ota.rollback_possible ? "available" : "no",
+                        ota.rollback_possible ? ConsoleTone::kSuccess : ConsoleTone::kMuted);
+    print_dashboard_value("Last error", esp_err_to_name(ota.last_error),
+                          ota.last_error == ESP_OK ? ConsoleTone::kSuccess
+                                                   : ConsoleTone::kError);
+    print_dashboard_value("Maintenance", esp_err_to_name(ota.maintenance_error),
+                          ota.maintenance_error == ESP_OK ? ConsoleTone::kSuccess
+                                                          : ConsoleTone::kError);
+    print_dashboard_footer();
     return 0;
+}
+
+int status_command(int argc, char **)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    if (argc != 1) {
+        return print_usage("usage: status");
+    }
+    const int result = render_radio_status(true);
+    render_automation_status();
+    render_wifi_status();
+    render_ota_status();
+    return result;
 }
 
 bool read_wifi_password(WifiCredentials *credentials)
@@ -621,10 +1348,50 @@ bool read_wifi_password(WifiCredentials *credentials)
     return true;
 }
 
+int console_command(int argc, char **argv)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "style") == 0) {
+        char plain[48]{};
+        char pretty[64]{};
+        char output[128]{};
+        const ConsoleStyle style = current_console_style();
+        std::snprintf(plain, sizeof(plain), "CONSOLE style=%s", console_style_name(style));
+        std::snprintf(pretty, sizeof(pretty), "Console style is %s", console_style_name(style));
+        if (format_console_tagged_line(style, ConsoleTone::kInfo, "STYLE", plain, pretty, output,
+                                       sizeof(output))) {
+            std::printf("%s\n", output);
+        }
+        return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "style") == 0) {
+        ConsoleStyle style{};
+        if (!parse_console_style(argv[2], &style)) {
+            return print_usage("usage: console style <pretty|plain>");
+        }
+        s_console_style.store(style, std::memory_order_release);
+        char plain[48]{};
+        char pretty[64]{};
+        char output[128]{};
+        std::snprintf(plain, sizeof(plain), "CONSOLE style=%s", console_style_name(style));
+        std::snprintf(pretty, sizeof(pretty), "Console style changed to %s",
+                      console_style_name(style));
+        if (format_console_tagged_line(style, ConsoleTone::kSuccess, "STYLE", plain, pretty,
+                                       output, sizeof(output))) {
+            std::printf("%s\n", output);
+        }
+        return 0;
+    }
+    return print_usage("usage: console style [pretty|plain]");
+}
+
 int wifi_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
-        return status_command(1, argv);
+        return render_wifi_status();
     }
     if (argc == 2 && std::strcmp(argv[1], "start") == 0) {
         return print_result("wifi start", start_saved_network_wifi());
@@ -641,37 +1408,37 @@ int wifi_command(int argc, char **argv)
     if (argc == 3 && std::strcmp(argv[1], "connect") == 0) {
         const std::size_t ssid_length = std::strlen(argv[2]);
         if (ssid_length == 0 || ssid_length >= kWifiSsidCapacity) {
-            std::printf("ERROR wifi SSID must contain 1..32 printable characters\n");
-            return 1;
+            return print_validation_error(
+                "ERROR wifi SSID must contain 1..32 printable characters",
+                "Wi-Fi SSID must contain 1..32 printable characters");
         }
         WifiCredentials credentials{};
         std::memcpy(credentials.ssid, argv[2], ssid_length + 1U);
         if (!read_wifi_password(&credentials) || !wifi_credentials_are_valid(credentials)) {
             std::memset(&credentials, 0, sizeof(credentials));
-            std::printf("ERROR wifi password must be empty, 8..63 printable characters, or 64 hex digits\n");
-            return 1;
+            return print_validation_error(
+                "ERROR wifi password must be empty, 8..63 printable characters, or 64 hex digits",
+                "Password must be empty, 8..63 printable characters, or 64 hex digits");
         }
         const esp_err_t error = connect_network_wifi(credentials);
         std::memset(&credentials, 0, sizeof(credentials));
         return print_result("wifi connect", error);
     }
-    std::printf("usage: wifi <status|connect <ssid>|start|stop|forget|scan>\n");
-    return 1;
+    return print_usage("usage: wifi <status|connect <ssid>|start|stop|forget|scan>");
 }
 
 int ota_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
-        return status_command(1, argv);
+        return render_ota_status();
     }
-    std::printf("usage: ota status (updates are uploaded from the PC HTTP client)\n");
-    return 1;
+    return print_usage("usage: ota status (updates are uploaded from the PC HTTP client)");
 }
 
 int radio_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "info") == 0) {
-        return status_command(1, argv);
+        return render_radio_status(false);
     }
     if (argc == 2 && std::strcmp(argv[1], "reset") == 0) {
         return print_result("radio reset", reset_rf_radio());
@@ -679,15 +1446,13 @@ int radio_command(int argc, char **argv)
     if (argc == 2 && std::strcmp(argv[1], "start") == 0) {
         return print_result("radio start", start_rf_ook(rf_console_on_frame, nullptr));
     }
-    std::printf("usage: radio <info|reset|start>\n");
-    return 1;
+    return print_usage("usage: radio <info|reset|start>");
 }
 
 int rx_command(int argc, char **argv)
 {
     if (argc != 2 || (std::strcmp(argv[1], "on") != 0 && std::strcmp(argv[1], "off") != 0)) {
-        std::printf("usage: rx <on|off>\n");
-        return 1;
+        return print_usage("usage: rx <on|off>");
     }
     const bool enabled = std::strcmp(argv[1], "on") == 0;
     return print_result(enabled ? "rx on" : "rx off", set_rf_receive_enabled(enabled));
@@ -696,8 +1461,7 @@ int rx_command(int argc, char **argv)
 int last_command(int argc, char **)
 {
     if (argc != 1) {
-        std::printf("usage: last\n");
-        return 1;
+        return print_usage("usage: last");
     }
     RfFrame frame{};
     const esp_err_t error = get_last_rf_frame(&frame);
@@ -710,6 +1474,10 @@ int last_command(int argc, char **)
 
 int list_learned_names()
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         std::size_t count = 0;
         esp_err_t error = rf_storage_list(nullptr, 0, &count);
@@ -717,7 +1485,13 @@ int list_learned_names()
             return print_result("learn list", error);
         }
         if (count == 0) {
-            std::printf("LEARNED_NAMES count=0\n");
+            if (current_console_style() == ConsoleStyle::kPlain) {
+                std::printf("LEARNED_NAMES count=0\n");
+            } else {
+                print_dashboard_header("Learned signals");
+                print_dashboard_value("Count", "0", ConsoleTone::kMuted);
+                print_dashboard_footer();
+            }
             return 0;
         }
         std::unique_ptr<RfStorageName[]> names(new (std::nothrow) RfStorageName[count]);
@@ -732,9 +1506,20 @@ int list_learned_names()
         if (error != ESP_OK) {
             return print_result("learn list", error);
         }
-        std::printf("LEARNED_NAMES count=%zu\n", count);
-        for (std::size_t index = 0; index < count; ++index) {
-            std::printf("  %s\n", names[index].value);
+        if (current_console_style() == ConsoleStyle::kPlain) {
+            std::printf("LEARNED_NAMES count=%zu\n", count);
+            for (std::size_t index = 0; index < count; ++index) {
+                std::printf("  %s\n", names[index].value);
+            }
+        } else {
+            char count_text[24]{};
+            std::snprintf(count_text, sizeof(count_text), "%zu", count);
+            print_dashboard_header("Learned signals");
+            print_dashboard_value("Count", count_text, ConsoleTone::kInfo);
+            for (std::size_t index = 0; index < count; ++index) {
+                print_dashboard_value("Signal", names[index].value, ConsoleTone::kInfo);
+            }
+            print_dashboard_footer();
         }
         return 0;
     }
@@ -747,8 +1532,7 @@ int learn_command(int argc, char **argv)
         return list_learned_names();
     }
     if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
-        std::printf("usage: learn <name>|list (name: letter then up to 14 letters/digits/_/-)\n");
-        return 1;
+        return print_usage("usage: learn <name>|list (name: letter then up to 14 letters/digits/_/-)");
     }
     if (!rf_storage_is_available()) {
         return print_result("learn", rf_storage_initialization_error());
@@ -759,8 +1543,11 @@ int learn_command(int argc, char **argv)
         return print_result("learn", error);
     }
     if (exists) {
-        std::printf("ERROR learn name=%s already exists\n", argv[1]);
-        return 1;
+        char plain[96]{};
+        char pretty[96]{};
+        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", argv[1]);
+        std::snprintf(pretty, sizeof(pretty), "Learned signal %s already exists", argv[1]);
+        return print_validation_error(plain, pretty);
     }
     RfRadioStatus status{};
     error = get_rf_radio_status(&status);
@@ -768,17 +1555,18 @@ int learn_command(int argc, char **argv)
         return print_result("learn", error);
     }
     if (!status.running || !status.receive_enabled) {
-        std::printf("ERROR learn requires running RF with RX enabled\n");
-        return 1;
+        return print_validation_error("ERROR learn requires running RF with RX enabled",
+                                      "Learning requires running RF with RX enabled");
     }
 
     ConsoleEvent event{};
     event.type = ConsoleEventType::kLearnRequest;
     event.occurred_us = esp_timer_get_time();
     std::memcpy(event.name, argv[1], std::strlen(argv[1]) + 1U);
-    if (s_event_queue == nullptr || xQueueSend(s_event_queue, &event, kLearnEnqueueWaitTicks) != pdTRUE) {
-        std::printf("ERROR learn event queue busy\n");
-        return 1;
+    if (s_event_queue == nullptr ||
+        xQueueSend(s_event_queue, &event, kLearnEnqueueWaitTicks) != pdTRUE) {
+        return print_validation_error("ERROR learn event queue busy",
+                                      "Learning queue is busy; retry");
     }
     if (s_event_worker_task != nullptr) {
         xTaskNotifyGive(s_event_worker_task);
@@ -789,13 +1577,13 @@ int learn_command(int argc, char **argv)
 int forget_command(int argc, char **argv)
 {
     if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
-        std::printf("usage: forget <name>\n");
-        return 1;
+        return print_usage("usage: forget <name>");
     }
     const esp_err_t error = rf_storage_forget(argv[1]);
     if (error == ESP_ERR_INVALID_STATE) {
-        std::printf("ERROR forget: learned name is referenced by an automation rule\n");
-        return 1;
+        return print_validation_error(
+            "ERROR forget: learned name is referenced by an automation rule",
+            "Cannot forget signal while an automation rule references it");
     }
     return print_result("forget", error);
 }
@@ -804,8 +1592,7 @@ int replay_command(int argc, char **argv)
 {
     ReplayArguments arguments{};
     if (!parse_replay_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &arguments)) {
-        std::printf("usage: replay [repeats:1..20] | replay <name> <repeats:1..20>\n");
-        return 1;
+        return print_usage("usage: replay [repeats:1..20] | replay <name> <repeats:1..20>");
     }
     if (arguments.target == ReplayTarget::kRam) {
         return print_result("replay", replay_last_rf_frame(arguments.repeats));
@@ -825,6 +1612,10 @@ int replay_command(int argc, char **argv)
 
 int list_rules()
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
     RfAutomationStatus status{};
     const esp_err_t status_error = rf_automation_get_status(&status);
     if (status_error != ESP_OK) {
@@ -846,21 +1637,71 @@ int list_rules()
             return print_result("rule list", error);
         }
     }
-    std::printf("RULES automation_available=%u enabled_known=%u enabled=%u log_mode_known=%u log_mode=%s count=%zu%s\n",
-                status.available, status.enabled_known, status.enabled, status.log_mode_known,
-                status.log_mode_known ? rf_automation_log_mode_name(status.log_mode) : "unknown", count,
-                status.available ? "" : " recovery=reboot_after_changes");
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf("RULES automation_available=%u enabled_known=%u enabled=%u log_mode_known=%u log_mode=%s count=%zu%s\n",
+                    status.available, status.enabled_known, status.enabled, status.log_mode_known,
+                    status.log_mode_known ? rf_automation_log_mode_name(status.log_mode) : "unknown",
+                    count, status.available ? "" : " recovery=reboot_after_changes");
+        for (std::size_t index = 0; index < count; ++index) {
+            if (rules[index].validation_error != ESP_OK) {
+                std::printf("  %s INVALID error=%s (0x%x)\n", rules[index].entry.trigger_name,
+                            esp_err_to_name(rules[index].validation_error),
+                            static_cast<unsigned>(rules[index].validation_error));
+                continue;
+            }
+            std::printf("  %s -> %s repeats=%u cooldown_ms=%lu\n",
+                        rules[index].entry.trigger_name, rules[index].entry.rule.target_name,
+                        rules[index].entry.rule.repeats,
+                        static_cast<unsigned long>(rules[index].entry.rule.cooldown_ms));
+        }
+        return 0;
+    }
+
+    char value[64]{};
+    print_dashboard_header("Automation rules");
+    if (!status.available) {
+        print_dashboard_value("State", "UNAVAILABLE", ConsoleTone::kError);
+        std::snprintf(value, sizeof(value), "%s (0x%x)",
+                      esp_err_to_name(status.initialization_error),
+                      static_cast<unsigned>(status.initialization_error));
+        print_dashboard_value("Error", value, ConsoleTone::kError);
+    }
+    if (status.rule_count_known) {
+        std::snprintf(value, sizeof(value), "%u", status.rule_count);
+    } else {
+        std::snprintf(value, sizeof(value), "unknown (listed %zu)", count);
+    }
+    print_dashboard_row("Enabled",
+                        status.enabled_known ? (status.enabled ? "yes" : "no") : "unknown",
+                        !status.enabled_known
+                            ? ConsoleTone::kWarning
+                            : (status.enabled ? ConsoleTone::kSuccess : ConsoleTone::kWarning),
+                        "Rule count", value,
+                        status.rule_count_known ? ConsoleTone::kInfo : ConsoleTone::kWarning);
+    print_dashboard_value("Log mode",
+                          status.log_mode_known ? rf_automation_log_mode_name(status.log_mode)
+                                                : "unknown",
+                          status.log_mode_known ? ConsoleTone::kInfo : ConsoleTone::kWarning);
     for (std::size_t index = 0; index < count; ++index) {
         if (rules[index].validation_error != ESP_OK) {
-            std::printf("  %s INVALID error=%s (0x%x)\n", rules[index].entry.trigger_name,
-                        esp_err_to_name(rules[index].validation_error),
-                        static_cast<unsigned>(rules[index].validation_error));
+            print_dashboard_value("Rule", rules[index].entry.trigger_name, ConsoleTone::kError);
+            std::snprintf(value, sizeof(value), "%s (0x%x)",
+                          esp_err_to_name(rules[index].validation_error),
+                          static_cast<unsigned>(rules[index].validation_error));
+            print_dashboard_value("Error", value, ConsoleTone::kError);
             continue;
         }
-        std::printf("  %s -> %s repeats=%u cooldown_ms=%lu\n", rules[index].entry.trigger_name,
-                    rules[index].entry.rule.target_name, rules[index].entry.rule.repeats,
-                    static_cast<unsigned long>(rules[index].entry.rule.cooldown_ms));
+        std::snprintf(value, sizeof(value), "%s -> %s | x%u | %lums",
+                      rules[index].entry.trigger_name, rules[index].entry.rule.target_name,
+                      rules[index].entry.rule.repeats,
+                      static_cast<unsigned long>(rules[index].entry.rule.cooldown_ms));
+        print_dashboard_value("Rule", value, ConsoleTone::kAction);
     }
+    if (!status.available) {
+        print_dashboard_value("Recovery", "reboot required after rule changes",
+                              ConsoleTone::kWarning);
+    }
+    print_dashboard_footer();
     return 0;
 }
 
@@ -871,7 +1712,13 @@ int print_rule_mutation_result(const char *operation, esp_err_t error)
     }
     RfAutomationStatus status{};
     if (rf_automation_get_status(&status) == ESP_OK && !status.available) {
-        std::printf("OK %s; reboot required to retry automation startup\n", operation);
+        char plain[160]{};
+        char pretty[160]{};
+        std::snprintf(plain, sizeof(plain),
+                      "OK %s; reboot required to retry automation startup", operation);
+        std::snprintf(pretty, sizeof(pretty), "%s saved | reboot required to restart automation",
+                      operation);
+        print_tagged_line(ConsoleTone::kWarning, "RULE", plain, pretty, false);
         return 0;
     }
     return print_result(operation, ESP_OK);
@@ -885,12 +1732,22 @@ int show_rule_log_mode()
     if (error != ESP_OK) {
         return print_result("rule log", error);
     }
+    char plain[96]{};
+    char pretty[96]{};
     if (!status.log_mode_known) {
-        std::printf("RULE_LOG mode=unknown automation_available=%u\n", status.available);
+        std::snprintf(plain, sizeof(plain), "RULE_LOG mode=unknown automation_available=%u",
+                      status.available);
+        std::snprintf(pretty, sizeof(pretty), "Log mode unknown | automation %s",
+                      status.available ? "available" : "unavailable");
+        print_tagged_line(ConsoleTone::kWarning, "RULE", plain, pretty, false);
         return 1;
     }
-    std::printf("RULE_LOG mode=%s automation_available=%u\n",
-                rf_automation_log_mode_name(status.log_mode), status.available);
+    std::snprintf(plain, sizeof(plain), "RULE_LOG mode=%s automation_available=%u",
+                  rf_automation_log_mode_name(status.log_mode), status.available);
+    std::snprintf(pretty, sizeof(pretty), "Log mode %s | automation %s",
+                  rf_automation_log_mode_name(status.log_mode),
+                  status.available ? "available" : "unavailable");
+    print_tagged_line(ConsoleTone::kInfo, "RULE", plain, pretty, false);
     return 0;
 }
 
@@ -911,8 +1768,7 @@ int rule_command(int argc, char **argv)
     if (argc == 3 && std::strcmp(argv[1], "log") == 0) {
         RfAutomationLogMode mode{};
         if (!parse_rule_log_mode(argv[2], &mode)) {
-            std::printf("usage: rule log <off|actions|verbose>\n");
-            return 1;
+            return print_usage("usage: rule log <off|actions|verbose>");
         }
         return print_rule_mutation_result("rule log", rf_automation_set_log_mode(mode));
     }
@@ -923,27 +1779,29 @@ int rule_command(int argc, char **argv)
     if ((argc == 4 || argc == 5) && parse_rule_add_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &repeats)) {
         return print_result("rule add", rf_automation_add_rule(argv[2], argv[3], repeats));
     }
-    std::printf("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable|log [off|actions|verbose]>\n");
-    return 1;
+    return print_usage("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable|log [off|actions|verbose]>");
 }
 
 int send_value_command(int argc, char **argv)
 {
     if (argc < 4 || argc > 6) {
-        std::printf("usage: send <code> <bits> <protocol> [pulse_us] [repeats]\n");
-        return 1;
+        return print_usage("usage: send <code> <bits> <protocol> [pulse_us] [repeats]");
     }
     uint64_t code = 0;
     uint64_t bits = 0;
     uint64_t protocol_number = 0;
     if (!parse_unsigned_value(argv[1], UINT64_MAX, &code) || !parse_bounded(argv[2], 4, 64, &bits) ||
         !parse_bounded(argv[3], 1, kRfProtocolCount, &protocol_number)) {
-        std::printf("ERROR code must be decimal/0x; bits 4..64; protocol 1..%zu\n", kRfProtocolCount);
-        return 1;
+        char plain[128]{};
+        std::snprintf(plain, sizeof(plain),
+                      "ERROR code must be decimal/0x; bits 4..64; protocol 1..%zu",
+                      kRfProtocolCount);
+        return print_validation_error(plain,
+                                      "Code must be decimal/0x; bits 4..64; protocol 1..12");
     }
     if (bits < 64 && (code >> bits) != 0) {
-        std::printf("ERROR code does not fit in the requested bit count\n");
-        return 1;
+        return print_validation_error("ERROR code does not fit in the requested bit count",
+                                      "Code does not fit the requested bit count");
     }
     const uint8_t selected_protocol = static_cast<uint8_t>(protocol_number);
     const RfProtocol *protocol = rf_protocol(selected_protocol);
@@ -955,12 +1813,13 @@ int send_value_command(int argc, char **argv)
     const uint16_t maximum_unit =
         static_cast<uint16_t>(kMaximumPulseDurationUs / rf_protocol_max_factor(selected_protocol));
     if (argc >= 5 && !parse_bounded(argv[4], minimum_unit, maximum_unit, &pulse_us)) {
-        std::printf("ERROR pulse_us is outside the selected protocol's transport limits\n");
-        return 1;
+        return print_validation_error(
+            "ERROR pulse_us is outside the selected protocol's transport limits",
+            "Pulse width is outside the selected protocol's transport limits");
     }
     if (argc == 6 && !parse_bounded(argv[5], 1, 20, &repeats)) {
-        std::printf("ERROR repeats must be 1..20\n");
-        return 1;
+        return print_validation_error("ERROR repeats must be 1..20",
+                                      "Repeat count must be 1..20");
     }
     DecodedSignal signal{};
     signal.code = code;
@@ -973,76 +1832,86 @@ int send_value_command(int argc, char **argv)
 
 void print_staged_raw()
 {
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return;
+    }
     char line[kOutputLineSize]{};
     std::size_t length = 0;
     bool formatted = false;
     if (!s_raw_staging) {
-        formatted = append_to_line(line, sizeof(line), &length, "RAW_STAGE empty\n");
+        formatted = append_to_line(line, sizeof(line), &length, "empty");
     } else {
-        formatted = append_to_line(line, sizeof(line), &length, "RAW_STAGE start=%u count=%u durations=",
-                                   s_staged_raw.start_level, s_staged_raw.count);
+        formatted = append_to_line(line, sizeof(line), &length,
+                                   "start=%u count=%u durations=", s_staged_raw.start_level,
+                                   s_staged_raw.count);
         for (std::size_t index = 0; formatted && index < s_staged_raw.count; ++index) {
             formatted = append_to_line(line, sizeof(line), &length, "%s%u", index == 0 ? "" : ",",
                                        s_staged_raw.durations_us[index]);
-        }
-        if (formatted) {
-            formatted = append_to_line(line, sizeof(line), &length, "\n");
         }
     }
     if (!formatted) {
         ESP_LOGE(kTag, "Could not format staged raw output without truncation");
         return;
     }
-    std::printf("%s", line);
+    if (current_console_style() == ConsoleStyle::kPretty) {
+        print_tagged_line(ConsoleTone::kAction, "RAW", "", line, false);
+    } else if (decorate_console_message(ConsoleStyle::kPlain, ConsoleTone::kAction, "RAW",
+                                         "RAW_STAGE ", line, sizeof(line))) {
+        std::printf("%s\n", line);
+    } else {
+        ESP_LOGE(kTag, "Could not format staged raw prefix");
+    }
 }
 
 int raw_command(int argc, char **argv)
 {
     if (argc < 2) {
-        std::printf("usage: raw <begin|append|show|send|clear> ...\n");
-        return 1;
+        return print_usage("usage: raw <begin|append|show|send|clear> ...");
     }
     if (std::strcmp(argv[1], "clear") == 0 && argc == 2) {
         s_staged_raw = {};
         s_raw_staging = false;
-        std::printf("OK raw clear\n");
-        return 0;
+        return print_result("raw clear", ESP_OK);
     }
     if (std::strcmp(argv[1], "begin") == 0) {
         uint64_t start_level = 0;
         if (argc != 3 || !parse_bounded(argv[2], 0, 1, &start_level)) {
-            std::printf("usage: raw begin <start_level:0|1>\n");
-            return 1;
+            return print_usage("usage: raw begin <start_level:0|1>");
         }
         s_staged_raw = {};
         s_staged_raw.start_level = static_cast<uint8_t>(start_level);
         s_raw_staging = true;
-        std::printf("OK raw begin\n");
-        return 0;
+        return print_result("raw begin", ESP_OK);
     }
     if (std::strcmp(argv[1], "append") == 0) {
         if (!s_raw_staging || argc < 3) {
-            std::printf("usage: raw begin <0|1>, then raw append <duration_us>...\n");
-            return 1;
+            return print_usage("usage: raw begin <0|1>, then raw append <duration_us>...");
         }
         const std::size_t additions = static_cast<std::size_t>(argc - 2);
         if (static_cast<std::size_t>(s_staged_raw.count) + additions > kMaxRawPulses) {
-            std::printf("ERROR raw pulse limit is %zu\n", kMaxRawPulses);
-            return 1;
+            char plain[64]{};
+            std::snprintf(plain, sizeof(plain), "ERROR raw pulse limit is %zu", kMaxRawPulses);
+            return print_validation_error(plain, "Raw pulse limit is 256");
         }
         uint16_t parsed[kMaxRawPulses]{};
         for (std::size_t index = 0; index < additions; ++index) {
             uint64_t duration = 0;
             if (!parse_bounded(argv[index + 2U], kMinimumRawPulseUs, kMaximumPulseDurationUs, &duration)) {
-                std::printf("ERROR every duration must be 100..29000 us\n");
-                return 1;
+                return print_validation_error("ERROR every duration must be 100..29000 us",
+                                              "Every duration must be 100..29000 us");
             }
             parsed[index] = static_cast<uint16_t>(duration);
         }
         for (std::size_t index = 0; index < additions; ++index) {
             s_staged_raw.durations_us[s_staged_raw.count++] = parsed[index];
         }
-        std::printf("OK raw append count=%u\n", s_staged_raw.count);
+        char plain[64]{};
+        char pretty[64]{};
+        std::snprintf(plain, sizeof(plain), "OK raw append count=%u", s_staged_raw.count);
+        std::snprintf(pretty, sizeof(pretty), "raw append completed | %u pulse(s)",
+                      s_staged_raw.count);
+        print_tagged_line(ConsoleTone::kSuccess, " OK ", plain, pretty, false);
         return 0;
     }
     if (std::strcmp(argv[1], "show") == 0 && argc == 2) {
@@ -1053,17 +1922,19 @@ int raw_command(int argc, char **argv)
         uint64_t repeats = CONFIG_RF_DEFAULT_TX_REPEATS;
         if (!s_raw_staging || argc > 3 ||
             (argc == 3 && !parse_bounded(argv[2], 1, 20, &repeats))) {
-            std::printf("usage: raw send [repeats]\n");
-            return 1;
+            return print_usage("usage: raw send [repeats]");
         }
         if (!raw_signal_is_valid(s_staged_raw)) {
-            std::printf("ERROR raw frame needs 8..%zu alternating pulses and an even count\n", kMaxRawPulses);
-            return 1;
+            char plain[112]{};
+            std::snprintf(plain, sizeof(plain),
+                          "ERROR raw frame needs 8..%zu alternating pulses and an even count",
+                          kMaxRawPulses);
+            return print_validation_error(
+                plain, "Raw frame needs 8..256 alternating pulses and an even count");
         }
         return print_result("raw send", transmit_rf_raw(s_staged_raw, static_cast<uint16_t>(repeats)));
     }
-    std::printf("usage: raw <begin|append|show|send|clear> ...\n");
-    return 1;
+    return print_usage("usage: raw <begin|append|show|send|clear> ...");
 }
 
 esp_err_t register_command(const char *name, const char *help, const char *hint, esp_console_cmd_func_t handler)
@@ -1084,7 +1955,8 @@ struct CommandDefinition {
 };
 
 constexpr CommandDefinition kCommands[] = {
-    {"status", "Show RF, network, and OTA diagnostics", nullptr, status_command},
+    {"status", "Show the complete system dashboard", nullptr, status_command},
+    {"console", "Select colored or machine-readable output", "style [pretty|plain]", console_command},
     {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
@@ -1212,6 +2084,10 @@ void cleanup_failed_start(std::size_t registered_count)
             }
         }
     }
+    if (safe_to_delete_events && s_repl == nullptr && s_output_mutex != nullptr) {
+        vSemaphoreDelete(s_output_mutex);
+        s_output_mutex = nullptr;
+    }
     s_started.store(false, std::memory_order_release);
     s_starting.clear(std::memory_order_release);
 }
@@ -1231,9 +2107,14 @@ esp_err_t start_rf_console()
     }
     if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
         s_automation_log_queue != nullptr || s_network_event_queue != nullptr ||
-        s_ota_event_queue != nullptr || s_event_worker_task != nullptr) {
+        s_ota_event_queue != nullptr || s_output_mutex != nullptr || s_event_worker_task != nullptr) {
         s_starting.clear(std::memory_order_release);
         return ESP_ERR_INVALID_STATE;
+    }
+
+    s_output_mutex = xSemaphoreCreateRecursiveMutex();
+    if (s_output_mutex == nullptr) {
+        return fail_start(ESP_ERR_NO_MEM, 0);
     }
 
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
@@ -1259,13 +2140,16 @@ esp_err_t start_rf_console()
     s_event_queue = xQueueCreate(kFrameEventQueueDepth, sizeof(ConsoleEvent));
     s_automation_log_queue = xQueueCreate(kAutomationLogQueueDepth, sizeof(RfAutomationEvent));
     s_network_event_queue = xQueueCreate(kNetworkEventQueueDepth, sizeof(NetworkWifiEvent));
-    s_ota_event_queue = xQueueCreate(kOtaEventQueueDepth, sizeof(OtaUpdateEvent));
+    s_ota_event_queue = xQueueCreate(kOtaEventQueueDepth, sizeof(ConsoleOtaEvent));
     if (s_event_queue == nullptr || s_automation_log_queue == nullptr ||
         s_network_event_queue == nullptr || s_ota_event_queue == nullptr) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
     s_frame_queue_drops.store(0, std::memory_order_relaxed);
     s_frame_callbacks_in_flight.store(0, std::memory_order_relaxed);
+    s_ota_series_generation.store(0, std::memory_order_relaxed);
+    s_ota_progress_series_active = false;
+    s_rendered_ota_series_generation = 0;
     if (xTaskCreate(event_worker_task, "rf_events", kEventWorkerTaskStackSize, nullptr, 3,
                     &s_event_worker_task) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
@@ -1292,6 +2176,19 @@ esp_err_t start_rf_console()
         s_ota_sink_registered = true;
     }
 
+    {
+        OutputGuard output_guard;
+        if (current_console_style() == ConsoleStyle::kPretty) {
+            std::printf("\n");
+            print_dashboard_header("ESP32 + CC1101 RF Bridge");
+            print_dashboard_row("Console", "READY", ConsoleTone::kSuccess, "Style", "pretty",
+                                ConsoleTone::kInfo);
+            print_dashboard_value("Hint", "Type help to list commands", ConsoleTone::kMuted);
+            print_dashboard_footer();
+        } else {
+            std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
+        }
+    }
     error = esp_console_start_repl(s_repl);
     if (error == ESP_OK) {
         s_repl_started = true;
@@ -1304,7 +2201,6 @@ esp_err_t start_rf_console()
     s_accept_frame_callbacks.store(true, std::memory_order_release);
     s_started.store(true, std::memory_order_release);
     s_starting.clear(std::memory_order_release);
-    std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
     return ESP_OK;
 }
 

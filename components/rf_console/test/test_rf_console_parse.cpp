@@ -1,8 +1,105 @@
 #include <cstdint>
 #include <cstring>
 
+#include "rf_console_format.hpp"
 #include "rf_console_parse.hpp"
 #include "unity.h"
+
+TEST_CASE("console formatter handles styles percentages and bounded bars", "[rf_console][format]")
+{
+    using rfbridge::ConsoleStyle;
+    ConsoleStyle style{};
+    TEST_ASSERT_TRUE(rfbridge::parse_console_style("pretty", &style));
+    TEST_ASSERT_EQUAL(static_cast<int>(ConsoleStyle::kPretty), static_cast<int>(style));
+    TEST_ASSERT_TRUE(rfbridge::parse_console_style("plain", &style));
+    TEST_ASSERT_EQUAL(static_cast<int>(ConsoleStyle::kPlain), static_cast<int>(style));
+    TEST_ASSERT_FALSE(rfbridge::parse_console_style("color", &style));
+    TEST_ASSERT_EQUAL_UINT8(0, rfbridge::ota_progress_percent(10, 0));
+    TEST_ASSERT_EQUAL_UINT8(42, rfbridge::ota_progress_percent(420, 1000));
+    TEST_ASSERT_EQUAL_UINT8(100, rfbridge::ota_progress_percent(UINT32_MAX, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT8(100, rfbridge::ota_progress_percent(UINT32_MAX, 1));
+    std::size_t chunk_length = 0;
+    std::size_t consumed_length = 0;
+    TEST_ASSERT_TRUE(rfbridge::console_wrap_chunk("alpha beta gamma", 10, &chunk_length,
+                                                  &consumed_length));
+    TEST_ASSERT_EQUAL_size_t(10, chunk_length);
+    TEST_ASSERT_EQUAL_size_t(11, consumed_length);
+    TEST_ASSERT_TRUE(rfbridge::console_wrap_chunk("123,456,789", 7, &chunk_length,
+                                                  &consumed_length));
+    TEST_ASSERT_EQUAL_size_t(4, chunk_length);
+    TEST_ASSERT_EQUAL_size_t(4, consumed_length);
+
+    char line[256]{};
+    TEST_ASSERT_TRUE(rfbridge::format_ota_progress_line(ConsoleStyle::kPlain, 420, 1000, line,
+                                                        sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("OTA PROGRESS bytes=420 total=1000", line);
+    TEST_ASSERT_TRUE(rfbridge::format_ota_progress_line(ConsoleStyle::kPretty, 420, 1000, line,
+                                                        sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, " 42% [########------------]"));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "\x1b[0m"));
+    TEST_ASSERT_TRUE(rfbridge::format_ota_progress_line(ConsoleStyle::kPretty, 957680, 957680,
+                                                        line, sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "100% [####################] 936 KiB / 936 KiB"));
+
+    char short_line[16]{};
+    TEST_ASSERT_FALSE(rfbridge::format_ota_progress_line(ConsoleStyle::kPretty, 420, 1000,
+                                                         short_line, sizeof(short_line)));
+}
+
+TEST_CASE("console formatter resets ANSI and rejects dashboard truncation", "[rf_console][format]")
+{
+    using rfbridge::ConsoleStyle;
+    using rfbridge::ConsoleTone;
+    char line[256]{};
+    TEST_ASSERT_TRUE(rfbridge::format_console_tagged_line(
+        ConsoleStyle::kPretty, ConsoleTone::kSuccess, " OK ", "OK rx on", "RX enabled", line,
+        sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "\x1b[1;32m[ OK  ]\x1b[0m RX enabled"));
+    TEST_ASSERT_EQUAL_STRING("\x1b[0m", line + std::strlen(line) - 4U);
+    TEST_ASSERT_TRUE(rfbridge::format_console_tagged_line(
+        ConsoleStyle::kPlain, ConsoleTone::kSuccess, " OK ", "OK rx on", "RX enabled", line,
+        sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("OK rx on", line);
+    std::strcpy(line, "RC code=7");
+    TEST_ASSERT_TRUE(rfbridge::decorate_console_message(
+        ConsoleStyle::kPlain, ConsoleTone::kInfo, "RF RX", "RX ", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("RX RC code=7", line);
+    std::strcpy(line, "RC code=7");
+    TEST_ASSERT_TRUE(rfbridge::decorate_console_message(
+        ConsoleStyle::kPretty, ConsoleTone::kInfo, "RF RX", "RX ", line, sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "[RF RX]\x1b[0m RC code=7"));
+    TEST_ASSERT_EQUAL_STRING("\x1b[0m", line + std::strlen(line) - 4U);
+
+    TEST_ASSERT_TRUE(rfbridge::format_console_section_header("Wi-Fi", line, sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "+-- Wi-Fi "));
+    TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_row(
+        "Last frame", "available", ConsoleTone::kInfo, "Console drops", "0",
+        ConsoleTone::kMuted, line, sizeof(line)));
+    TEST_ASSERT_NOT_NULL(std::strstr(line, "Console drops"));
+    TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_row(
+        "1234567890123", "1234567890123456789012", ConsoleTone::kSuccess,
+        "1234567890123", "1234567890123456789012", ConsoleTone::kInfo, line,
+        sizeof(line)));
+    TEST_ASSERT_FALSE(rfbridge::format_console_dashboard_row(
+        "12345678901234", "value", ConsoleTone::kSuccess, "label", "value",
+        ConsoleTone::kInfo, line, sizeof(line)));
+    TEST_ASSERT_FALSE(rfbridge::format_console_dashboard_row(
+        "label", "12345678901234567890123", ConsoleTone::kSuccess, "label", "value",
+        ConsoleTone::kInfo, line, sizeof(line)));
+    TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_value(
+        "Network", "iliadbox-2.4ghz  192.168.1.17", ConsoleTone::kInfo, line, sizeof(line)));
+    TEST_ASSERT_FALSE(rfbridge::format_console_dashboard_value(
+        "Network", "this value is deliberately longer than the sixty character dashboard limit 123",
+        ConsoleTone::kInfo, line, sizeof(line)));
+    TEST_ASSERT_TRUE(rfbridge::format_console_wifi_disconnected_message(
+        ConsoleStyle::kPlain, "iliadbox-2.4ghz", 8, "online", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING(
+        "WIFI DISCONNECTED ssid=iliadbox-2.4ghz reason=8 state=online", line);
+    TEST_ASSERT_TRUE(rfbridge::format_console_wifi_disconnected_message(
+        ConsoleStyle::kPretty, "iliadbox-2.4ghz", 8, "online", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("Disconnected from iliadbox-2.4ghz | reason 8", line);
+    TEST_ASSERT_NULL(std::strstr(line, "ONLINE"));
+}
 
 TEST_CASE("console unsigned parser accepts decimal and hexadecimal", "[rf_console]")
 {
