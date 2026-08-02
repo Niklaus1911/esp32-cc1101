@@ -23,6 +23,7 @@ struct ReplayArguments {
 bool parse_unsigned_value(const char *text, uint64_t maximum, uint64_t *value);
 bool parse_replay_arguments(int argc, const char *const *argv, uint16_t default_repeats,
                             ReplayArguments *arguments);
+bool parse_rule_add_arguments(int argc, const char *const *argv, uint8_t default_repeats, uint8_t *repeats);
 LearnFrameDisposition classify_learn_frame(int64_t armed_us, int64_t deadline_us, int64_t frame_event_us,
                                            int64_t frame_capture_start_us);
 

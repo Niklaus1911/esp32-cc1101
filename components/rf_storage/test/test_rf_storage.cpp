@@ -5,6 +5,8 @@
 #include <iterator>
 
 #include "esp_random.h"
+#include "nvs.h"
+#include "../private_include/rf_storage_rule_backend.hpp"
 #include "rf_storage.hpp"
 #include "unity.h"
 
@@ -44,6 +46,16 @@ rfbridge::RfStoredSignal decoded_signal()
     signal.decoded.bits = 24;
     signal.decoded.protocol = 1;
     return signal;
+}
+
+esp_err_t accept_rule_validator(const rfbridge::RfStoredSignal &, const rfbridge::RfStoredSignal &, void *)
+{
+    return ESP_OK;
+}
+
+esp_err_t reject_rule_validator(const rfbridge::RfStoredSignal &, const rfbridge::RfStoredSignal &, void *)
+{
+    return ESP_ERR_INVALID_STATE;
 }
 
 }  // namespace
@@ -273,4 +285,325 @@ TEST_CASE("RF storage NVS backend is create only and forgets one key", "[rf_stor
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, missing_forget_error);
     TEST_ASSERT_EQUAL(ESP_OK, final_exists_error);
     TEST_ASSERT_FALSE(exists);
+}
+
+
+TEST_CASE("RF automation rule record matches golden bytes and round trips", "[rf_storage][rf_automation]")
+{
+    rfbridge::RfStoredRule rule{};
+    std::strcpy(rule.target_name, "A");
+    rule.repeats = 8;
+    rule.cooldown_ms = rfbridge::kRfAutomationCooldownMs;
+    uint8_t record[rfbridge::kRfStorageMaxRuleRecordSize]{};
+    std::size_t size = 0;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+    constexpr uint8_t golden[] = {0x52, 0x46, 0x52, 0x4C, 0x01, 0x00, 0x07, 0x00, 0x01, 0x08,
+                                  0xE8, 0x03, 0x00, 0x00, 0x41, 0x6E, 0xFB, 0x09, 0xF0};
+    TEST_ASSERT_EQUAL_UINT32(sizeof(golden), size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(golden, record, sizeof(golden));
+
+    rfbridge::RfStoredRule loaded{};
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::decode_rf_rule_record(record, size, &loaded)));
+    TEST_ASSERT_EQUAL_STRING("A", loaded.target_name);
+    TEST_ASSERT_EQUAL_UINT8(8, loaded.repeats);
+    TEST_ASSERT_EQUAL_UINT32(rfbridge::kRfAutomationCooldownMs, loaded.cooldown_ms);
+}
+
+TEST_CASE("RF automation rule record rejects malformed fields", "[rf_storage][rf_automation]")
+{
+    rfbridge::RfStoredRule rule{};
+    std::strcpy(rule.target_name, "target");
+    rule.repeats = 8;
+    rule.cooldown_ms = rfbridge::kRfAutomationCooldownMs;
+    uint8_t record[rfbridge::kRfStorageMaxRuleRecordSize]{};
+    std::size_t size = 0;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+    rfbridge::RfStoredRule loaded{};
+
+    record[8] = 0;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_rule_record(record, size, &loaded)));
+
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+    record[9] = 21;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_rule_record(record, size, &loaded)));
+
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+    record[15] = 0;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_rule_record(record, size, &loaded)));
+
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+    record[10] ^= 1U;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kInvalidCrc),
+                      static_cast<int>(rfbridge::decode_rf_rule_record(record, size, &loaded)));
+
+    rule.repeats = 0;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRuleFormatResult::kInvalidArgument),
+                      static_cast<int>(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size)));
+}
+
+
+TEST_CASE("RF automation rule storage preserves references and shared targets", "[rf_storage][rf_automation][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+
+    char trigger_one[rfbridge::kRfStorageNameCapacity]{};
+    char trigger_two[rfbridge::kRfStorageNameCapacity]{};
+    char target[rfbridge::kRfStorageNameCapacity]{};
+    auto allocate_name = [](char *name) {
+        bool exists = true;
+        for (int attempt = 0; attempt < 8 && exists; ++attempt) {
+            std::snprintf(name, rfbridge::kRfStorageNameCapacity, "R%08lX",
+                          static_cast<unsigned long>(esp_random()));
+            if (rfbridge::rf_storage_exists(name, &exists) != ESP_OK) {
+                return false;
+            }
+        }
+        return !exists;
+    };
+    TEST_ASSERT_TRUE(allocate_name(trigger_one));
+    TEST_ASSERT_TRUE(allocate_name(trigger_two));
+    TEST_ASSERT_TRUE(allocate_name(target));
+
+    rfbridge::RfStoredSignal first = decoded_signal();
+    rfbridge::RfStoredSignal second = first;
+    rfbridge::RfStoredSignal action = first;
+    first.decoded.code = 0xA88140;
+    second.decoded.code = 0xA88141;
+    action.decoded.code = 0xA88142;
+
+    const esp_err_t create_first = rfbridge::rf_storage_create(trigger_one, first);
+    const esp_err_t create_second = rfbridge::rf_storage_create(trigger_two, second);
+    const esp_err_t create_target = rfbridge::rf_storage_create(target, action);
+
+    rfbridge::RfStoredRule rule{};
+    std::strncpy(rule.target_name, target, sizeof(rule.target_name) - 1U);
+    rule.repeats = 8;
+    rule.cooldown_ms = rfbridge::kRfAutomationCooldownMs;
+    const esp_err_t rejected_rule = rfbridge::rf_storage_rule_create_validated(
+        trigger_one, rule, reject_rule_validator, nullptr, nullptr, nullptr);
+    rfbridge::RfStoredRule rejected_load{};
+    const esp_err_t rejected_load_error = rfbridge::rf_storage_rule_load(trigger_one, &rejected_load);
+    const esp_err_t create_rule_one = rfbridge::rf_storage_rule_create_validated(trigger_one, rule, accept_rule_validator, nullptr, nullptr, nullptr);
+    rfbridge::RfStoredRule conflicting = rule;
+    std::strncpy(conflicting.target_name, trigger_two, sizeof(conflicting.target_name) - 1U);
+    const esp_err_t duplicate_trigger = rfbridge::rf_storage_rule_create_validated(trigger_one, conflicting, accept_rule_validator, nullptr, nullptr, nullptr);
+    const esp_err_t create_rule_two = rfbridge::rf_storage_rule_create_validated(trigger_two, rule, accept_rule_validator, nullptr, nullptr, nullptr);
+
+    bool previous_enabled = true;
+    const esp_err_t get_previous_enabled = rfbridge::rf_storage_rule_enabled_get(&previous_enabled);
+    nvs_handle_t meta_handle = 0;
+    esp_err_t malformed_meta_write = nvs_open("rf_rule_meta", NVS_READWRITE, &meta_handle);
+    if (malformed_meta_write == ESP_OK) {
+        const esp_err_t erase_error = nvs_erase_key(meta_handle, "enabled");
+        malformed_meta_write = erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND
+                                   ? ESP_OK
+                                   : erase_error;
+    }
+    if (malformed_meta_write == ESP_OK) {
+        malformed_meta_write = nvs_set_u32(meta_handle, "enabled", 1);
+    }
+    if (malformed_meta_write == ESP_OK) {
+        malformed_meta_write = nvs_commit(meta_handle);
+    }
+    if (meta_handle != 0) {
+        nvs_close(meta_handle);
+    }
+    bool malformed_enabled = false;
+    const esp_err_t malformed_meta_get = rfbridge::rf_storage_rule_enabled_get(&malformed_enabled);
+    const esp_err_t disable_error = rfbridge::rf_storage_rule_enabled_set(false);
+    bool disabled = true;
+    const esp_err_t get_disabled = rfbridge::rf_storage_rule_enabled_get(&disabled);
+    const esp_err_t restore_enabled = rfbridge::rf_storage_rule_enabled_set(previous_enabled);
+
+    const esp_err_t forget_trigger_referenced = rfbridge::rf_storage_forget(trigger_one);
+    const esp_err_t forget_target_referenced = rfbridge::rf_storage_forget(target);
+
+    std::size_t rule_count = 0;
+    const esp_err_t count_error = rfbridge::rf_storage_rule_list(nullptr, 0, &rule_count);
+    rfbridge::RfStorageRuleEntry listed_rules[128]{};
+    esp_err_t list_error = ESP_ERR_INVALID_SIZE;
+    bool found_first = false;
+    bool found_second = false;
+    if (count_error == ESP_OK && rule_count <= std::size(listed_rules)) {
+        list_error = rfbridge::rf_storage_rule_list(listed_rules, std::size(listed_rules), &rule_count);
+        for (std::size_t index = 0; list_error == ESP_OK && index < rule_count; ++index) {
+            found_first = found_first || std::strcmp(listed_rules[index].trigger_name, trigger_one) == 0;
+            found_second = found_second || std::strcmp(listed_rules[index].trigger_name, trigger_two) == 0;
+        }
+    }
+
+    const esp_err_t remove_first = rfbridge::rf_storage_rule_remove(trigger_one);
+    const esp_err_t remove_second = rfbridge::rf_storage_rule_remove(trigger_two);
+    const esp_err_t forget_first = rfbridge::rf_storage_forget(trigger_one);
+    const esp_err_t forget_second = rfbridge::rf_storage_forget(trigger_two);
+    const esp_err_t forget_target = rfbridge::rf_storage_forget(target);
+
+    TEST_ASSERT_EQUAL(ESP_OK, create_first);
+    TEST_ASSERT_EQUAL(ESP_OK, create_second);
+    TEST_ASSERT_EQUAL(ESP_OK, create_target);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, rejected_rule);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, rejected_load_error);
+    TEST_ASSERT_EQUAL(ESP_OK, create_rule_one);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, duplicate_trigger);
+    TEST_ASSERT_EQUAL(ESP_OK, create_rule_two);
+    TEST_ASSERT_EQUAL(ESP_OK, get_previous_enabled);
+    TEST_ASSERT_EQUAL(ESP_OK, malformed_meta_write);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, malformed_meta_get);
+    TEST_ASSERT_EQUAL(ESP_OK, disable_error);
+    TEST_ASSERT_EQUAL(ESP_OK, get_disabled);
+    TEST_ASSERT_FALSE(disabled);
+    TEST_ASSERT_EQUAL(ESP_OK, restore_enabled);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, forget_trigger_referenced);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, forget_target_referenced);
+    TEST_ASSERT_EQUAL(ESP_OK, count_error);
+    TEST_ASSERT_EQUAL(ESP_OK, list_error);
+    TEST_ASSERT_TRUE(found_first);
+    TEST_ASSERT_TRUE(found_second);
+    TEST_ASSERT_EQUAL(ESP_OK, remove_first);
+    TEST_ASSERT_EQUAL(ESP_OK, remove_second);
+    TEST_ASSERT_EQUAL(ESP_OK, forget_first);
+    TEST_ASSERT_EQUAL(ESP_OK, forget_second);
+    TEST_ASSERT_EQUAL(ESP_OK, forget_target);
+}
+
+
+TEST_CASE("RF rule administration identifies malformed persisted records", "[rf_storage][rf_automation][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+    char trigger[rfbridge::kRfStorageNameCapacity]{};
+    esp_err_t load_before = ESP_OK;
+    for (int attempt = 0; attempt < 8 && load_before != ESP_ERR_NOT_FOUND; ++attempt) {
+        std::snprintf(trigger, sizeof(trigger), "M%08lX", static_cast<unsigned long>(esp_random()));
+        rfbridge::RfStoredRule unused{};
+        load_before = rfbridge::rf_storage_rule_load(trigger, &unused);
+    }
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, load_before);
+
+    nvs_handle_t handle = 0;
+    const uint8_t malformed[] = {0x52, 0x46, 0x52, 0x4C};
+    esp_err_t write_error = nvs_open("rf_rules", NVS_READWRITE, &handle);
+    if (write_error == ESP_OK) {
+        write_error = nvs_set_blob(handle, trigger, malformed, sizeof(malformed));
+    }
+    if (write_error == ESP_OK) {
+        write_error = nvs_commit(handle);
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+
+    rfbridge::RfStoredRule loaded{};
+    const esp_err_t malformed_error =
+        write_error == ESP_OK ? rfbridge::rf_storage_rule_load(trigger, &loaded) : write_error;
+    std::size_t count = 0;
+    const esp_err_t count_error = rfbridge::rf_storage_rule_name_list(nullptr, 0, &count);
+    rfbridge::RfStorageName names[128]{};
+    esp_err_t list_error = ESP_ERR_INVALID_SIZE;
+    bool listed = false;
+    if (count_error == ESP_OK && count <= std::size(names)) {
+        list_error = rfbridge::rf_storage_rule_name_list(names, std::size(names), &count);
+        for (std::size_t index = 0; list_error == ESP_OK && index < count; ++index) {
+            listed = listed || std::strcmp(names[index].value, trigger) == 0;
+        }
+    }
+    const esp_err_t remove_error = rfbridge::rf_storage_rule_remove(trigger);
+
+    TEST_ASSERT_EQUAL(ESP_OK, write_error);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, malformed_error);
+    TEST_ASSERT_EQUAL(ESP_OK, count_error);
+    TEST_ASSERT_EQUAL(ESP_OK, list_error);
+    TEST_ASSERT_TRUE(listed);
+    TEST_ASSERT_EQUAL(ESP_OK, remove_error);
+}
+
+
+TEST_CASE("RF rule recovery exposes wrong types and malformed trigger keys", "[rf_storage][rf_automation][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+    nvs_handle_t handle = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_rules", NVS_READWRITE, &handle));
+
+    char valid_trigger[rfbridge::kRfStorageNameCapacity]{};
+    char invalid_trigger[rfbridge::kRfStorageNameCapacity]{};
+    esp_err_t valid_find = ESP_OK;
+    esp_err_t invalid_find = ESP_OK;
+    for (int attempt = 0; attempt < 8 && valid_find != ESP_ERR_NVS_NOT_FOUND; ++attempt) {
+        std::snprintf(valid_trigger, sizeof(valid_trigger), "W%08lX", static_cast<unsigned long>(esp_random()));
+        valid_find = nvs_find_key(handle, valid_trigger, nullptr);
+    }
+    for (int attempt = 0; attempt < 8 && invalid_find != ESP_ERR_NVS_NOT_FOUND; ++attempt) {
+        std::snprintf(invalid_trigger, sizeof(invalid_trigger), "1%08lX", static_cast<unsigned long>(esp_random()));
+        invalid_find = nvs_find_key(handle, invalid_trigger, nullptr);
+    }
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, valid_find);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, invalid_find);
+
+    const esp_err_t create_signal = rfbridge::rf_storage_create(valid_trigger, decoded_signal());
+    const uint8_t malformed_blob[] = {0x52, 0x46, 0x52, 0x4C};
+    esp_err_t write_error = create_signal;
+    if (write_error == ESP_OK) {
+        write_error = nvs_set_u8(handle, valid_trigger, 1);
+    }
+    if (write_error == ESP_OK) {
+        write_error = nvs_set_blob(handle, invalid_trigger, malformed_blob, sizeof(malformed_blob));
+    }
+    if (write_error == ESP_OK) {
+        write_error = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    const esp_err_t protected_forget =
+        write_error == ESP_OK ? rfbridge::rf_storage_forget(valid_trigger) : write_error;
+    std::size_t count = 0;
+    const esp_err_t count_error = rfbridge::rf_storage_rule_name_list(nullptr, 0, &count);
+    rfbridge::RfStorageName names[128]{};
+    esp_err_t names_error = ESP_ERR_INVALID_SIZE;
+    bool found_valid = false;
+    bool found_invalid = false;
+    if (count_error == ESP_OK && count <= std::size(names)) {
+        names_error = rfbridge::rf_storage_rule_name_list(names, std::size(names), &count);
+        for (std::size_t index = 0; names_error == ESP_OK && index < count; ++index) {
+            found_valid = found_valid || std::strcmp(names[index].value, valid_trigger) == 0;
+            found_invalid = found_invalid || std::strcmp(names[index].value, invalid_trigger) == 0;
+        }
+    }
+    rfbridge::RfStoredRule loaded{};
+    const esp_err_t wrong_type_error = rfbridge::rf_storage_rule_load(valid_trigger, &loaded);
+    const esp_err_t invalid_name_error = rfbridge::rf_storage_rule_load(invalid_trigger, &loaded);
+    rfbridge::RfStorageRuleEntry strict_rules[128]{};
+    std::size_t strict_count = 0;
+    esp_err_t strict_error = rfbridge::rf_storage_rule_list(nullptr, 0, &strict_count);
+    if (strict_error == ESP_OK && strict_count <= std::size(strict_rules)) {
+        strict_error = rfbridge::rf_storage_rule_list(strict_rules, std::size(strict_rules), &strict_count);
+    }
+
+    const esp_err_t remove_valid = rfbridge::rf_storage_rule_remove_recovery(valid_trigger);
+    const esp_err_t remove_invalid = rfbridge::rf_storage_rule_remove_recovery(invalid_trigger);
+    const esp_err_t forget_signal = rfbridge::rf_storage_forget(valid_trigger);
+
+    TEST_ASSERT_EQUAL(ESP_OK, create_signal);
+    TEST_ASSERT_EQUAL(ESP_OK, write_error);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, protected_forget);
+    TEST_ASSERT_EQUAL(ESP_OK, count_error);
+    TEST_ASSERT_EQUAL(ESP_OK, names_error);
+    TEST_ASSERT_TRUE(found_valid);
+    TEST_ASSERT_TRUE(found_invalid);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, wrong_type_error);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, invalid_name_error);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, strict_error);
+    TEST_ASSERT_EQUAL(ESP_OK, remove_valid);
+    TEST_ASSERT_EQUAL(ESP_OK, remove_invalid);
+    TEST_ASSERT_EQUAL(ESP_OK, forget_signal);
 }

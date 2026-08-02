@@ -5,11 +5,14 @@ enable_testing()
 
 add_executable(rf_host_tests
     host_tests.cpp
+    ../components/rf_automation/rf_automation_engine.cpp
     ../components/rf_codec/rf_codec.cpp
     ../components/rf_console/rf_console_parse.cpp
     ../components/rf_storage/rf_storage_format.cpp
+    ../components/rf_storage/rf_storage_rule_format.cpp
 )
 target_include_directories(rf_host_tests PRIVATE
+    ../components/rf_automation/include
     ../components/rf_codec/include
     ../components/rf_console/include
     ../components/rf_storage/include

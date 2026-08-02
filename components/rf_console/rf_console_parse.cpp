@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 
 #include "rf_storage_format.hpp"
 
@@ -53,6 +54,22 @@ bool parse_replay_arguments(int argc, const char *const *argv, uint16_t default_
     }
     parsed.repeats = static_cast<uint16_t>(repeats);
     *arguments = parsed;
+    return true;
+}
+
+
+bool parse_rule_add_arguments(int argc, const char *const *argv, uint8_t default_repeats, uint8_t *repeats)
+{
+    if (argv == nullptr || repeats == nullptr || default_repeats < 1 || default_repeats > 20 || argc < 4 ||
+        argc > 5 || std::strcmp(argv[1], "add") != 0 || !rf_storage_name_is_valid(argv[2]) ||
+        !rf_storage_name_is_valid(argv[3]) || std::strcmp(argv[2], argv[3]) == 0) {
+        return false;
+    }
+    uint64_t parsed = default_repeats;
+    if (argc == 5 && (!parse_unsigned_value(argv[4], 20, &parsed) || parsed < 1)) {
+        return false;
+    }
+    *repeats = static_cast<uint8_t>(parsed);
     return true;
 }
 

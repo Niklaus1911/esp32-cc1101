@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "rf_automation.hpp"
 #include "rf_console_parse.hpp"
 #include "rf_storage.hpp"
 #include "sdkconfig.h"
@@ -326,6 +327,30 @@ int status_command(int argc, char **)
                     esp_err_to_name(status.cc1101_error), static_cast<unsigned>(status.cc1101_error),
                     CONFIG_CC1101_FREQUENCY_HZ, CONFIG_CC1101_TX_POWER_DBM);
     }
+    RfAutomationStatus automation{};
+    const esp_err_t automation_error = rf_automation_get_status(&automation);
+    if (automation_error != ESP_OK) {
+        std::printf("AUTOMATION unavailable error=%s (0x%x)\n", esp_err_to_name(automation_error),
+                    static_cast<unsigned>(automation_error));
+    } else if (!automation.available) {
+        std::printf("AUTOMATION available=0 enabled_known=%u enabled=%u rules_known=%u rules=%u error=%s (0x%x) queue_drops=%lu recovery=reboot_after_rule_changes\n",
+                    automation.enabled_known, automation.enabled, automation.rule_count_known,
+                    automation.rule_count, esp_err_to_name(automation.initialization_error),
+                    static_cast<unsigned>(automation.initialization_error),
+                    static_cast<unsigned long>(automation.queue_drops));
+    } else {
+        std::printf("AUTOMATION available=1 enabled=%u rules=%u frames=%lu stale=%lu ambiguous=%lu matches=%lu actions=%lu cooldown_suppressed=%lu queue_drops=%lu tx_errors=%lu last_error=%s last_trigger=%s last_target=%s\n",
+                    automation.enabled, automation.rule_count, static_cast<unsigned long>(automation.frames_seen),
+                    static_cast<unsigned long>(automation.stale_frames),
+                    static_cast<unsigned long>(automation.ambiguous_frames),
+                    static_cast<unsigned long>(automation.matches),
+                    static_cast<unsigned long>(automation.actions_succeeded),
+                    static_cast<unsigned long>(automation.cooldown_suppressed),
+                    static_cast<unsigned long>(automation.queue_drops),
+                    static_cast<unsigned long>(automation.tx_errors), esp_err_to_name(automation.last_error),
+                    automation.last_trigger[0] == '\0' ? "-" : automation.last_trigger,
+                    automation.last_target[0] == '\0' ? "-" : automation.last_target);
+    }
     return 0;
 }
 
@@ -450,7 +475,12 @@ int forget_command(int argc, char **argv)
         std::printf("usage: forget <name>\n");
         return 1;
     }
-    return print_result("forget", rf_storage_forget(argv[1]));
+    const esp_err_t error = rf_storage_forget(argv[1]);
+    if (error == ESP_ERR_INVALID_STATE) {
+        std::printf("ERROR forget: learned name is referenced by an automation rule\n");
+        return 1;
+    }
+    return print_result("forget", error);
 }
 
 int replay_command(int argc, char **argv)
@@ -473,6 +503,82 @@ int replay_command(int argc, char **argv)
                                          ? transmit_rf_decoded(stored.decoded, arguments.repeats)
                                          : transmit_rf_raw(stored.raw, arguments.repeats);
     return print_result("replay named", transmit_error);
+}
+
+
+int list_rules()
+{
+    RfAutomationStatus status{};
+    const esp_err_t status_error = rf_automation_get_status(&status);
+    if (status_error != ESP_OK) {
+        return print_result("rule list", status_error);
+    }
+    std::size_t count = 0;
+    esp_err_t error = rf_automation_list_rule_info(nullptr, 0, &count);
+    if (error != ESP_OK) {
+        return print_result("rule list", error);
+    }
+    std::unique_ptr<RfAutomationRuleInfo[]> rules;
+    if (count > 0) {
+        rules.reset(new (std::nothrow) RfAutomationRuleInfo[count]);
+        if (!rules) {
+            return print_result("rule list", ESP_ERR_NO_MEM);
+        }
+        error = rf_automation_list_rule_info(rules.get(), count, &count);
+        if (error != ESP_OK) {
+            return print_result("rule list", error);
+        }
+    }
+    std::printf("RULES automation_available=%u enabled_known=%u enabled=%u count=%zu%s\n",
+                status.available, status.enabled_known, status.enabled, count,
+                status.available ? "" : " recovery=reboot_after_changes");
+    for (std::size_t index = 0; index < count; ++index) {
+        if (rules[index].validation_error != ESP_OK) {
+            std::printf("  %s INVALID error=%s (0x%x)\n", rules[index].entry.trigger_name,
+                        esp_err_to_name(rules[index].validation_error),
+                        static_cast<unsigned>(rules[index].validation_error));
+            continue;
+        }
+        std::printf("  %s -> %s repeats=%u cooldown_ms=%lu\n", rules[index].entry.trigger_name,
+                    rules[index].entry.rule.target_name, rules[index].entry.rule.repeats,
+                    static_cast<unsigned long>(rules[index].entry.rule.cooldown_ms));
+    }
+    return 0;
+}
+
+int print_rule_mutation_result(const char *operation, esp_err_t error)
+{
+    if (error != ESP_OK) {
+        return print_result(operation, error);
+    }
+    RfAutomationStatus status{};
+    if (rf_automation_get_status(&status) == ESP_OK && !status.available) {
+        std::printf("OK %s; reboot required to retry automation startup\n", operation);
+        return 0;
+    }
+    return print_result(operation, ESP_OK);
+}
+
+int rule_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "list") == 0) {
+        return list_rules();
+    }
+    if (argc == 2 && std::strcmp(argv[1], "enable") == 0) {
+        return print_rule_mutation_result("rule enable", rf_automation_set_enabled(true));
+    }
+    if (argc == 2 && std::strcmp(argv[1], "disable") == 0) {
+        return print_rule_mutation_result("rule disable", rf_automation_set_enabled(false));
+    }
+    if (argc == 3 && std::strcmp(argv[1], "remove") == 0) {
+        return print_rule_mutation_result("rule remove", rf_automation_remove_rule(argv[2]));
+    }
+    uint8_t repeats = 0;
+    if ((argc == 4 || argc == 5) && parse_rule_add_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &repeats)) {
+        return print_result("rule add", rf_automation_add_rule(argv[2], argv[3], repeats));
+    }
+    std::printf("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable>\n");
+    return 1;
 }
 
 int send_value_command(int argc, char **argv)
@@ -638,6 +744,8 @@ constexpr CommandDefinition kCommands[] = {
     {"last", "Print the latest RAM frame", nullptr, last_command},
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
+    {"rule", "Configure persistent receive-to-replay automation",
+     "<add <rx> <tx> [repeats]|list|remove <rx>|enable|disable>", rule_command},
     {"replay", "Replay the latest RAM frame or a learned name", "[repeats] | <name> <repeats>", replay_command},
     {"send", "Send an rc-switch-compatible value", "<code> <bits> <protocol> [pulse_us] [repeats]",
      send_value_command},
@@ -772,6 +880,7 @@ esp_err_t start_rf_console()
 void rf_console_on_frame(const RfFrame &frame, void *)
 {
     s_frame_callbacks_in_flight.fetch_add(1, std::memory_order_acq_rel);
+    rf_automation_on_frame(frame);
     ConsoleEvent event{};
     event.type = ConsoleEventType::kFrame;
     event.frame = frame;

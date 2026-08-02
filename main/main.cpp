@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "rf_automation.hpp"
 #include "rf_console.hpp"
 #include "rf_ook.hpp"
 #include "rf_storage.hpp"
@@ -18,6 +19,11 @@ extern "C" void app_main(void)
     if (storage_error != ESP_OK) {
         ESP_LOGE(kTag, "Persistent RF storage unavailable: %s; NVS was not erased",
                  esp_err_to_name(storage_error));
+    }
+    const esp_err_t automation_error = rfbridge::initialize_rf_automation();
+    if (automation_error != ESP_OK) {
+        ESP_LOGE(kTag, "RF automation unavailable: %s; ordinary RF remains enabled",
+                 esp_err_to_name(automation_error));
     }
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;

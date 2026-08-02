@@ -8,7 +8,7 @@ It provides:
 - Hardware-timed ESP32 RMT capture and transmission—no Arduino layer or GPIO bit-banging.
 - Stable complete-frame decoding with repeated-frame consensus and ambiguity rejection.
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
-- A UART console for inspection, named learning, direct sending, replay, diagnostics, and radio recovery.
+- A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
 - No Wi-Fi or MQTT.
 
@@ -148,6 +148,29 @@ Named replay requires an explicit repeat count from 1–20. Existing `replay` an
 
 RX is disabled during TX, stale captures are discarded, and the prior desired RX state is restored afterward.
 
+### Automate learned signals
+
+Create a persistent rule that transmits one learned signal when another is received:
+
+```text
+rule add motore_on motore_off 8
+rule list
+rule disable
+rule enable
+rule remove motore_on
+```
+
+Rule behavior:
+
+- `rule add <received_name> <transmit_name> [repeats]` requires two valid learned names. Omitted repeats use the configured default; the valid range is 1–20.
+- One trigger name has at most one action and cannot be overwritten. Remove its rule before adding a replacement. Any number of different triggers may replay the same target.
+- Rules, repeat counts, the fixed 1000 ms cooldown, and global enable/disable state persist across reboot. Runtime cooldown timestamps restart at boot and successful or failed action attempts are spaced by monotonic action time.
+- Decoded and raw learned signals use the same canonical matching as receive duplicate detection. Equivalent duplicate triggers, self-rules, ambiguous target aliases, and directed cycles are rejected. If tolerance boundaries make one received raw frame match multiple otherwise-distinct triggers, no action fires and the ambiguity counter increases.
+- An incoming frame fires at most one action. The same rule cannot fire again until its 1000 ms cooldown expires. Frames queued before add/remove/enable/disable are discarded by configuration generation. RX remains disabled during the bounded transmission, preventing local self-triggering.
+- `forget <name>` fails while the learned name is referenced as a trigger or target. Remove all referencing rules first.
+- Automation startup failures never erase NVS or stop ordinary receive/manual replay. Learned-code load/list/replay remains available if only the new automation namespaces lack capacity. Automation fails closed if persisted rules are corrupt, dangling, cyclic, equivalent, ambiguous, or exceed the configured bounded table (default and maximum 32).
+- Automation does not print unsolicited action messages. Use `status` for action, stale-frame, ambiguity, cooldown, queue, and TX counters plus the last result. `rule list` shows persisted configuration and marks per-record or graph-level startup failures. If runtime startup fails but the relevant NVS namespace remains readable, `rule list`, `rule remove`, `rule enable`, and `rule disable` remain administrative; successful changes report that a reboot is required before automation can retry. Unreadable values are reported with `enabled_known=0` or `rules_known=0` rather than as authoritative defaults.
+
 ### Stage and send raw timings
 
 A staged workflow supports the complete 256-pulse bound without requiring one oversized command:
@@ -177,7 +200,7 @@ radio reset
 radio start
 ```
 
-Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, and whether desired RX is actually armed. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
+Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
 
 `radio reset` disables capture, performs the CC1101 reset/profile/readback/calibration sequence, and restores the prior desired RX state. `radio start` retries complete initialization after wiring or power is corrected. Boot also makes three bounded startup attempts. All command, SPI-ready, and radio-state waits are bounded. An unrecoverable classic-ESP32 RMT TX timeout attempts to force the CC1101 idle and leaves the service faulted; reboot is then required rather than risking a late transmission or an unbounded driver abort.
 

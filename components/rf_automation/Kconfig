@@ -1,0 +1,11 @@
+menu "RF automation configuration"
+
+config RF_MAX_AUTOMATION_RULES
+    int "Maximum persistent automation rules"
+    range 1 32
+    default 32
+    help
+        Maximum number of trigger-to-action rules loaded into bounded RAM.
+        Startup fails automation closed if NVS contains more rules.
+
+endmenu

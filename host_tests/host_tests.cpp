@@ -4,6 +4,7 @@
 #include <iterator>
 #include <cstdlib>
 
+#include "rf_automation_engine.hpp"
 #include "rf_codec.hpp"
 #include "rf_console_parse.hpp"
 #include "rf_storage_format.hpp"
@@ -180,6 +181,17 @@ void test_console_parser()
             "named replay parsed");
     require(!rfbridge::parse_replay_arguments(2, missing_named_repeats, 8, &replay),
             "named replay requires repeats");
+
+    const char *rule_default[] = {"rule", "add", "B", "A"};
+    const char *rule_explicit[] = {"rule", "add", "B", "A", "12"};
+    const char *rule_self[] = {"rule", "add", "A", "A"};
+    uint8_t rule_repeats = 0;
+    require(rfbridge::parse_rule_add_arguments(4, rule_default, 8, &rule_repeats) && rule_repeats == 8,
+            "rule add default repeats parsed");
+    require(rfbridge::parse_rule_add_arguments(5, rule_explicit, 8, &rule_repeats) && rule_repeats == 12,
+            "rule add explicit repeats parsed");
+    require(!rfbridge::parse_rule_add_arguments(4, rule_self, 8, &rule_repeats),
+            "rule self mapping rejected");
 }
 
 void test_learn_deadline_classification()
@@ -255,6 +267,90 @@ void test_storage_format()
             "maximum raw storage record round trips");
 }
 
+
+rfbridge::RfStorageRuleEntry make_rule(const char *trigger, const char *target)
+{
+    rfbridge::RfStorageRuleEntry entry{};
+    std::strncpy(entry.trigger_name, trigger, sizeof(entry.trigger_name) - 1U);
+    std::strncpy(entry.rule.target_name, target, sizeof(entry.rule.target_name) - 1U);
+    entry.rule.repeats = 8;
+    entry.rule.cooldown_ms = rfbridge::kRfAutomationCooldownMs;
+    return entry;
+}
+
+void test_automation_rules()
+{
+    rfbridge::RfStoredRule rule{};
+    std::strcpy(rule.target_name, "A");
+    rule.repeats = 8;
+    rule.cooldown_ms = rfbridge::kRfAutomationCooldownMs;
+    uint8_t record[rfbridge::kRfStorageMaxRuleRecordSize]{};
+    std::size_t size = 0;
+    require(rfbridge::encode_rf_rule_record(rule, record, sizeof(record), &size) ==
+                rfbridge::RfRuleFormatResult::kOk,
+            "rule record encodes");
+    constexpr uint8_t golden[] = {0x52, 0x46, 0x52, 0x4C, 0x01, 0x00, 0x07, 0x00, 0x01, 0x08,
+                                  0xE8, 0x03, 0x00, 0x00, 0x41, 0x6E, 0xFB, 0x09, 0xF0};
+    require(size == sizeof(golden) && std::memcmp(record, golden, sizeof(golden)) == 0,
+            "rule record matches golden bytes");
+    rfbridge::RfStoredRule loaded{};
+    require(rfbridge::decode_rf_rule_record(record, size, &loaded) == rfbridge::RfRuleFormatResult::kOk &&
+                std::strcmp(loaded.target_name, "A") == 0 && loaded.repeats == 8 &&
+                loaded.cooldown_ms == rfbridge::kRfAutomationCooldownMs,
+            "rule record round trips");
+    record[10] ^= 1U;
+    require(rfbridge::decode_rf_rule_record(record, size, &loaded) == rfbridge::RfRuleFormatResult::kInvalidCrc,
+            "rule CRC corruption rejected");
+
+    rfbridge::RfStorageRuleEntry graph[] = {make_rule("B", "A"), make_rule("C", "B")};
+    require(!rfbridge::rf_rule_graph_has_cycle(graph, 2), "acyclic rule graph accepted");
+    require(rfbridge::rf_rule_would_create_cycle(graph, 2, "A", "C"), "directed cycle rejected");
+    require(!rfbridge::rf_rule_would_create_cycle(graph, 2, "D", "A"), "shared target remains valid");
+    require(!rfbridge::rf_automation_cooldown_allows(1000000, 1999999, 1000),
+            "cooldown suppresses before boundary");
+    require(rfbridge::rf_automation_cooldown_allows(1000000, 2000000, 1000),
+            "cooldown allows exact boundary");
+
+    rfbridge::RfStoredSignal decoded{};
+    decoded.encoding = rfbridge::RfStoredEncoding::kDecoded;
+    decoded.decoded.code = 0xA88142;
+    decoded.decoded.pulse_us = 350;
+    decoded.decoded.bits = 24;
+    decoded.decoded.protocol = 1;
+    rfbridge::RfStoredSignal raw{};
+    raw.encoding = rfbridge::RfStoredEncoding::kRaw;
+    require(rfbridge::build_decoded_raw(decoded.decoded, &raw.raw) &&
+                rfbridge::rf_stored_signals_equivalent(decoded, raw),
+            "decoded and raw stored signals match canonically");
+
+    auto uniform_raw = [](uint16_t duration_us) {
+        rfbridge::RfStoredSignal signal{};
+        signal.encoding = rfbridge::RfStoredEncoding::kRaw;
+        signal.raw.start_level = 1;
+        signal.raw.count = 8;
+        for (std::size_t index = 0; index < signal.raw.count; ++index) {
+            signal.raw.durations_us[index] = duration_us;
+        }
+        return signal;
+    };
+    const rfbridge::RfStoredSignal low = uniform_raw(100);
+    const rfbridge::RfStoredSignal middle = uniform_raw(108);
+    const rfbridge::RfStoredSignal high = uniform_raw(116);
+    const rfbridge::RfStoredSignal *triggers[] = {&low, &high};
+    std::size_t matched_index = 0;
+    require(rfbridge::rf_stored_signals_equivalent(low, middle) &&
+                rfbridge::rf_stored_signals_equivalent(middle, high) &&
+                !rfbridge::rf_stored_signals_equivalent(low, high),
+            "raw matching has the expected non-transitive boundary");
+    require(rfbridge::rf_find_unique_stored_signal_match(middle, triggers, 2, &matched_index) ==
+                rfbridge::RfAutomationMatchResult::kAmbiguous,
+            "overlapping raw trigger match is suppressed as ambiguous");
+    require(rfbridge::rf_automation_event_is_current(4, 4, 2001, 2000) &&
+                !rfbridge::rf_automation_event_is_current(3, 4, 3000, 2000) &&
+                !rfbridge::rf_automation_event_is_current(4, 4, 2000, 2000),
+            "stale rule-generation events are rejected");
+}
+
 }  // namespace
 
 int main()
@@ -267,6 +363,7 @@ int main()
     test_console_parser();
     test_learn_deadline_classification();
     test_storage_format();
+    test_automation_rules();
     std::puts("All host RF tests passed");
     return 0;
 }

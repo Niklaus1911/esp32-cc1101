@@ -56,3 +56,21 @@ TEST_CASE("learn capture window is post-arm and half open", "[rf_console]")
     TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kIgnore),
                       static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 2000, 999)));
 }
+
+
+TEST_CASE("rule add parser validates names and repeats", "[rf_console][rf_automation]")
+{
+    const char *default_rule[] = {"rule", "add", "B", "A"};
+    const char *explicit_rule[] = {"rule", "add", "B", "A", "12"};
+    const char *self_rule[] = {"rule", "add", "A", "A"};
+    const char *bad_repeat[] = {"rule", "add", "B", "A", "21"};
+    const char *missing_target[] = {"rule", "add", "B"};
+    uint8_t repeats = 0;
+    TEST_ASSERT_TRUE(rfbridge::parse_rule_add_arguments(4, default_rule, 8, &repeats));
+    TEST_ASSERT_EQUAL_UINT8(8, repeats);
+    TEST_ASSERT_TRUE(rfbridge::parse_rule_add_arguments(5, explicit_rule, 8, &repeats));
+    TEST_ASSERT_EQUAL_UINT8(12, repeats);
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(4, self_rule, 8, &repeats));
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(5, bad_repeat, 8, &repeats));
+    TEST_ASSERT_FALSE(rfbridge::parse_rule_add_arguments(3, missing_target, 8, &repeats));
+}
