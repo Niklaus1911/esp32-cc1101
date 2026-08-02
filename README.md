@@ -50,6 +50,14 @@ idf.py build
 idf.py size
 ```
 
+For a clean, no-flash production build with size and image metadata checks, run:
+
+```bash
+tools/verify-production.sh
+```
+
+The verifier uses isolated build and log directories under `/tmp`; it never accesses a serial port or flashes hardware.
+
 To configure pins, center frequency, nominal power, RX inversion, repeat count, or duplicate window:
 
 ```bash
