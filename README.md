@@ -46,6 +46,8 @@ GPIO2 is a boot-strapping pin. The firmware does not configure it until applicat
 
 ## Build
 
+The machine-local ESP-IDF, MCP, coding-agent, and Playwright arrangement is recorded in [Development Tooling Setup](docs/development-tooling-setup.md).
+
 Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build:
 
 ```bash
