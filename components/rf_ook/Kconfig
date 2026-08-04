@@ -11,10 +11,11 @@ menu "OOK service configuration"
         default 350
 
     config RF_ACTIVITY_LED_ENABLE
-        bool "Blink an activity LED for accepted RF receive frames"
+        bool "Enable the startup and RF activity LED"
         default y
         help
-            Pulses a GPIO after a decoded or raw frame passes validation and duplicate
+            Blinks a GPIO three times during application startup, with fixed 150 ms dark
+            gaps, and pulses it after a decoded or raw frame passes validation and duplicate
             suppression. Official Espressif DevKitC V4 boards do not have a controllable
             GPIO LED; disable this option or attach an external LED on those boards.
 

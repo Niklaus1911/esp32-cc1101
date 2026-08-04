@@ -355,10 +355,34 @@ void test_rf_activity_led_policy()
                 rfbridge::rf_activity_led_inactive_level(config) == 0 &&
                 rfbridge::rf_activity_led_pulse_us(config) == 25000,
             "active-high LED levels and pulse conversion are exact");
+    constexpr uint8_t active_high_startup[] = {1, 0, 1, 0, 1, 0};
+    constexpr uint64_t startup_durations_us[] = {25000, 150000, 25000,
+                                                 150000, 25000, 150000};
+    for (std::size_t phase = 0; phase < std::size(active_high_startup); ++phase) {
+        const rfbridge::RfActivityLedStartupStep step =
+            rfbridge::rf_activity_led_startup_step(config, static_cast<uint8_t>(phase));
+        require(step.level == active_high_startup[phase] &&
+                    step.duration_us == startup_durations_us[phase] &&
+                    step.complete == (phase == rfbridge::kRfActivityLedStartupPhaseCount),
+                "active-high startup sequence uses distinct 150 ms gaps");
+    }
+    require(rfbridge::kRfActivityLedStartupPulseCount == 3 &&
+                rfbridge::kRfActivityLedStartupPhaseCount == 5 &&
+                rfbridge::kRfActivityLedStartupGapMs == 150,
+            "startup sequence has three active phases and fixed 150 ms gaps");
     config.active_high = false;
     require(rfbridge::rf_activity_led_active_level(config) == 0 &&
                 rfbridge::rf_activity_led_inactive_level(config) == 1,
             "active-low LED levels are exact");
+    constexpr uint8_t active_low_startup[] = {0, 1, 0, 1, 0, 1};
+    for (std::size_t phase = 0; phase < std::size(active_low_startup); ++phase) {
+        const rfbridge::RfActivityLedStartupStep step =
+            rfbridge::rf_activity_led_startup_step(config, static_cast<uint8_t>(phase));
+        require(step.level == active_low_startup[phase] &&
+                    step.duration_us == startup_durations_us[phase] &&
+                    step.complete == (phase == rfbridge::kRfActivityLedStartupPhaseCount),
+                "active-low startup sequence preserves polarity and timing");
+    }
     config.active_high = true;
     config.gpio = 25;
     require(!rfbridge::rf_activity_led_config_is_valid(config, radio_gpios,

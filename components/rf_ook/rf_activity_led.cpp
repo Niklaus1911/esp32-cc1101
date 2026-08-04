@@ -40,10 +40,20 @@ constexpr int kUnavailableGpios[] = {
     CONFIG_CC1101_GDO2_GPIO,
 };
 
+enum class LedMode : uint8_t {
+    kIdle,
+    kStartup,
+    kStartupGap,
+    kActivity,
+};
+
 std::atomic<bool> s_initialized{false};
 portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 int64_t s_deadline_us = 0;
 esp_timer_handle_t s_timer = nullptr;
+LedMode s_mode = LedMode::kIdle;
+uint8_t s_startup_phase = 0;
+bool s_pending_activity = false;
 
 void set_inactive()
 {
@@ -65,34 +75,81 @@ esp_err_t arm_timer(uint64_t timeout_us)
 void fail_dark_if_deadline_is_current(int64_t deadline_us)
 {
     portENTER_CRITICAL(&s_state_mux);
-    if (s_deadline_us == deadline_us) {
+    if (s_mode == LedMode::kActivity && s_deadline_us == deadline_us) {
+        s_mode = LedMode::kIdle;
         s_deadline_us = 0;
         set_inactive();
     }
     portEXIT_CRITICAL(&s_state_mux);
 }
 
-void timer_callback(void *)
+void fail_dark_if_mode_is_current(LedMode mode, int64_t deadline_us = 0)
 {
-    const int64_t now_us = esp_timer_get_time();
-    int64_t deadline_us = 0;
-    RfActivityLedDeadlineDecision decision{};
     portENTER_CRITICAL(&s_state_mux);
-    deadline_us = s_deadline_us;
-    decision = rf_activity_led_deadline_decision(now_us, deadline_us);
-    if (decision.turn_off && deadline_us != 0) {
+    if (s_mode == mode && (mode != LedMode::kActivity || s_deadline_us == deadline_us)) {
+        s_mode = LedMode::kIdle;
         s_deadline_us = 0;
+        s_pending_activity = false;
         set_inactive();
     }
     portEXIT_CRITICAL(&s_state_mux);
-    if (decision.turn_off) {
+}
+
+int64_t activity_deadline(int64_t now_us, uint64_t pulse_us)
+{
+    return now_us > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(pulse_us)
+               ? std::numeric_limits<int64_t>::max()
+               : now_us + static_cast<int64_t>(pulse_us);
+}
+
+void timer_callback(void *)
+{
+    const int64_t now_us = esp_timer_get_time();
+    const uint64_t pulse_us = rf_activity_led_pulse_us(kConfig);
+    uint64_t rearm_us = 0;
+    LedMode scheduled_mode = LedMode::kIdle;
+    int64_t scheduled_deadline_us = 0;
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_mode == LedMode::kStartup) {
+        const RfActivityLedStartupStep step =
+            rf_activity_led_startup_step(kConfig, ++s_startup_phase);
+        gpio_set_level(static_cast<gpio_num_t>(kConfig.gpio), step.level);
+        if (step.complete) {
+            s_mode = LedMode::kStartupGap;
+        }
+        rearm_us = step.duration_us;
+    } else if (s_mode == LedMode::kStartupGap) {
+        if (s_pending_activity) {
+            s_pending_activity = false;
+            s_mode = LedMode::kActivity;
+            s_deadline_us = activity_deadline(now_us, pulse_us);
+            gpio_set_level(static_cast<gpio_num_t>(kConfig.gpio),
+                           rf_activity_led_active_level(kConfig));
+            rearm_us = pulse_us;
+        } else {
+            s_mode = LedMode::kIdle;
+        }
+    } else if (s_mode == LedMode::kActivity) {
+        const RfActivityLedDeadlineDecision decision =
+            rf_activity_led_deadline_decision(now_us, s_deadline_us);
+        if (decision.turn_off) {
+            s_mode = LedMode::kIdle;
+            s_deadline_us = 0;
+            set_inactive();
+        } else {
+            rearm_us = decision.rearm_us;
+        }
+    }
+    scheduled_mode = s_mode;
+    scheduled_deadline_us = s_deadline_us;
+    portEXIT_CRITICAL(&s_state_mux);
+    if (rearm_us == 0) {
         return;
     }
 
-    const esp_err_t error = esp_timer_start_once(s_timer, decision.rearm_us);
-    if (error != ESP_OK &&
-        !(error == ESP_ERR_INVALID_STATE && esp_timer_is_active(s_timer))) {
-        fail_dark_if_deadline_is_current(deadline_us);
+    const esp_err_t error = arm_timer(rearm_us);
+    if (error != ESP_OK) {
+        fail_dark_if_mode_is_current(scheduled_mode, scheduled_deadline_us);
     }
 }
 
@@ -145,12 +202,32 @@ esp_err_t initialize_rf_activity_led()
         return error;
     }
 
+    const RfActivityLedStartupStep startup = rf_activity_led_startup_step(kConfig, 0);
     s_timer = timer;
+    s_mode = LedMode::kStartup;
+    s_startup_phase = 0;
+    s_pending_activity = false;
     s_deadline_us = 0;
+    error = gpio_set_level(static_cast<gpio_num_t>(kConfig.gpio), startup.level);
+    if (error == ESP_OK) {
+        error = esp_timer_start_once(timer, startup.duration_us);
+    }
+    if (error != ESP_OK) {
+        set_inactive();
+        s_timer = nullptr;
+        s_mode = LedMode::kIdle;
+        gpio_reset_pin(static_cast<gpio_num_t>(kConfig.gpio));
+        esp_timer_delete(timer);
+        return error;
+    }
     s_initialized.store(true, std::memory_order_release);
-    ESP_LOGI(kTag, "RX activity LED GPIO%d active-%s pulse=%lu ms", kConfig.gpio,
-             kConfig.active_high ? "high" : "low",
-             static_cast<unsigned long>(kConfig.pulse_ms));
+    ESP_LOGI(kTag,
+             "RX activity LED GPIO%d active-%s pulse=%lu ms startup=%ux%lu ms gap=%lu ms",
+             kConfig.gpio, kConfig.active_high ? "high" : "low",
+             static_cast<unsigned long>(kConfig.pulse_ms),
+             static_cast<unsigned>(kRfActivityLedStartupPulseCount),
+             static_cast<unsigned long>(kConfig.pulse_ms),
+             static_cast<unsigned long>(kRfActivityLedStartupGapMs));
     return ESP_OK;
 #endif
 }
@@ -163,11 +240,14 @@ void notify_rf_activity_led()
     }
     const uint64_t pulse_us = rf_activity_led_pulse_us(kConfig);
     const int64_t now_us = esp_timer_get_time();
-    const int64_t deadline_us =
-        now_us > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(pulse_us)
-            ? std::numeric_limits<int64_t>::max()
-            : now_us + static_cast<int64_t>(pulse_us);
+    const int64_t deadline_us = activity_deadline(now_us, pulse_us);
     portENTER_CRITICAL(&s_state_mux);
+    if (s_mode == LedMode::kStartup || s_mode == LedMode::kStartupGap) {
+        s_pending_activity = true;
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
+    }
+    s_mode = LedMode::kActivity;
     s_deadline_us = deadline_us;
     const esp_err_t level_error =
         gpio_set_level(static_cast<gpio_num_t>(kConfig.gpio),

@@ -60,10 +60,33 @@ TEST_CASE("RF activity LED policy validates GPIO polarity and deadlines", "[rf_o
     TEST_ASSERT_EQUAL_UINT8(1, rfbridge::rf_activity_led_active_level(config));
     TEST_ASSERT_EQUAL_UINT8(0, rfbridge::rf_activity_led_inactive_level(config));
     TEST_ASSERT_EQUAL_UINT64(25000, rfbridge::rf_activity_led_pulse_us(config));
+    constexpr uint8_t active_high_startup[] = {1, 0, 1, 0, 1, 0};
+    constexpr uint32_t startup_durations_us[] = {25000, 150000, 25000,
+                                                 150000, 25000, 150000};
+    for (std::size_t phase = 0; phase < std::size(active_high_startup); ++phase) {
+        const rfbridge::RfActivityLedStartupStep step =
+            rfbridge::rf_activity_led_startup_step(config, static_cast<uint8_t>(phase));
+        TEST_ASSERT_EQUAL_UINT8(active_high_startup[phase], step.level);
+        TEST_ASSERT_EQUAL_UINT32(startup_durations_us[phase],
+                                 static_cast<uint32_t>(step.duration_us));
+        TEST_ASSERT_EQUAL(phase == rfbridge::kRfActivityLedStartupPhaseCount, step.complete);
+    }
+    TEST_ASSERT_EQUAL_UINT8(3, rfbridge::kRfActivityLedStartupPulseCount);
+    TEST_ASSERT_EQUAL_UINT8(5, rfbridge::kRfActivityLedStartupPhaseCount);
+    TEST_ASSERT_EQUAL_UINT32(150, rfbridge::kRfActivityLedStartupGapMs);
 
     config.active_high = false;
     TEST_ASSERT_EQUAL_UINT8(0, rfbridge::rf_activity_led_active_level(config));
     TEST_ASSERT_EQUAL_UINT8(1, rfbridge::rf_activity_led_inactive_level(config));
+    constexpr uint8_t active_low_startup[] = {0, 1, 0, 1, 0, 1};
+    for (std::size_t phase = 0; phase < std::size(active_low_startup); ++phase) {
+        const rfbridge::RfActivityLedStartupStep step =
+            rfbridge::rf_activity_led_startup_step(config, static_cast<uint8_t>(phase));
+        TEST_ASSERT_EQUAL_UINT8(active_low_startup[phase], step.level);
+        TEST_ASSERT_EQUAL_UINT32(startup_durations_us[phase],
+                                 static_cast<uint32_t>(step.duration_us));
+        TEST_ASSERT_EQUAL(phase == rfbridge::kRfActivityLedStartupPhaseCount, step.complete);
+    }
     config.gpio = 25;
     TEST_ASSERT_FALSE(rfbridge::rf_activity_led_config_is_valid(
         config, radio_gpios, std::size(radio_gpios)));
