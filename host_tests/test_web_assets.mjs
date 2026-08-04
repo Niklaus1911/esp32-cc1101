@@ -66,6 +66,14 @@ assert(js.includes("document.hidden"), "visibility-aware polling missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(js.includes("otaRebooting"), "OTA reconnect state missing");
 assert(js.includes("XMLHttpRequest"), "OTA progress upload missing");
+assert(js.includes('"rfbridge.observed-activity.v1"'), "versioned activity storage key missing");
+assert(js.includes("sessionStorage.getItem(activityStorageKey)"), "activity restoration missing");
+assert(js.includes("sessionStorage.setItem(activityStorageKey"), "activity persistence missing");
+assert(js.includes("sessionStorage.removeItem(activityStorageKey)"), "activity Clear persistence missing");
+assert.match(js, /maximumActivityEntries = 50;/, "activity entry bound changed");
+assert.match(js, /maximumActivityStorageLength = 64 \* 1024;/, "activity storage bound changed");
+assert(js.lastIndexOf("restoreActivity();") < js.lastIndexOf("renderActivity();"),
+       "activity must restore before its initial render");
 assert(css.includes("@media"), "responsive CSS missing");
 for (const forbidden of [
   '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
@@ -75,7 +83,8 @@ for (const forbidden of [
          `forbidden or stale Web contract remains: ${forbidden}`);
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
-  assert(statSync(join(component, "assets", name)).size < 20000, `${name} is too large`);
+  const maximumSize = name === "app.js" ? 24 * 1024 : 20000;
+  assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }
 console.log("Responsive Web contracts passed");

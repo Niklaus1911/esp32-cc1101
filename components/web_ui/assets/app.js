@@ -16,6 +16,12 @@ const state = {
   activity: [],
 };
 
+const activityStorageKey = "rfbridge.observed-activity.v1";
+const activityStorageVersion = 1;
+const maximumActivityEntries = 50;
+const maximumActivityStorageLength = 64 * 1024;
+const maximumDateMilliseconds = 8640000000000000;
+
 const byId = (id) => document.getElementById(id);
 const text = (value) => document.createTextNode(String(value));
 
@@ -175,11 +181,62 @@ function frameMatch(frame) {
   return frame.match === "unavailable" ? "Catalog unavailable" : "None";
 }
 
+function removeStoredActivity() {
+  try { sessionStorage.removeItem(activityStorageKey); } catch (_) { /* Storage is optional. */ }
+}
+
+function validStoredActivityEntry(entry) {
+  return entry && Number.isSafeInteger(entry.at_ms) && entry.at_ms >= 0 &&
+    entry.at_ms <= maximumDateMilliseconds && Number.isSafeInteger(entry.delta) &&
+    entry.delta > 0 && entry.frame && typeof entry.frame === "object" &&
+    !Array.isArray(entry.frame);
+}
+
+function restoreActivity() {
+  try {
+    const serialized = sessionStorage.getItem(activityStorageKey);
+    if (serialized === null) return;
+    if (serialized.length > maximumActivityStorageLength) throw new Error("Activity data is too large");
+    const stored = JSON.parse(serialized);
+    if (!stored || stored.version !== activityStorageVersion ||
+        !Number.isSafeInteger(stored.accepted) || stored.accepted < 0 ||
+        !Array.isArray(stored.entries) || stored.entries.length > maximumActivityEntries ||
+        !stored.entries.every(validStoredActivityEntry)) {
+      throw new Error("Activity data is invalid");
+    }
+    state.accepted = stored.accepted;
+    state.activity = stored.entries;
+  } catch (_) {
+    removeStoredActivity();
+  }
+}
+
+function persistActivity() {
+  try {
+    const serialized = JSON.stringify({
+      version: activityStorageVersion,
+      accepted: state.accepted,
+      entries: state.activity,
+    });
+    if (serialized.length > maximumActivityStorageLength) {
+      removeStoredActivity();
+      return;
+    }
+    sessionStorage.setItem(activityStorageKey, serialized);
+  } catch (_) {
+    // Activity remains available in memory when browser storage is unavailable.
+  }
+}
+
 function addActivity(live, delta) {
-  if (!live.last) return;
-  state.activity.unshift({ at: new Date(), frame: live.last, delta });
-  if (state.activity.length > 50) state.activity.length = 50;
-  renderActivity();
+  if (live.last) {
+    state.activity.unshift({ at_ms: Date.now(), frame: live.last, delta });
+    if (state.activity.length > maximumActivityEntries) {
+      state.activity.length = maximumActivityEntries;
+    }
+    renderActivity();
+  }
+  persistActivity();
 }
 
 function renderActivity() {
@@ -196,8 +253,8 @@ function renderActivity() {
   state.activity.forEach((entry) => {
     const row = element("tr");
     const received = entry.delta > 1
-      ? `${entry.at.toLocaleTimeString()} (+${entry.delta}, latest shown)`
-      : entry.at.toLocaleTimeString();
+      ? `${new Date(entry.at_ms).toLocaleTimeString()} (+${entry.delta}, latest shown)`
+      : new Date(entry.at_ms).toLocaleTimeString();
     row.append(element("td", "", received), element("td", "", frameSummary(entry.frame)),
                element("td", "", frameMatch(entry.frame)));
     fragment.append(row);
@@ -242,6 +299,8 @@ function renderLive(live) {
   state.accepted = live.radio.accepted;
   if (previousAccepted !== null && live.radio.accepted > previousAccepted) {
     addActivity(live, live.radio.accepted - previousAccepted);
+  } else if (live.radio.accepted !== previousAccepted) {
+    persistActivity();
   }
   if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
       live.learning.state !== "armed") refreshSignals();
@@ -406,7 +465,11 @@ function bindActions() {
   });
   byId("cancel-learning").addEventListener("click", () => requestAction("/api/learn", "DELETE"));
   byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: byId("last-repeats").value })));
-  byId("clear-activity").addEventListener("click", () => { state.activity = []; renderActivity(); });
+  byId("clear-activity").addEventListener("click", () => {
+    state.activity = [];
+    removeStoredActivity();
+    renderActivity();
+  });
   byId("refresh-signals").addEventListener("click", refreshSignals);
   byId("refresh-rules").addEventListener("click", refreshRules);
   byId("refresh-ota").addEventListener("click", refreshOta);
@@ -506,6 +569,7 @@ function uploadOta(event) {
   request.send(file);
 }
 
+restoreActivity();
 bindActions();
 renderActivity();
 Promise.all([refreshSignals(), refreshRules(), refreshOta()]).finally(() => schedulePoll(0));

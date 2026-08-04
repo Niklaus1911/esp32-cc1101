@@ -145,7 +145,7 @@ Use `wifi status` or the global `status` command for driver, saved-record, DHCP,
 
 ### Web UI
 
-The Web UI is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps only a small session activity list; it is not a guaranteed event history.
+The Web UI is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
 
 The Web surface calls typed services directly and provides:
 
