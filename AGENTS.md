@@ -90,6 +90,14 @@ Intercept RF transmit and destructive mutation requests unless the user explicit
 - Preserve the documented 3.3 V-only CC1101 wiring, SPI3 ownership, RMT allocation, half-duplex behavior, antenna requirement, and local RF regulations.
 - Compilation does not prove RF timing, range, recovery, NVS persistence, or hardware behavior. Report hardware validation only when it was actually performed.
 
+## Plan Persistence
+
+- Whenever a final plan is proposed, automatically save its Markdown body, without client rendering tags, under `plan/` using `YYYY-MM-DD_<descriptive-kebab-case-slug>.md`.
+- Revisions of the same plan must update the original file in place and retain its filename. Distinct plans receive distinct files; append `-2`, `-3`, and so on when a filename already belongs to another plan.
+- Do not request confirmation or announce routine plan-file writes. Report only failures or deferrals.
+- If a higher-priority mode prohibits writing when the plan is proposed, retain the plan and save it before any implementation in the next write-enabled turn.
+- Never delete or rename a plan file unless the user explicitly requests it.
+
 ## Git Safety
 
 Inspect `git status --short` and the relevant diff before and after changes. Preserve unrelated user work. Do not run destructive Git commands, initialize repositories, commit, amend, rebase, push, or force-push unless explicitly requested.
