@@ -61,4 +61,10 @@ No REST API, firmware backend, NVS, RF, health classification, or polling interf
   - `/tmp/esp32-cc1101-playwright/system-mobile-layout-after-device-desktop.png`
 - The Playwright MCP transport closed during the long persistence probe. The same Playwright engine was run locally against the device for that probe and the final screenshots; the earlier MCP width matrix completed before the transport failure.
 
-The work remains uncommitted and unpushed as requested.
+## Post-commit Deployment
+
+- Committed the implementation as `fd6a004` (`Improve System page mobile layout`).
+- Performed an in-tree clean, rebuilt the committed tree, and flashed the clean image through the CP2102 by-id port with NVS preserved.
+- Confirmed `/api/v1/ota/status` reports `running_version: fd6a004`, `state: idle`, and no rollback or maintenance error.
+- Confirmed the device serves the committed firmware disclosure markup and compact mobile CSS.
+- The branch has not been pushed.
