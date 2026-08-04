@@ -26,6 +26,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "network_mdns.hpp"
+#include "network_mqtt.hpp"
 #include "network_wifi.hpp"
 #include "ota_update.hpp"
 #include "rf_automation.hpp"
@@ -798,6 +799,7 @@ bool enqueue_bridge_event(const BridgeEvent &event, void *)
             break;
         }
         case BridgeEventType::kOperationCompleted:
+        case BridgeEventType::kSignalCatalogChanged:
             return true;
     }
     if (s_event_worker_task != nullptr) {
@@ -1274,6 +1276,103 @@ int render_wifi_status()
     return 0;
 }
 
+int render_service_status()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    NetworkMqttStatus status{};
+    const esp_err_t error = get_network_mqtt_status(&status);
+    if (error != ESP_OK) {
+        return print_result("service status", error);
+    }
+    char broker[16]{};
+    const bool broker_known =
+        format_mqtt_broker_ipv4(status.broker_ipv4, broker, sizeof(broker));
+    const bool healthy = status.profile_error == ESP_OK && status.runtime_error == ESP_OK &&
+                         status.reconciliation_error == ESP_OK;
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf(
+            "SERVICE requested=%s effective=%s configured=%u generation=%lu boot_generation=%lu reboot_required=%u fallback=%u retirement=%u profile_error=%s runtime_error=%s\n",
+            network_service_profile_name(status.requested_profile),
+            network_service_profile_name(status.effective_profile), status.configured,
+            static_cast<unsigned long>(status.persisted_generation),
+            static_cast<unsigned long>(status.boot_generation), status.reboot_required,
+            status.current_boot_fallback, status.retirement_pending,
+            esp_err_to_name(status.profile_error), esp_err_to_name(status.runtime_error));
+        std::printf(
+            "MQTT configured=%u broker=%s port=%u username=%s connected=%u subscribed=%u state=%s advertised=%u current=%u connections=%lu disconnects=%lu reconciliations=%lu accepted=%lu rejected=%lu queue_drops=%lu publish_failures=%lu outbox_deleted=%lu outbox_bytes=%lu heap_free=%lu heap_minimum=%lu heap_largest=%lu mqtt_stack=%lu worker_stack=%lu error=%s\n",
+            status.configured, broker_known ? broker : "-", status.port,
+            status.username[0] == '\0' ? "-" : status.username, status.connected,
+            status.subscribed, network_mqtt_discovery_state_name(status.discovery_state),
+            status.advertised_count, status.current_count,
+            static_cast<unsigned long>(status.connections),
+            static_cast<unsigned long>(status.disconnects),
+            static_cast<unsigned long>(status.reconciliations),
+            static_cast<unsigned long>(status.commands_accepted),
+            static_cast<unsigned long>(status.commands_rejected),
+            static_cast<unsigned long>(status.command_queue_drops),
+            static_cast<unsigned long>(status.publish_failures),
+            static_cast<unsigned long>(status.outbox_deleted),
+            static_cast<unsigned long>(status.outbox_bytes),
+            static_cast<unsigned long>(status.heap_free),
+            static_cast<unsigned long>(status.heap_minimum),
+            static_cast<unsigned long>(status.heap_largest),
+            static_cast<unsigned long>(status.mqtt_stack_minimum_free),
+            static_cast<unsigned long>(status.worker_stack_minimum_free),
+            esp_err_to_name(status.reconciliation_error));
+        return healthy ? 0 : 1;
+    }
+
+    print_dashboard_header("Network service");
+    print_dashboard_row("Requested", network_service_profile_name(status.requested_profile),
+                        ConsoleTone::kInfo, "Effective",
+                        network_service_profile_name(status.effective_profile),
+                        status.current_boot_fallback ? ConsoleTone::kWarning
+                                                     : ConsoleTone::kSuccess);
+    print_dashboard_row("Configured", status.configured ? "yes" : "no",
+                        status.configured ? ConsoleTone::kSuccess : ConsoleTone::kMuted,
+                        "Reboot", status.reboot_required ? "required" : "no",
+                        status.reboot_required ? ConsoleTone::kWarning : ConsoleTone::kMuted);
+    char left[64]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%s:%u", broker_known ? broker : "-", status.port);
+    print_dashboard_value("MQTT broker", left,
+                          status.configured ? ConsoleTone::kInfo : ConsoleTone::kMuted);
+    print_dashboard_value("MQTT state",
+                          network_mqtt_discovery_state_name(status.discovery_state),
+                          status.discovery_state == NetworkMqttDiscoveryState::kReady
+                              ? ConsoleTone::kSuccess
+                              : status.discovery_state == NetworkMqttDiscoveryState::kFaulted
+                                    ? ConsoleTone::kError
+                                    : ConsoleTone::kMuted);
+    std::snprintf(left, sizeof(left), "%u advertised / %u current",
+                  status.advertised_count, status.current_count);
+    std::snprintf(right, sizeof(right), "%lu / %lu / %lu",
+                  static_cast<unsigned long>(status.heap_free),
+                  static_cast<unsigned long>(status.heap_minimum),
+                  static_cast<unsigned long>(status.heap_largest));
+    print_dashboard_row("Discovery", left, ConsoleTone::kInfo, "Heap free/min/largest", right,
+                        ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%lu / %lu",
+                  static_cast<unsigned long>(status.mqtt_stack_minimum_free),
+                  static_cast<unsigned long>(status.worker_stack_minimum_free));
+    print_dashboard_value("MQTT/worker stack", left,
+                          status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted);
+    print_dashboard_row("Profile error", esp_err_to_name(status.profile_error),
+                        status.profile_error == ESP_OK ? ConsoleTone::kSuccess
+                                                       : ConsoleTone::kError,
+                        "Runtime error", esp_err_to_name(status.runtime_error),
+                        status.runtime_error == ESP_OK ? ConsoleTone::kSuccess
+                                                       : ConsoleTone::kError);
+    print_dashboard_value("Last error", esp_err_to_name(status.reconciliation_error),
+                          status.reconciliation_error == ESP_OK ? ConsoleTone::kSuccess
+                                                                 : ConsoleTone::kError);
+    print_dashboard_footer();
+    return healthy ? 0 : 1;
+}
+
 int render_ota_status()
 {
     OutputGuard guard;
@@ -1448,6 +1547,7 @@ int status_command(int argc, char **)
     render_automation_status();
     render_wifi_status();
     render_hostname_status();
+    render_service_status();
     return result;
 }
 
@@ -1473,6 +1573,102 @@ bool read_wifi_password(WifiCredentials *credentials)
     std::memcpy(credentials->password, input, length + 1U);
     std::memset(input, 0, sizeof(input));
     return true;
+}
+
+bool read_mqtt_password(char password[kMqttPasswordCapacity])
+{
+    char input[kMqttPasswordCapacity]{};
+    errno = 0;
+    const int result = rf_linenoiseReadMasked("MQTT password: ", input, sizeof(input));
+    if (result < 0) {
+        const int input_error = errno;
+        std::memset(input, 0, sizeof(input));
+        OutputGuard guard;
+        if (result == RF_LINENOISE_MASKED_TOO_LONG) {
+            std::printf("ERROR mqtt password is too long\n");
+        } else if (input_error == EAGAIN) {
+            std::printf("ERROR mqtt password input cancelled\n");
+        } else {
+            std::printf("ERROR mqtt password input failed\n");
+        }
+        return false;
+    }
+    const std::size_t length = static_cast<std::size_t>(result);
+    std::memcpy(password, input, length + 1U);
+    std::memset(input, 0, sizeof(input));
+    return true;
+}
+
+int service_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
+        return render_service_status();
+    }
+    if (argc == 3 && std::strcmp(argv[1], "mode") == 0) {
+        NetworkServiceProfile profile{};
+        if (std::strcmp(argv[2], "web") == 0) {
+            profile = NetworkServiceProfile::kWeb;
+        } else if (std::strcmp(argv[2], "mqtt") == 0) {
+            profile = NetworkServiceProfile::kMqtt;
+        } else {
+            return print_usage("usage: service mode <web|mqtt>");
+        }
+        const esp_err_t error = set_network_service_profile(profile);
+        if (error == ESP_ERR_INVALID_STATE && profile == NetworkServiceProfile::kMqtt) {
+            return print_validation_error(
+                "ERROR service mode mqtt: configure MQTT first or finish retirement",
+                "Configure MQTT first or finish the pending retirement");
+        }
+        return print_result("service mode", error);
+    }
+    return print_usage("usage: service <status|mode <web|mqtt>>");
+}
+
+int mqtt_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
+        return render_service_status();
+    }
+    if ((argc == 4 || argc == 5) && std::strcmp(argv[1], "configure") == 0) {
+        uint32_t broker_ipv4 = 0;
+        uint64_t parsed_port = 1883;
+        if (!parse_mqtt_broker_ipv4(argv[2], &broker_ipv4) ||
+            (argc == 5 && !parse_bounded(argv[4], 1, UINT16_MAX, &parsed_port))) {
+            return print_validation_error(
+                "ERROR mqtt configure requires a unicast IPv4 and port 1..65535",
+                "Use a numeric unicast broker address and port 1..65535");
+        }
+        char password[kMqttPasswordCapacity]{};
+        if (!read_mqtt_password(password)) {
+            std::memset(password, 0, sizeof(password));
+            return 1;
+        }
+        const esp_err_t error = configure_network_mqtt(
+            broker_ipv4, static_cast<uint16_t>(parsed_port), argv[3], password);
+        std::memset(password, 0, sizeof(password));
+        if (error == ESP_ERR_INVALID_ARG) {
+            return print_validation_error(
+                "ERROR mqtt credentials must be printable username 1..63 and password 1..127",
+                "Username must be 1..63 and password 1..127 printable characters");
+        }
+        if (error == ESP_ERR_INVALID_STATE) {
+            return print_validation_error(
+                "ERROR mqtt configure: retire retained entities before changing broker",
+                "Retire retained entities before changing broker or configuration state");
+        }
+        return print_result("mqtt configure", error);
+    }
+    if (argc == 2 && std::strcmp(argv[1], "forget") == 0) {
+        const esp_err_t error = forget_network_mqtt();
+        if (error == ESP_ERR_INVALID_STATE) {
+            return print_validation_error(
+                "ERROR mqtt forget: use current MQTT configuration, connect, and retry",
+                "Switch to the configured MQTT profile, reboot, connect, and retry");
+        }
+        return print_result("mqtt forget", error);
+    }
+    return print_usage(
+        "usage: mqtt <status|configure <broker-ipv4> <username> [port]|forget>");
 }
 
 int console_command(int argc, char **argv)
@@ -2110,6 +2306,8 @@ constexpr CommandDefinition kCommands[] = {
     {"status", "Show the complete system dashboard", nullptr, status_command},
     {"console", "Select colored or machine-readable output", "style [pretty|plain]", console_command},
     {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
+    {"service", "Select the reboot-time LAN service profile", "<status|mode <web|mqtt>>", service_command},
+    {"mqtt", "Configure native Home Assistant MQTT buttons", "<status|configure <ipv4> <username> [port]|forget>", mqtt_command},
     {"hostname", "Configure shared DHCP and mDNS identity", "<status|set <label>|reset>", hostname_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
     {"web", "Inspect or rotate Web UI authentication", "auth <status|rotate>", web_command},

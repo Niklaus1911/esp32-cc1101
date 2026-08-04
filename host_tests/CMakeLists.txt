@@ -41,6 +41,23 @@ target_compile_features(rf_host_tests PRIVATE cxx_std_17)
 target_compile_options(rf_host_tests PRIVATE -Wall -Wextra -Werror)
 
 add_test(NAME rf_host_tests COMMAND rf_host_tests)
+
+add_executable(mqtt_host_tests
+    test_network_mqtt.cpp
+    ../components/network_mqtt/mqtt_config_format.cpp
+    ../components/network_mqtt/mqtt_discovery.cpp
+    ../components/rf_codec/rf_codec.cpp
+    ../components/rf_storage/rf_storage_format.cpp
+)
+target_include_directories(mqtt_host_tests PRIVATE
+    ../components/network_mqtt/include
+    ../components/rf_codec/include
+    ../components/rf_storage/include
+)
+target_compile_features(mqtt_host_tests PRIVATE cxx_std_17)
+target_compile_options(mqtt_host_tests PRIVATE -Wall -Wextra -Werror)
+
+add_test(NAME mqtt_host_tests COMMAND mqtt_host_tests)
 add_test(NAME push_ota_script_tests
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_push_ota.sh"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")

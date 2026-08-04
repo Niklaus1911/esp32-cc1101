@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "network_wifi.hpp"
 #include "network_mdns.hpp"
+#include "network_mqtt.hpp"
 #include "ota_update.hpp"
 #include "platform_nvs.hpp"
 #include "rf_automation.hpp"
@@ -26,6 +27,18 @@ void network_online_changed(bool online, void *)
     }
 }
 
+void initialize_web_profile(esp_err_t *mdns_error, esp_err_t *ota_error)
+{
+    *mdns_error = rfbridge::initialize_network_mdns();
+    if (*mdns_error != ESP_OK) {
+        ESP_LOGE(kTag, "Optional mDNS unavailable: %s", esp_err_to_name(*mdns_error));
+    }
+    *ota_error = rfbridge::initialize_ota_update();
+    if (*ota_error != ESP_OK) {
+        ESP_LOGE(kTag, "LAN OTA unavailable: %s", esp_err_to_name(*ota_error));
+    }
+}
+
 }  // namespace
 
 extern "C" void app_main(void)
@@ -43,20 +56,37 @@ extern "C" void app_main(void)
     if (network_error != ESP_OK) {
         ESP_LOGE(kTag, "Optional Wi-Fi unavailable: %s", esp_err_to_name(network_error));
     }
-    const esp_err_t mdns_error = network_error == ESP_OK
-                                     ? rfbridge::initialize_network_mdns()
-                                     : network_error;
-    if (mdns_error != ESP_OK) {
-        ESP_LOGE(kTag, "Optional mDNS unavailable: %s", esp_err_to_name(mdns_error));
-    }
     const esp_err_t automation_error = rfbridge::initialize_rf_automation();
     if (automation_error != ESP_OK) {
         ESP_LOGE(kTag, "RF automation unavailable: %s; ordinary RF remains enabled",
                  esp_err_to_name(automation_error));
     }
-    const esp_err_t ota_error = rfbridge::initialize_ota_update();
-    if (ota_error != ESP_OK) {
-        ESP_LOGE(kTag, "LAN OTA unavailable: %s", esp_err_to_name(ota_error));
+    const esp_err_t profile_error = rfbridge::initialize_network_service_profile();
+    if (profile_error != ESP_OK) {
+        ESP_LOGE(kTag, "Network service profile record unavailable: %s; using Web recovery",
+                 esp_err_to_name(profile_error));
+    }
+
+    const bool mqtt_requested = rfbridge::requested_network_service_profile() ==
+                                rfbridge::NetworkServiceProfile::kMqtt;
+    bool mqtt_profile = network_error == ESP_OK && mqtt_requested;
+    if (mqtt_requested && network_error != ESP_OK) {
+        rfbridge::mark_network_service_web_fallback(network_error);
+    }
+    if (mqtt_profile) {
+        const esp_err_t mqtt_error = rfbridge::prepare_network_mqtt();
+        if (mqtt_error != ESP_OK) {
+            ESP_LOGE(kTag, "MQTT profile allocation failed: %s; using Web for this boot",
+                     esp_err_to_name(mqtt_error));
+            rfbridge::mark_network_service_web_fallback(mqtt_error);
+            mqtt_profile = false;
+        }
+    }
+
+    esp_err_t mdns_error = ESP_ERR_INVALID_STATE;
+    esp_err_t ota_error = ESP_ERR_INVALID_STATE;
+    if (!mqtt_profile && network_error == ESP_OK) {
+        initialize_web_profile(&mdns_error, &ota_error);
     }
     const esp_err_t events_error = rfbridge::initialize_bridge_events();
     if (events_error != ESP_OK) {
@@ -66,12 +96,31 @@ extern "C" void app_main(void)
     if (signals_error != ESP_OK) {
         ESP_LOGE(kTag, "Learned-signal service unavailable: %s", esp_err_to_name(signals_error));
     }
-    const esp_err_t web_error = rfbridge::initialize_web_ui();
-    if (web_error != ESP_OK) {
-        ESP_LOGE(kTag, "Web UI unavailable: %s", esp_err_to_name(web_error));
+    if (mqtt_profile) {
+        const esp_err_t mqtt_activation_error = rfbridge::activate_network_mqtt();
+        if (mqtt_activation_error != ESP_OK) {
+            ESP_LOGE(kTag, "MQTT profile activation failed: %s; using Web for this boot",
+                     esp_err_to_name(mqtt_activation_error));
+            (void)rfbridge::stop_network_mqtt_for_web_fallback();
+            rfbridge::mark_network_service_web_fallback(mqtt_activation_error);
+            mqtt_profile = false;
+            if (network_error == ESP_OK) {
+                initialize_web_profile(&mdns_error, &ota_error);
+                (void)rfbridge::bridge_events_bind_available_sources();
+            }
+        }
     }
-    if (network_error == ESP_OK && web_error == ESP_OK) {
-        ESP_ERROR_CHECK(rfbridge::set_network_wifi_online_sink(network_online_changed, nullptr));
+
+    esp_err_t web_error = ESP_ERR_INVALID_STATE;
+    if (!mqtt_profile) {
+        web_error = rfbridge::initialize_web_ui();
+        if (web_error != ESP_OK) {
+            ESP_LOGE(kTag, "Web UI unavailable: %s", esp_err_to_name(web_error));
+        }
+        if (network_error == ESP_OK && web_error == ESP_OK) {
+            ESP_ERROR_CHECK(
+                rfbridge::set_network_wifi_online_sink(network_online_changed, nullptr));
+        }
     }
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;
@@ -92,12 +141,10 @@ extern "C" void app_main(void)
     if (error != ESP_OK) {
         ESP_LOGE(kTag, "RF remains stopped; fix wiring and use 'radio start' to retry");
     }
-    if (ota_error == ESP_OK) {
-        const esp_err_t confirm_error = rfbridge::confirm_running_ota_image();
-        if (confirm_error != ESP_OK) {
-            ESP_LOGE(kTag, "Could not confirm the running OTA image: %s",
-                     esp_err_to_name(confirm_error));
-        }
+    const esp_err_t confirm_error = rfbridge::confirm_running_ota_image();
+    if (confirm_error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not confirm the running OTA image: %s",
+                 esp_err_to_name(confirm_error));
     }
     if (network_error == ESP_OK) {
         const esp_err_t start_wifi_error = rfbridge::start_saved_network_wifi();

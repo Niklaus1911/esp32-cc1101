@@ -136,6 +136,15 @@ void publish_learn(BridgeEventType type, const PendingLearn &pending, esp_err_t 
     bridge_events_publish(event);
 }
 
+void publish_catalog_changed(const char *name, BridgeEventSource source)
+{
+    BridgeEvent event{};
+    event.type = BridgeEventType::kSignalCatalogChanged;
+    event.source = source;
+    copy_name(event.payload.rf.name, name);
+    bridge_events_publish(event);
+}
+
 LearnedMatch match_stored_signal(const RfStoredSignal &stored)
 {
     Lock lock(s_catalog_mutex);
@@ -238,6 +247,7 @@ void process_frame(const Message &message, PendingLearn *pending)
         captured.name, stored_signal_from_frame(message.frame));
     if (create_error == ESP_OK) {
         (void)rf_signals_refresh_catalog();
+        publish_catalog_changed(captured.name, captured.source);
     }
     publish_frame(message.frame, message.occurred_us);
     if (create_error == ESP_OK) {
@@ -376,7 +386,9 @@ esp_err_t rf_signals_forget(const char *name)
     if (error != ESP_OK) {
         return error;
     }
-    return rf_signals_refresh_catalog();
+    const esp_err_t refresh_error = rf_signals_refresh_catalog();
+    publish_catalog_changed(name, BridgeEventSource::kSystem);
+    return refresh_error;
 }
 
 esp_err_t rf_signals_refresh_catalog()

@@ -148,12 +148,30 @@ esp_err_t initialize_bridge_events()
         return ESP_ERR_NO_MEM;
     }
 
-    // Optional subsystems may be unavailable while RF/UART remain usable. Their sinks are best-effort;
-    // available owners accept them and unavailable owners keep their own initialization error.
-    (void)rf_automation_set_event_sink(automation_sink, nullptr);
-    (void)set_network_wifi_event_sink(network_sink, nullptr);
-    (void)set_ota_update_event_sink(ota_sink, nullptr);
+    (void)bridge_events_bind_available_sources();
     return ESP_OK;
+}
+
+esp_err_t bridge_events_bind_available_sources()
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Optional owners can initialize after the broker during MQTT-to-Web recovery.
+    esp_err_t first_error = ESP_OK;
+    const esp_err_t automation_error = rf_automation_set_event_sink(automation_sink, nullptr);
+    if (automation_error != ESP_OK) {
+        first_error = automation_error;
+    }
+    const esp_err_t network_error = set_network_wifi_event_sink(network_sink, nullptr);
+    if (first_error == ESP_OK && network_error != ESP_OK) {
+        first_error = network_error;
+    }
+    const esp_err_t ota_error = set_ota_update_event_sink(ota_sink, nullptr);
+    if (first_error == ESP_OK && ota_error != ESP_OK) {
+        first_error = ota_error;
+    }
+    return first_error;
 }
 
 esp_err_t bridge_events_add_sink(BridgeEventSink sink, void *context, uint8_t *sink_id)

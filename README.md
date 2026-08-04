@@ -10,7 +10,7 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with DHCP, persistent collision-aware `.local` discovery, a responsive trusted-LAN control UI with live polling, and direct PC-initiated LAN OTA; MQTT is not included.
+- Optional runtime Wi-Fi station mode with a reboot-selected Web profile or native Home Assistant MQTT Discovery profile. The Web profile provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; the MQTT profile exposes learned signals as Home Assistant buttons without starting the Web stack.
 
 ## Hardware
 
@@ -138,9 +138,9 @@ hostname reset
 
 `wifi connect <ssid>` prompts for a bounded password without echo and does not place the password in command history. Asynchronous output redraws only the password prompt and never the entered bytes. An open network uses an empty password. Candidate credentials are committed to the versioned, checksummed `net_cfg/station` NVS record only after DHCP succeeds; a failed candidate leaves the previously saved network unchanged. A valid saved network starts connecting asynchronously after normal console and RF startup on later boots. `wifi stop` is temporary, `wifi start` reconnects the saved network, and `wifi forget` deletes the saved record, stops Wi-Fi, and prevents boot reconnection.
 
-The DHCP and mDNS identity defaults to `esp32-cc1101-<last-3-STA-MAC-bytes>`, for example `esp32-cc1101-a1b2c3`. `hostname set <label>` persists a custom 1-32 character label; ASCII letters, digits, and interior hyphens are accepted and letters are stored lowercase. Do not include `.local`. `hostname reset` removes the override and restores the MAC-derived default. Changes apply to mDNS immediately without disconnecting Wi-Fi and become the DHCP hostname on the next Wi-Fi start or reconnect. A malformed hostname NVS record is retained for diagnosis, reported as a persistence error, and bypassed in favor of the safe default.
+The DHCP hostname, and the Web profile's mDNS identity, default to `esp32-cc1101-<last-3-STA-MAC-bytes>`, for example `esp32-cc1101-a1b2c3`. `hostname set <label>` persists a custom 1-32 character label; ASCII letters, digits, and interior hyphens are accepted and letters are stored lowercase. Do not include `.local`. `hostname reset` removes the override and restores the MAC-derived default. Changes apply to an active Web-profile mDNS responder immediately without disconnecting Wi-Fi and become the DHCP hostname on the next Wi-Fi start or reconnect. A malformed hostname NVS record is retained for diagnosis, reported as a persistence error, and bypassed in favor of the safe default.
 
-When DHCP supplies an address, the responsive Web UI starts automatically on port `80` and stops after connectivity is lost. After every HTTP handler is ready, mDNS advertises the Web UI at `http://<hostname>.local/`. If another device already owns the name, the mDNS responder selects a conflict suffix such as `-2`; `hostname status`, the Web System dashboard, and `/api/live` report that effective name. The device remains station-only and does not create a fallback access point. Wi-Fi and hostname configuration remain UART-only.
+In the Web profile, the responsive UI starts automatically on port `80` when DHCP supplies an address and stops after connectivity is lost. After every HTTP handler is ready, mDNS advertises the Web UI at `http://<hostname>.local/`. If another device already owns the name, the mDNS responder selects a conflict suffix such as `-2`; `hostname status`, the Web System dashboard, and `/api/live` report that effective name. The device remains station-only and does not create a fallback access point. Wi-Fi and hostname configuration remain UART-only.
 
 The stable DNS-SD instance `ESP32 CC1101 RF Bridge <MAC-SUFFIX>` publishes:
 
@@ -157,9 +157,61 @@ WIFI CONNECTED ssid=<ssid> ip=<ip> netmask=<netmask> gateway=<gateway>
 
 Use `wifi status` or the global `status` command for driver, saved-record, DHCP, retry, scan, OTA-lock, persistence-error, and event-drop state. Network failures are nonfatal to RF, storage, automation, and the UART console. Firmware never erases NVS to repair Wi-Fi data; a malformed network record disables only saved-network startup until `wifi forget` or a later successful connection replaces it.
 
+### Network service profiles
+
+One firmware image provides two mutually exclusive LAN service profiles. The selected profile is read only at boot:
+
+- `web` is the default. It starts the HTTP UI/API, mDNS, and LAN OTA, and never initializes ESP-MQTT.
+- `mqtt` starts native Home Assistant MQTT Discovery and never initializes HTTP, the Web UI, mDNS, or HTTP OTA.
+
+Wi-Fi station mode, RF receive/transmit, learned storage, automation, and UART remain available in both profiles. A missing or corrupt MQTT configuration boots the Web profile. If the MQTT client, queue, or tasks cannot be allocated, that boot falls back to Web without changing the persisted MQTT request. Inspect requested/effective mode, reboot state, fallback errors, connection state, outbox use, internal heap, and MQTT/worker stack margins with:
+
+```text
+service status
+mqtt status
+```
+
+Configure a broker and select MQTT from UART:
+
+```text
+mqtt configure 192.0.2.20 rfbridge
+# Enter the broker password at the masked prompt.
+service mode mqtt
+# Reset or power-cycle the ESP32 once.
+```
+
+`mqtt configure <broker-ipv4> <username> [port]` accepts only a numeric unicast IPv4 address; the default port is `1883`. Give the broker a DHCP reservation or static address so the persisted endpoint does not move. Usernames are 1-63 printable ASCII bytes and passwords are 1-127 printable ASCII bytes. The prompt is masked and history-free, and the password is never printed. This profile uses plaintext MQTT 3.1.1: broker credentials and traffic are not encrypted, and the CRC-protected NVS record is not credential encryption. Use it only on a trusted LAN unless flash/NVS encryption and an appropriately isolated network are handled outside this feature.
+
+Mode and configuration changes are persisted but never reboot automatically. Return to Web with `service mode web`, then reset once. LAN OTA is available only after booting Web mode; while MQTT mode is active, use wired flashing or select Web and reboot before using `tools/push-ota.sh`. Switching to Web preserves the MQTT configuration and retained Home Assistant entities so switching back does not require reconfiguration.
+
+Each committed learned signal becomes one Home Assistant MQTT button. Discovery uses the default `homeassistant` prefix, the full lowercase Wi-Fi STA MAC, and these topics:
+
+```text
+homeassistant/button/rfbridge_<12hex>/<signal>/config
+rfbridge/<12hex>/signal/<signal>/press
+rfbridge/<12hex>/availability
+homeassistant/status
+```
+
+Discovery and availability are retained at QoS 1. Button commands are exact, non-retained QoS 0 `PRESS` messages so broker redelivery cannot cause a second RF action. A valid command replays the named signal using `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8). Retained, duplicate, fragmented, malformed, wrong-topic, and wrong-QoS commands are rejected. Learning or deleting a signal reconciles discovery automatically; a 60-second audit and `homeassistant/status` birth messages recover dropped events and Home Assistant restarts.
+
+For a dedicated Mosquitto user, replace `<12hex>` with the bridge's full lowercase STA MAC and grant only the bridge-side topics:
+
+```text
+user rfbridge_<12hex>
+topic read homeassistant/status
+topic read rfbridge/<12hex>/signal/+/press
+topic write rfbridge/<12hex>/availability
+topic write homeassistant/button/rfbridge_<12hex>/#
+```
+
+Home Assistant needs its own normal broker permissions to read discovery/availability and publish commands. Ensure MQTT Discovery is enabled with the `homeassistant` prefix.
+
+`mqtt forget` removes the broker configuration. If retained discovery entities exist, run it while the configured MQTT profile is active and connected. The firmware durably records retirement, tombstones every discovery and availability topic with acknowledgements, clears the ledger and credentials, and selects Web; reset once after retirement completes. If Web is already active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
+
 ### Web UI
 
-The Web UI is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
+The Web UI is available only in the Web profile. It is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
 
 The Web surface calls typed services directly and provides:
 
@@ -388,4 +440,4 @@ idf.py -B build build
 # idf.py -B build -p /dev/ttyUSB0 flash monitor
 ```
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF, Wi-Fi, and MQTT records, MQTT topics/discovery/command rejection, owned-key NVS repair, OTA compatibility policy, frequency calculation, and PA selection. MQTT broker behavior, CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

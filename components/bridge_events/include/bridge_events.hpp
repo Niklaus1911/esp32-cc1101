@@ -28,6 +28,7 @@ enum class BridgeEventType : uint8_t {
     kOperationCompleted,
     kWebStarted,
     kWebStopped,
+    kSignalCatalogChanged,
 };
 
 enum class BridgeEventSource : uint8_t {
@@ -35,6 +36,7 @@ enum class BridgeEventSource : uint8_t {
     kUart,
     kWeb,
     kAutomation,
+    kMqtt,
 };
 
 struct BridgeRfEventPayload {
@@ -89,6 +91,7 @@ struct BridgeEventBrokerStatus {
 };
 
 esp_err_t initialize_bridge_events();
+esp_err_t bridge_events_bind_available_sources();
 esp_err_t bridge_events_add_sink(BridgeEventSink sink, void *context, uint8_t *sink_id);
 esp_err_t bridge_events_remove_sink(uint8_t sink_id);
 bool bridge_events_publish(BridgeEvent event);
