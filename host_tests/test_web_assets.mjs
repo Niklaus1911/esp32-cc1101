@@ -86,6 +86,23 @@ assert(css.includes("@keyframes rule-trigger-pulse"), "rule trigger keyframes mi
 assert(css.includes("@media (prefers-reduced-motion: reduce)"),
        "reduced-motion rule trigger treatment missing");
 assert(css.includes("@media"), "responsive CSS missing");
+const mobileMediaMatch = /@media\s*\(\s*max-width\s*:\s*560px\s*\)\s*\{/.exec(css);
+assert(mobileMediaMatch, "560px responsive CSS missing");
+const mobileMediaOpen = mobileMediaMatch.index + mobileMediaMatch[0].lastIndexOf("{");
+let mobileMediaDepth = 1;
+let mobileMediaClose = -1;
+for (let offset = mobileMediaOpen + 1; offset < css.length; ++offset) {
+  if (css[offset] === "{") ++mobileMediaDepth;
+  if (css[offset] === "}" && --mobileMediaDepth === 0) {
+    mobileMediaClose = offset;
+    break;
+  }
+}
+assert.notEqual(mobileMediaClose, -1, "560px responsive CSS is unterminated");
+const mobileCss = css.slice(mobileMediaOpen + 1, mobileMediaClose);
+assert.match(mobileCss,
+             /#rule-list\s+\.item-actions\s*\{[^}]*\bgrid-template-columns\s*:\s*1fr\s*;/,
+             "mobile rule actions must use a single grid column");
 for (const forbidden of [
   '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
   "httpd_uri_match_wildcard", "body:{command:", "no-referrer", "8032",

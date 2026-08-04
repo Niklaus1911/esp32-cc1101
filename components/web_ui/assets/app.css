@@ -118,6 +118,7 @@ progress { width: 100%; height: 12px; margin-top: 14px; accent-color: #35b8c3; }
   .item { grid-template-columns: 1fr; }
   .item-meta { grid-column: 1; grid-row: auto; }
   .item-actions { width: 100%; display: grid; grid-template-columns: 76px 1fr 1fr; }
+  #rule-list .item-actions { grid-template-columns: 1fr; }
   .item-actions input, .item-actions button { width: 100%; }
   th, td { padding: 8px 5px; }
 }
