@@ -1,19 +1,26 @@
 #include "rf_console.hpp"
 
 #include <atomic>
+#include <cstdarg>
+#include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <new>
 #include <type_traits>
 
-#include <sys/select.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "bridge_control.hpp"
 #include "bridge_events.hpp"
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_log_color.h"
+#include "esp_log_write.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -22,6 +29,7 @@
 #include "ota_update.hpp"
 #include "rf_automation.hpp"
 #include "rf_console_format.hpp"
+#include "rf_console_linenoise.h"
 #include "rf_console_parse.hpp"
 #include "rf_signals.hpp"
 #include "rf_storage.hpp"
@@ -79,8 +87,16 @@ QueueHandle_t s_ota_event_queue = nullptr;
 QueueHandle_t s_bridge_event_queue = nullptr;
 SemaphoreHandle_t s_output_mutex = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
-esp_console_repl_t *s_repl = nullptr;
-bool s_repl_started = false;
+TaskHandle_t s_repl_task = nullptr;
+bool s_uart_driver_installed = false;
+bool s_console_initialized = false;
+bool s_help_registered = false;
+bool s_log_hook_installed = false;
+vprintf_like_t s_previous_log_vprintf = nullptr;
+std::atomic<TaskHandle_t> s_log_output_owner{nullptr};
+uint32_t s_output_depth = 0;
+uint8_t s_log_output_fragments = 0;
+char s_repl_prompt[24]{};
 bool s_bridge_sink_registered = false;
 uint8_t s_bridge_sink_id = 0;
 std::atomic<bool> s_started{false};
@@ -99,10 +115,16 @@ public:
         : locked_(s_output_mutex != nullptr &&
                   xSemaphoreTakeRecursive(s_output_mutex, portMAX_DELAY) == pdTRUE)
     {
+        if (locked_ && s_output_depth++ == 0) {
+            rf_linenoiseSuspendActiveLine();
+        }
     }
     ~OutputGuard()
     {
         if (locked_) {
+            if (s_output_depth > 0 && --s_output_depth == 0) {
+                rf_linenoiseResumeActiveLine();
+            }
             xSemaphoreGiveRecursive(s_output_mutex);
         }
     }
@@ -111,6 +133,92 @@ public:
 private:
     bool locked_;
 };
+
+void editor_lock(void *)
+{
+    if (s_output_mutex != nullptr) {
+        xSemaphoreTakeRecursive(s_output_mutex, portMAX_DELAY);
+    }
+}
+
+void editor_unlock(void *)
+{
+    if (s_output_mutex != nullptr) {
+        xSemaphoreGiveRecursive(s_output_mutex);
+    }
+}
+
+bool log_fragment_has_line_break(const char *format, va_list arguments)
+{
+    char preview[256]{};
+    va_list preview_arguments;
+    va_copy(preview_arguments, arguments);
+    const int length = std::vsnprintf(preview, sizeof(preview), format, preview_arguments);
+    va_end(preview_arguments);
+    if (length < 0) {
+        return true;
+    }
+    if (static_cast<std::size_t>(length) < sizeof(preview)) {
+        return std::strchr(preview, '\n') != nullptr;
+    }
+
+    std::unique_ptr<char[]> expanded(new (std::nothrow) char[static_cast<std::size_t>(length) + 1U]);
+    if (!expanded) {
+        return true;
+    }
+    va_copy(preview_arguments, arguments);
+    const int expanded_length = std::vsnprintf(expanded.get(), static_cast<std::size_t>(length) + 1U,
+                                               format, preview_arguments);
+    va_end(preview_arguments);
+    return expanded_length < 0 || std::strchr(expanded.get(), '\n') != nullptr;
+}
+
+bool begin_log_output(TaskHandle_t task)
+{
+    if (task != nullptr && s_log_output_owner.load(std::memory_order_acquire) == task) {
+        ++s_log_output_fragments;
+        return true;
+    }
+    if (s_output_mutex == nullptr ||
+        xSemaphoreTakeRecursive(s_output_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    if (s_output_depth++ == 0) {
+        rf_linenoiseSuspendActiveLine();
+    }
+    s_log_output_fragments = 1;
+    s_log_output_owner.store(task, std::memory_order_release);
+    return true;
+}
+
+void finish_log_output(TaskHandle_t task)
+{
+    if (s_log_output_owner.load(std::memory_order_acquire) != task) {
+        return;
+    }
+    s_log_output_owner.store(nullptr, std::memory_order_release);
+    s_log_output_fragments = 0;
+    if (s_output_depth > 0 && --s_output_depth == 0) {
+        rf_linenoiseResumeActiveLine();
+    }
+    xSemaphoreGiveRecursive(s_output_mutex);
+}
+
+int coordinated_log_vprintf(const char *format, va_list arguments)
+{
+    vprintf_like_t writer = s_previous_log_vprintf;
+    if (writer == nullptr || writer == coordinated_log_vprintf) {
+        writer = &vprintf;
+    }
+    const bool line_break = log_fragment_has_line_break(format, arguments);
+    const TaskHandle_t task = xTaskGetCurrentTaskHandle();
+    const bool coordinated = begin_log_output(task);
+    const int result = writer(format, arguments);
+    if (coordinated && (line_break || result < 0 || s_log_output_fragments >= 8U)) {
+        finish_log_output(task);
+    }
+    return result;
+}
 
 template <typename... Args>
 bool append_to_line(char *line, std::size_t capacity, std::size_t *length, const char *format, Args... args)
@@ -1252,61 +1360,24 @@ int status_command(int argc, char **)
 bool read_wifi_password(WifiCredentials *credentials)
 {
     char input[kWifiPasswordCapacity]{};
-    const int input_fd = fileno(stdin);
-    if (input_fd < 0) {
-        std::printf("ERROR wifi password input unavailable\n");
-        return false;
-    }
-
-    std::printf("WiFi password: ");
-    std::fflush(stdout);
-    std::size_t length = 0;
-    bool too_long = false;
-    while (true) {
-        fd_set read_set;
-        FD_ZERO(&read_set);
-        FD_SET(input_fd, &read_set);
-        const int ready = select(input_fd + 1, &read_set, nullptr, nullptr, nullptr);
-        if (ready < 0) {
-            std::memset(input, 0, sizeof(input));
-            std::printf("\nERROR wifi password input failed\n");
-            return false;
-        }
-
-        uint8_t value = 0;
-        const ssize_t received = read(input_fd, &value, sizeof(value));
-        if (received <= 0) {
-            continue;
-        }
-        if (value == '\r' || value == '\n') {
-            break;
-        }
-        if (value == 0x03U) {
-            std::memset(input, 0, sizeof(input));
-            std::printf("\nERROR wifi password input cancelled\n");
-            return false;
-        }
-        if (value == 0x08U || value == 0x7fU) {
-            if (!too_long && length > 0) {
-                input[--length] = '\0';
-            }
-            continue;
-        }
-        if (too_long || length + 1U >= sizeof(input)) {
-            too_long = true;
-            continue;
-        }
-        input[length++] = static_cast<char>(value);
-    }
-
-    if (too_long) {
+    errno = 0;
+    const int result = rf_linenoiseReadMasked("WiFi password: ", input, sizeof(input));
+    if (result < 0) {
+        const int input_error = errno;
         std::memset(input, 0, sizeof(input));
-        std::printf("\nERROR wifi password is too long\n");
+        OutputGuard guard;
+        if (result == RF_LINENOISE_MASKED_TOO_LONG) {
+            std::printf("ERROR wifi password is too long\n");
+        } else if (input_error == EAGAIN) {
+            std::printf("ERROR wifi password input cancelled\n");
+        } else {
+            std::printf("ERROR wifi password input failed\n");
+        }
         return false;
     }
+    const std::size_t length = static_cast<std::size_t>(result);
     std::memcpy(credentials->password, input, length + 1U);
     std::memset(input, 0, sizeof(input));
-    std::printf("\n");
     return true;
 }
 
@@ -1964,6 +2035,186 @@ void deregister_commands(std::size_t registered_count)
     }
 }
 
+char *console_hint(const char *line, int *color, int *bold)
+{
+    return const_cast<char *>(esp_console_get_hint(line, color, bold));
+}
+
+esp_err_t initialize_uart_console()
+{
+    std::fflush(stdout);
+    fsync(fileno(stdout));
+
+    const esp_console_dev_uart_config_t device_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+    const uart_port_t uart_port = static_cast<uart_port_t>(device_config.channel);
+    if (uart_vfs_dev_port_set_rx_line_endings(device_config.channel, ESP_LINE_ENDINGS_CR) != 0 ||
+        uart_vfs_dev_port_set_tx_line_endings(device_config.channel, ESP_LINE_ENDINGS_CRLF) != 0) {
+        return ESP_FAIL;
+    }
+
+    uart_sclk_t clock_source = UART_SCLK_DEFAULT;
+#if SOC_UART_SUPPORT_REF_TICK
+    clock_source = UART_SCLK_REF_TICK;
+#elif SOC_UART_SUPPORT_XTAL_CLK
+    clock_source = UART_SCLK_XTAL;
+#endif
+    uart_config_t uart_config{};
+    uart_config.baud_rate = 115200;
+    uart_config.data_bits = UART_DATA_8_BITS;
+    uart_config.parity = UART_PARITY_DISABLE;
+    uart_config.stop_bits = UART_STOP_BITS_1;
+    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.source_clk = clock_source;
+
+    esp_err_t error = uart_param_config(uart_port, &uart_config);
+    if (error != ESP_OK) {
+        return error;
+    }
+    error = uart_set_pin(uart_port, device_config.tx_gpio_num,
+                         device_config.rx_gpio_num, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (error != ESP_OK) {
+        return error;
+    }
+    error = uart_driver_install(uart_port, 256, 0, 0, nullptr, 0);
+    if (error != ESP_OK) {
+        return error;
+    }
+    s_uart_driver_installed = true;
+    uart_vfs_dev_use_driver(device_config.channel);
+    fcntl(fileno(stdout), F_SETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, 0);
+    setvbuf(stdin, nullptr, _IONBF, 0);
+
+    esp_console_config_t console_config = ESP_CONSOLE_CONFIG_DEFAULT();
+    console_config.max_cmdline_length = 2048;
+    console_config.max_cmdline_args = kMaxRawPulses + 4U;
+#if CONFIG_LOG_COLORS
+    console_config.hint_color = 36;
+#else
+    console_config.hint_color = -1;
+#endif
+    error = esp_console_init(&console_config);
+    if (error != ESP_OK) {
+        return error;
+    }
+    s_console_initialized = true;
+    error = esp_console_register_help_command();
+    if (error != ESP_OK) {
+        return error;
+    }
+    s_help_registered = true;
+
+    rf_linenoiseSetSyncCallbacks(editor_lock, editor_unlock, nullptr);
+    rf_linenoiseSetMultiLine(1);
+    rf_linenoiseSetCompletionCallback(&esp_console_get_completion);
+    rf_linenoiseSetHintsCallback(&console_hint);
+    rf_linenoiseSetFreeHintsCallback(nullptr);
+    if (rf_linenoiseSetMaxLineLen(2048) != 0 || rf_linenoiseHistorySetMaxLen(32) != 1) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    std::snprintf(s_repl_prompt, sizeof(s_repl_prompt), LOG_COLOR_I "rf> " LOG_RESET_COLOR);
+    rf_linenoiseSetDumbMode(0);
+    if (rf_linenoiseProbe() != 0) {
+        rf_linenoiseSetDumbMode(1);
+        std::snprintf(s_repl_prompt, sizeof(s_repl_prompt), "rf> ");
+    }
+    return ESP_OK;
+}
+
+bool is_help_command(const char *line)
+{
+    while (*line != '\0' && std::isspace(static_cast<unsigned char>(*line))) {
+        ++line;
+    }
+    return std::strncmp(line, "help", 4) == 0 &&
+           (line[4] == '\0' || std::isspace(static_cast<unsigned char>(line[4])));
+}
+
+void repl_task(void *)
+{
+    {
+        OutputGuard guard;
+        std::printf("\r\n"
+                    "Type 'help' to get the list of commands.\r\n"
+                    "Use UP/DOWN arrows to navigate through command history.\r\n"
+                    "Press TAB when typing command name to auto-complete.\r\n");
+        if (rf_linenoiseIsDumbMode()) {
+            std::printf("\r\n"
+                        "Your terminal application does not support escape sequences.\n\n"
+                        "Line editing and history features are disabled.\r\n");
+        }
+    }
+
+    while (true) {
+        char *line = rf_linenoise(s_repl_prompt);
+        if (line == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        rf_linenoiseHistoryAdd(line);
+
+        int command_result = 0;
+        esp_err_t error = ESP_OK;
+        if (is_help_command(line)) {
+            OutputGuard guard;
+            error = esp_console_run(line, &command_result);
+        } else {
+            error = esp_console_run(line, &command_result);
+        }
+        if (error != ESP_ERR_INVALID_ARG &&
+            (error != ESP_OK || command_result != ESP_OK)) {
+            OutputGuard guard;
+            if (error == ESP_ERR_NOT_FOUND) {
+                std::printf("Unrecognized command\n");
+            } else if (error == ESP_OK) {
+                std::printf("Command returned non-zero error code: 0x%x (%s)\n",
+                            command_result, esp_err_to_name(command_result));
+            } else {
+                std::printf("Internal error: %s\n", esp_err_to_name(error));
+            }
+        }
+        rf_linenoiseFree(line);
+    }
+}
+
+esp_err_t start_uart_console_task()
+{
+    if (xTaskCreatePinnedToCore(repl_task, "console_repl", 8192, nullptr, 2,
+                                &s_repl_task, tskNO_AFFINITY) != pdTRUE) {
+        s_repl_task = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+void deinitialize_uart_console()
+{
+    if (s_repl_task != nullptr) {
+        vTaskDelete(s_repl_task);
+        s_repl_task = nullptr;
+    }
+    rf_linenoiseSetSyncCallbacks(nullptr, nullptr, nullptr);
+    rf_linenoiseSetCompletionCallback(nullptr);
+    rf_linenoiseSetHintsCallback(nullptr);
+    rf_linenoiseHistoryFree();
+    if (s_help_registered) {
+        esp_console_deregister_help_command();
+        s_help_registered = false;
+    }
+    if (s_console_initialized) {
+        esp_console_deinit();
+        s_console_initialized = false;
+    }
+    if (s_uart_driver_installed) {
+        const esp_console_dev_uart_config_t device_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+        uart_vfs_dev_use_nonblocking(device_config.channel);
+        uart_driver_delete(static_cast<uart_port_t>(device_config.channel));
+        s_uart_driver_installed = false;
+    }
+    s_repl_prompt[0] = '\0';
+}
+
 void cleanup_failed_start(std::size_t registered_count)
 {
     esp_err_t sink_error = ESP_OK;
@@ -2004,28 +2255,21 @@ void cleanup_failed_start(std::size_t registered_count)
         s_bridge_event_queue = nullptr;
     }
 
-    deregister_commands(registered_count);
-    if (s_repl != nullptr) {
-        if (!s_repl_started) {
-            const esp_err_t start_error = esp_console_start_repl(s_repl);
-            if (start_error == ESP_OK) {
-                s_repl_started = true;
-            } else {
-                ESP_LOGE(kTag, "Could not start failed UART REPL for safe deletion: %s",
-                         esp_err_to_name(start_error));
-            }
-        }
-        if (s_repl_started) {
-            const esp_err_t delete_error = esp_console_stop_repl(s_repl);
-            if (delete_error == ESP_OK) {
-                s_repl = nullptr;
-                s_repl_started = false;
-            } else {
-                ESP_LOGE(kTag, "Could not delete failed UART REPL: %s", esp_err_to_name(delete_error));
-            }
-        }
+    if (s_repl_task != nullptr) {
+        vTaskDelete(s_repl_task);
+        s_repl_task = nullptr;
     }
-    if (safe_to_delete_events && s_repl == nullptr && s_output_mutex != nullptr) {
+    deregister_commands(registered_count);
+    if (s_log_hook_installed) {
+        esp_log_set_vprintf(s_previous_log_vprintf);
+        s_previous_log_vprintf = nullptr;
+        s_log_hook_installed = false;
+    }
+    s_log_output_owner.store(nullptr, std::memory_order_release);
+    s_log_output_fragments = 0;
+    deinitialize_uart_console();
+    if (safe_to_delete_events && s_output_mutex != nullptr) {
+        s_output_depth = 0;
         vSemaphoreDelete(s_output_mutex);
         s_output_mutex = nullptr;
     }
@@ -2046,7 +2290,9 @@ esp_err_t start_rf_console()
     if (s_starting.test_and_set(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
+    if (s_started.load(std::memory_order_acquire) || s_repl_task != nullptr ||
+        s_uart_driver_installed || s_console_initialized || s_help_registered ||
+        s_log_hook_installed || s_event_queue != nullptr ||
         s_automation_log_queue != nullptr || s_network_event_queue != nullptr ||
         s_ota_event_queue != nullptr || s_bridge_event_queue != nullptr ||
         s_output_mutex != nullptr || s_event_worker_task != nullptr) {
@@ -2059,16 +2305,9 @@ esp_err_t start_rf_console()
         return fail_start(ESP_ERR_NO_MEM, 0);
     }
 
-    esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    repl_config.prompt = "rf>";
-    repl_config.max_cmdline_length = 2048;
-    repl_config.max_cmdline_args = kMaxRawPulses + 4U;
-    repl_config.task_stack_size = 8192;
-    esp_console_dev_uart_config_t uart_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    uart_config.baud_rate = 115200;
-    esp_err_t error = esp_console_new_repl_uart(&uart_config, &repl_config, &s_repl);
+    esp_err_t error = initialize_uart_console();
     if (error != ESP_OK) {
-        ESP_LOGE(kTag, "Could not create UART REPL: %s", esp_err_to_name(error));
+        ESP_LOGE(kTag, "Could not initialize UART console: %s", esp_err_to_name(error));
         return fail_start(error, 0);
     }
 
@@ -2103,6 +2342,8 @@ esp_err_t start_rf_console()
         return fail_start(error, registered_count);
     }
     s_bridge_sink_registered = true;
+    s_previous_log_vprintf = esp_log_set_vprintf(coordinated_log_vprintf);
+    s_log_hook_installed = true;
 
     {
         OutputGuard output_guard;
@@ -2117,10 +2358,7 @@ esp_err_t start_rf_console()
             std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
         }
     }
-    error = esp_console_start_repl(s_repl);
-    if (error == ESP_OK) {
-        s_repl_started = true;
-    }
+    error = start_uart_console_task();
     if (error != ESP_OK) {
         ESP_LOGE(kTag, "Could not start UART REPL: %s", esp_err_to_name(error));
         return fail_start(error, registered_count);

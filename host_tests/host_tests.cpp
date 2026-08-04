@@ -1,9 +1,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <initializer_list>
 #include <iterator>
 #include <cstdlib>
+#include <limits>
+#include <string>
+
+#include <unistd.h>
 
 #include "network_wifi_config.hpp"
 #include "network_wifi_state.hpp"
@@ -11,6 +16,7 @@
 #include "rf_automation_engine.hpp"
 #include "rf_codec.hpp"
 #include "rf_console_format.hpp"
+#include "rf_console_linenoise.h"
 #include "rf_console_parse.hpp"
 #include "rf_activity_led_policy.hpp"
 #include "rf_storage_format.hpp"
@@ -25,6 +31,323 @@ void require(bool condition, const char *message)
         std::fprintf(stderr, "FAIL: %s\n", message);
         std::exit(1);
     }
+}
+
+struct LineEditorScript {
+    std::string input;
+    std::size_t offset = 0;
+    std::size_t event_offset = std::numeric_limits<std::size_t>::max();
+    bool event_emitted = false;
+    bool nested_suspend = false;
+    bool first_suspend = false;
+    bool second_suspend = false;
+};
+
+LineEditorScript s_line_editor_script;
+int s_line_editor_lock_depth = 0;
+uint32_t s_line_editor_time = 0;
+uint32_t s_line_editor_time_step = 100;
+
+void line_editor_lock(void *)
+{
+    ++s_line_editor_lock_depth;
+}
+
+void line_editor_unlock(void *)
+{
+    require(s_line_editor_lock_depth > 0, "line editor synchronization remains balanced");
+    --s_line_editor_lock_depth;
+}
+
+void emit_async_line()
+{
+    line_editor_lock(nullptr);
+    s_line_editor_script.first_suspend = rf_linenoiseSuspendActiveLine();
+    if (s_line_editor_script.nested_suspend) {
+        s_line_editor_script.second_suspend = rf_linenoiseSuspendActiveLine();
+    }
+    std::fputs("[ASYNC] line\n", stdout);
+    rf_linenoiseResumeActiveLine();
+    line_editor_unlock(nullptr);
+}
+
+ssize_t scripted_line_read(int, void *buffer, std::size_t length)
+{
+    if (!s_line_editor_script.event_emitted &&
+        s_line_editor_script.offset == s_line_editor_script.event_offset) {
+        s_line_editor_script.event_emitted = true;
+        emit_async_line();
+    }
+    if (length == 0 || s_line_editor_script.offset >= s_line_editor_script.input.size()) {
+        return 0;
+    }
+    static_cast<char *>(buffer)[0] = s_line_editor_script.input[s_line_editor_script.offset++];
+    return 1;
+}
+
+uint32_t scripted_line_time()
+{
+    const uint32_t current = s_line_editor_time;
+    s_line_editor_time += s_line_editor_time_step;
+    return current;
+}
+
+class StdoutCapture {
+public:
+    StdoutCapture()
+    {
+        std::fflush(stdout);
+        saved_fd_ = dup(STDOUT_FILENO);
+        file_ = std::tmpfile();
+        require(saved_fd_ >= 0 && file_ != nullptr, "stdout capture setup succeeds");
+        require(dup2(fileno(file_), STDOUT_FILENO) >= 0, "stdout capture redirects output");
+    }
+
+    ~StdoutCapture()
+    {
+        restore();
+    }
+
+    std::string finish()
+    {
+        std::fflush(stdout);
+        require(std::fseek(file_, 0, SEEK_END) == 0, "stdout capture seeks to end");
+        const long length = std::ftell(file_);
+        require(length >= 0 && std::fseek(file_, 0, SEEK_SET) == 0,
+                "stdout capture rewinds");
+        std::string output(static_cast<std::size_t>(length), '\0');
+        if (!output.empty()) {
+            require(std::fread(output.data(), 1, output.size(), file_) == output.size(),
+                    "stdout capture reads all output");
+        }
+        restore();
+        return output;
+    }
+
+private:
+    void restore()
+    {
+        if (saved_fd_ >= 0) {
+            std::fflush(stdout);
+            dup2(saved_fd_, STDOUT_FILENO);
+            close(saved_fd_);
+            saved_fd_ = -1;
+        }
+        if (file_ != nullptr) {
+            std::fclose(file_);
+            file_ = nullptr;
+        }
+    }
+
+    int saved_fd_ = -1;
+    FILE *file_ = nullptr;
+};
+
+void configure_line_editor(std::string input, std::size_t event_offset,
+                           bool dumb_mode = false, std::size_t columns = 80,
+                           bool nested_suspend = false, uint32_t time_step = 100)
+{
+    s_line_editor_script = {};
+    s_line_editor_script.input = std::move(input);
+    s_line_editor_script.event_offset = event_offset;
+    s_line_editor_script.nested_suspend = nested_suspend;
+    s_line_editor_lock_depth = 0;
+    s_line_editor_time = 0;
+    s_line_editor_time_step = time_step;
+    rf_linenoiseSetReadFunction(scripted_line_read);
+    rf_linenoiseSetTimeFunction(scripted_line_time);
+    rf_linenoiseSetSyncCallbacks(line_editor_lock, line_editor_unlock, nullptr);
+    rf_linenoiseSetColumnsOverride(columns);
+    rf_linenoiseSetDumbMode(dumb_mode ? 1 : 0);
+    rf_linenoiseSetMultiLine(1);
+    rf_linenoiseSetMaxLineLen(2048);
+}
+
+void reset_line_editor()
+{
+    rf_linenoiseSetCompletionCallback(nullptr);
+    rf_linenoiseSetHintsCallback(nullptr);
+    rf_linenoiseSetSyncCallbacks(nullptr, nullptr, nullptr);
+    rf_linenoiseSetReadFunction(nullptr);
+    rf_linenoiseSetTimeFunction(nullptr);
+    rf_linenoiseSetColumnsOverride(0);
+    rf_linenoiseSetDumbMode(0);
+    rf_linenoiseHistoryFree();
+    require(s_line_editor_lock_depth == 0, "line editor releases synchronization lock");
+}
+
+std::size_t substring_count(const std::string &value, const std::string &needle)
+{
+    std::size_t count = 0;
+    std::size_t position = 0;
+    while ((position = value.find(needle, position)) != std::string::npos) {
+        ++count;
+        position += needle.size();
+    }
+    return count;
+}
+
+void status_completion(const char *line, linenoiseCompletions *completions)
+{
+    if (std::strcmp(line, "sta") == 0) {
+        rf_linenoiseAddCompletion(completions, "status");
+    }
+}
+
+char *status_hint(const char *line, int *color, int *bold)
+{
+    static char hint[] = " <command>";
+    if (std::strcmp(line, "sta") != 0) return nullptr;
+    *color = 36;
+    *bold = 0;
+    return hint;
+}
+
+void test_prompt_safe_line_editor()
+{
+    rf_linenoiseHistoryFree();
+    require(rf_linenoiseHistorySetMaxLen(32) == 1, "line editor history initializes");
+
+    configure_line_editor("status\n", 3);
+    StdoutCapture single_capture;
+    char *single = rf_linenoise("rf> ");
+    const std::string single_output = single_capture.finish();
+    require(single != nullptr && std::strcmp(single, "status") == 0,
+            "asynchronous output preserves single-line input");
+    require(single_output.find("[ASYNC] line\n") != std::string::npos &&
+                substring_count(single_output, "rf> sta") >= 2,
+            "single-line interruption clears and redraws partial input");
+    require(s_line_editor_script.first_suspend, "active line is suspended for external output");
+    rf_linenoiseFree(single);
+    reset_line_editor();
+
+    configure_line_editor("sttus\x1b[D\x1b[D\x1b[Da\n", 14);
+    StdoutCapture cursor_capture;
+    char *cursor = rf_linenoise("rf> ");
+    const std::string cursor_output = cursor_capture.finish();
+    require(cursor != nullptr && std::strcmp(cursor, "status") == 0,
+            "cursor-middle redraw preserves edit position");
+    require(cursor_output.find("[ASYNC] line\n") != std::string::npos,
+            "cursor-middle interruption emits external record");
+    rf_linenoiseFree(cursor);
+    reset_line_editor();
+
+    const std::string multiline_command = "raw append 100 200 300 400 500 600";
+    configure_line_editor(multiline_command + "\n", 18, false, 12);
+    StdoutCapture multiline_capture;
+    char *multiline = rf_linenoise("rf> ");
+    const std::string multiline_output = multiline_capture.finish();
+    require(multiline != nullptr && multiline_command == multiline,
+            "multiline redraw preserves the full command");
+    require(multiline_output.find("\x1b[1A") != std::string::npos &&
+                multiline_output.find("[ASYNC] line\n") != std::string::npos,
+            "multiline interruption clears prior rows before redraw");
+    rf_linenoiseFree(multiline);
+    reset_line_editor();
+
+    configure_line_editor("sta\t\n", std::numeric_limits<std::size_t>::max());
+    rf_linenoiseSetCompletionCallback(status_completion);
+    rf_linenoiseSetHintsCallback(status_hint);
+    StdoutCapture completion_capture;
+    char *completed = rf_linenoise("rf> ");
+    const std::string completion_output = completion_capture.finish();
+    require(completed != nullptr && std::strcmp(completed, "status") == 0,
+            "completion remains functional");
+    require(completion_output.find("<command>") != std::string::npos,
+            "command hints remain functional");
+    rf_linenoiseFree(completed);
+    reset_line_editor();
+
+    configure_line_editor("status\n", std::numeric_limits<std::size_t>::max());
+    StdoutCapture history_capture;
+    char *history_seed = rf_linenoise("rf> ");
+    require(history_seed != nullptr, "history seed command is read");
+    rf_linenoiseHistoryAdd(history_seed);
+    rf_linenoiseFree(history_seed);
+    s_line_editor_script = {};
+    s_line_editor_script.input = "\x1b[A\n";
+    char *history_line = rf_linenoise("rf> ");
+    const std::string history_output = history_capture.finish();
+    require(history_line != nullptr && std::strcmp(history_line, "status") == 0,
+            "history navigation survives custom editor");
+    require(substring_count(history_output, "rf> ") >= 2, "history session presents both prompts");
+    rf_linenoiseFree(history_line);
+    reset_line_editor();
+
+    configure_line_editor("statuu\x7fs\n", 3, false, 80, true);
+    StdoutCapture nested_capture;
+    char *nested = rf_linenoise("rf> ");
+    const std::string nested_output = nested_capture.finish();
+    require(nested != nullptr && std::strcmp(nested, "status") == 0,
+            "backspace remains functional across interruption");
+    require(s_line_editor_script.first_suspend && !s_line_editor_script.second_suspend &&
+                substring_count(nested_output, "[ASYNC] line") == 1,
+            "nested output suspends and redraws only once");
+    rf_linenoiseFree(nested);
+    reset_line_editor();
+
+    configure_line_editor("status\n", 3, true);
+    StdoutCapture dumb_capture;
+    char *dumb = rf_linenoise("rf> ");
+    const std::string dumb_output = dumb_capture.finish();
+    require(dumb != nullptr && std::strcmp(dumb, "status") == 0,
+            "dumb terminal interruption preserves input");
+    require(dumb_output.find("\x1b[") == std::string::npos &&
+                substring_count(dumb_output, "rf> sta") >= 2,
+            "dumb terminal redraw uses no ANSI cursor control");
+    rf_linenoiseFree(dumb);
+    reset_line_editor();
+
+    configure_line_editor("raw append 100 200 300\n", 8, false, 80, false, 0);
+    StdoutCapture paste_capture;
+    char *pasted = rf_linenoise("rf> ");
+    paste_capture.finish();
+    require(pasted != nullptr && std::strcmp(pasted, "raw append 100 200 300") == 0,
+            "pasted input remains intact across asynchronous output");
+    rf_linenoiseFree(pasted);
+    reset_line_editor();
+
+    configure_line_editor(std::string(70, 'a') + "\n",
+                          std::numeric_limits<std::size_t>::max());
+    require(rf_linenoiseSetMaxLineLen(64) == 0, "test command bound is accepted");
+    StdoutCapture bounded_capture;
+    char *bounded = rf_linenoise("rf> ");
+    bounded_capture.finish();
+    require(bounded != nullptr && std::strlen(bounded) == 63,
+            "line editor enforces its configured maximum safely");
+    rf_linenoiseFree(bounded);
+    reset_line_editor();
+}
+
+void test_prompt_safe_masked_input()
+{
+    configure_line_editor("sec\x7f" "cret\n", 3);
+    char secret[16]{};
+    StdoutCapture capture;
+    const int length = rf_linenoiseReadMasked("WiFi password: ", secret, sizeof(secret));
+    const std::string output = capture.finish();
+    require(length == 6 && std::strcmp(secret, "secret") == 0,
+            "masked input preserves editing across asynchronous output");
+    require(output.find("secret") == std::string::npos && output.find("sec") == std::string::npos,
+            "masked input never renders entered bytes");
+    require(output.find("[ASYNC] line\n") != std::string::npos &&
+                substring_count(output, "WiFi password: ") >= 2,
+            "masked prompt redraws after asynchronous output");
+    std::memset(secret, 0, sizeof(secret));
+    reset_line_editor();
+
+    configure_line_editor(std::string(20, 'x') + "\n",
+                          std::numeric_limits<std::size_t>::max());
+    char bounded[8]{};
+    StdoutCapture overflow_capture;
+    const int overflow = rf_linenoiseReadMasked("WiFi password: ", bounded, sizeof(bounded));
+    const std::string overflow_output = overflow_capture.finish();
+    require(overflow == RF_LINENOISE_MASKED_TOO_LONG,
+            "masked input reports bounded overflow");
+    require(overflow_output.find('x') == std::string::npos,
+            "overflowed masked input remains secret");
+    std::memset(bounded, 0, sizeof(bounded));
+    reset_line_editor();
 }
 
 void test_protocol_table()
@@ -760,6 +1083,8 @@ int main()
     test_protocol_alias_policy();
     test_console_parser();
     test_console_formatter();
+    test_prompt_safe_line_editor();
+    test_prompt_safe_masked_input();
     test_rf_activity_led_policy();
     test_learned_signal_matching();
     test_storage_format();

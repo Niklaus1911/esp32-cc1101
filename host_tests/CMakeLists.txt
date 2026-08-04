@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(esp32_cc1101_host_tests LANGUAGES CXX)
+project(esp32_cc1101_host_tests LANGUAGES C CXX)
 
 enable_testing()
 find_program(BASH_EXECUTABLE bash REQUIRED)
@@ -13,6 +13,7 @@ add_executable(rf_host_tests
     ../components/rf_automation/rf_automation_engine.cpp
     ../components/rf_codec/rf_codec.cpp
     ../components/rf_console/rf_console_format.cpp
+    ../components/rf_console/rf_console_linenoise.c
     ../components/rf_console/rf_console_parse.cpp
     ../components/rf_ook/rf_activity_led_policy.cpp
     ../components/rf_signals/rf_signals_match.cpp
@@ -26,6 +27,7 @@ target_include_directories(rf_host_tests PRIVATE
     ../components/rf_automation/include
     ../components/rf_codec/include
     ../components/rf_console/include
+    ../components/rf_console
     ../components/rf_ook/private_include
     ../components/rf_signals/include
     ../components/bridge_events/include
