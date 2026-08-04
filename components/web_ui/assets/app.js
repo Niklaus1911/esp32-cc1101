@@ -9,6 +9,9 @@ const state = {
   otaRebooting: false,
   backoff: 1000,
   accepted: null,
+  ruleExecutions: null,
+  rulePulseTimer: null,
+  rulePulseItem: null,
   learningRevision: null,
   live: null,
   signals: [],
@@ -181,6 +184,28 @@ function frameMatch(frame) {
   return frame.match === "unavailable" ? "Catalog unavailable" : "None";
 }
 
+function clearRulePulse() {
+  clearTimeout(state.rulePulseTimer);
+  if (state.rulePulseItem) state.rulePulseItem.classList.remove("rule-triggered");
+  state.rulePulseTimer = null;
+  state.rulePulseItem = null;
+}
+
+function pulseTriggeredRule(trigger) {
+  const rulesView = document.querySelector('[data-panel="rules"]');
+  if (!trigger || rulesView.hidden) return;
+  const item = [...byId("rule-list").querySelectorAll("[data-trigger]")]
+    .find((candidate) => candidate.dataset.trigger === trigger);
+  if (!item) return;
+  clearRulePulse();
+  void item.offsetWidth;
+  item.classList.add("rule-triggered");
+  state.rulePulseItem = item;
+  state.rulePulseTimer = setTimeout(() => {
+    if (state.rulePulseItem === item) clearRulePulse();
+  }, 1000);
+}
+
 function removeStoredActivity() {
   try { sessionStorage.removeItem(activityStorageKey); } catch (_) { /* Storage is optional. */ }
 }
@@ -295,12 +320,18 @@ function renderLearning(learning) {
 function renderLive(live) {
   if (!live) return;
   const previousAccepted = state.accepted;
+  const previousRuleExecutions = state.ruleExecutions;
+  const ruleExecutions = live.automation.actions + live.automation.tx_errors;
   state.live = live;
   state.accepted = live.radio.accepted;
+  state.ruleExecutions = ruleExecutions;
   if (previousAccepted !== null && live.radio.accepted > previousAccepted) {
     addActivity(live, live.radio.accepted - previousAccepted);
   } else if (live.radio.accepted !== previousAccepted) {
     persistActivity();
+  }
+  if (previousRuleExecutions !== null && ruleExecutions > previousRuleExecutions) {
+    pulseTriggeredRule(live.automation.last_trigger);
   }
   if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
       live.learning.state !== "armed") refreshSignals();

@@ -80,8 +80,18 @@ th { color: #9eaaad; font-size: .72rem; text-transform: uppercase; }
 .item-meta { color: #aab4b7; font-size: .82rem; overflow-wrap: anywhere; }
 .item-actions { display: flex; align-items: end; gap: 8px; }
 .item-actions input { width: 72px; }
+.item.rule-triggered { animation: rule-trigger-pulse 900ms ease-out; }
 .security-note { margin: 10px 0 14px; padding: 9px 11px; border-left: 3px solid #efc06f; background: #241f17; color: #ead5ad; }
 progress { width: 100%; height: 12px; margin-top: 14px; accent-color: #35b8c3; }
+
+@keyframes rule-trigger-pulse {
+  0%, 100% { background-color: transparent; box-shadow: inset 0 0 0 rgba(239, 192, 111, 0); }
+  35% { background-color: rgba(239, 192, 111, .14); box-shadow: inset 3px 0 0 rgba(239, 192, 111, .85); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item.rule-triggered { animation: none; background-color: rgba(239, 192, 111, .14); box-shadow: inset 3px 0 0 rgba(239, 192, 111, .85); }
+}
 
 @media (max-width: 820px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

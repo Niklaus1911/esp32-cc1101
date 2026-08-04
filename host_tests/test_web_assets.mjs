@@ -74,6 +74,17 @@ assert.match(js, /maximumActivityEntries = 50;/, "activity entry bound changed")
 assert.match(js, /maximumActivityStorageLength = 64 \* 1024;/, "activity storage bound changed");
 assert(js.lastIndexOf("restoreActivity();") < js.lastIndexOf("renderActivity();"),
        "activity must restore before its initial render");
+assert(js.includes("live.automation.actions + live.automation.tx_errors"),
+       "rule execution watermark missing");
+assert(js.includes('rulesView.hidden') && js.includes("candidate.dataset.trigger === trigger"),
+       "visible exact-trigger rule lookup missing");
+assert(js.includes('classList.add("rule-triggered")') &&
+       js.includes('classList.remove("rule-triggered")'), "rule pulse lifecycle missing");
+assert.match(css, /\.item\.rule-triggered \{ animation: rule-trigger-pulse 900ms ease-out; \}/,
+             "rule trigger animation missing");
+assert(css.includes("@keyframes rule-trigger-pulse"), "rule trigger keyframes missing");
+assert(css.includes("@media (prefers-reduced-motion: reduce)"),
+       "reduced-motion rule trigger treatment missing");
 assert(css.includes("@media"), "responsive CSS missing");
 for (const forbidden of [
   '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
