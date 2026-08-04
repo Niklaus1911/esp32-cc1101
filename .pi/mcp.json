@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "espressif-docs": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.espressif.com/docs"
+      ],
+      "lifecycle": "eager"
+    },
+
+    "esp-idf-tools": {
+      "transport": "stdio",
+      "command": "fish",
+      "args": [
+        "-c",
+        "source \"$HOME/.espressif/v6.0.2/esp-idf/export.fish\" >/dev/null; and exec idf.py -C (pwd) mcp-server"
+      ],
+      "lifecycle": "eager",
+      "requestTimeoutMs": 600000
+    }
+  }
+}

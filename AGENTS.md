@@ -9,6 +9,13 @@
 - `components/rf_storage/`: versioned NVS signal and automation-rule storage.
 - `components/rf_automation/`: receive-to-replay rules, queues, cooldowns, and event reporting.
 - `components/rf_console/`: UART commands and bounded command parsing.
+- `components/bridge_control/`, `components/bridge_events/`: shared typed control APIs and bounded cross-subsystem event delivery.
+- `components/app_maintenance/`: transactional RF, automation, and Wi-Fi maintenance coordination for OTA.
+- `components/network_wifi/`, `components/ota_update/`: station lifecycle and validated streaming OTA.
+- `components/rf_signals/`: learned-signal matching, learning state, replay ownership, and snapshots.
+- `components/platform_nvs/`: shared NVS initialization and availability state.
+- `components/web_ui/`: responsive assets, typed HTTP API, polling, request validation, and shared HTTP server ownership.
+- `components/web_auth/`: legacy token storage and UART token administration; the current trusted-LAN Web UI is unauthenticated.
 - `host_tests/`: portable C++17 codec/parser/storage/automation tests.
 - `test_apps/unit/`: dedicated ESP-IDF Unity image. Building it does not run its on-device tests.
 - `README.md`: authoritative hardware, command, RF, and safety documentation.
@@ -31,10 +38,10 @@ The production verifier activates the installed ESP-IDF 6.0.2 environment itself
 tools/verify-production.sh
 ```
 
-Build the dedicated Unity image separately when component behavior changes:
+Build the dedicated Unity image separately when component behavior changes. In fish, source `"$HOME/.espressif/v6.0.2/esp-idf/export.fish"` instead; Bash automation uses the stable checkout export shown here:
 
 ```bash
-source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+source "$HOME/.espressif/v6.0.2/esp-idf/export.sh"
 cd test_apps/unit
 idf.py -B build build
 ```
@@ -46,6 +53,24 @@ The production verifier runs a clean out-of-tree firmware build, size report, an
 Generic and Espressif clangd both report false ESP-IDF cross-toolchain diagnostics for this project. AFT 0.49 only permits disabling LSP servers in user-level configuration, so keep the global server available and treat these diagnostics as non-authoritative. Keep `validate_on_edit: "syntax"` globally because AFT syntax rejection and rollback remain useful. `idf.py build` is the firmware compilation gate.
 
 Use indexed `grep`, `read`, `aft_outline`, and `aft_zoom` for exploration. Use `edit` for focused changes and `aft_safety` checkpoints before risky multi-file work. Treat dead-code and call-graph results as hints around callbacks, function pointers, FreeRTOS tasks, and hardware entry points.
+
+## External Research
+
+Use targeted Web search whenever it can materially improve a design or debugging decision, especially for version-specific ESP-IDF behavior, upstream defects, hardware constraints, or established implementation patterns that local source and diagnostics do not fully resolve. Prefer authoritative Espressif documentation, upstream source, release notes, and issue trackers; verify that findings apply to ESP-IDF 6.0.2 and classic ESP32, and do not substitute Web advice for the production build or hardware validation gates.
+
+## Espressif MCP
+
+Start Pi from the repository root so the project MCP configuration loads. Use the Espressif Documentation MCP before generic Web search for ESP-IDF APIs, version-specific behavior, hardware constraints, release notes, and official examples; confirm results apply to ESP-IDF 6.0.2 and classic ESP32. Use broader Web research for upstream defects and implementation patterns not resolved by official material.
+
+Use the ESP-IDF Tools MCP `build_project` operation as a fast iterative compiler check. It writes the normal in-tree build output and does not replace host tests, Unity compilation, or `tools/verify-production.sh`; the production verifier remains the final clean build, size, image, and partition gate. MCP success does not prove RF timing, range, recovery, NVS persistence, browser behavior, or hardware behavior.
+
+Do not call `set_target` without approval because it can regenerate project configuration. Do not call `clean_project` without approval because it removes build artifacts. Never call `flash_project` without explicit approval and a confirmed port and board. An MCP startup failure is not permission to modify, reinstall, repair, or delete anything under `~/.espressif`; fall back to the documented shell commands and report the failure.
+
+## Browser Validation
+
+Use Playwright for Web UI behavior changes. Validate against a deterministic local mock first, then against the device when hardware access is authorized. Cover desktop and mobile layouts, horizontal overflow, console and page errors, polling behavior, exact same-origin mutation headers, and reconnect flows such as OTA reboot recovery.
+
+Intercept RF transmit and destructive mutation requests unless the user explicitly authorizes those hardware effects. Browser validation complements rather than replaces host tests, the production build, and hardware validation.
 
 ## Code Conventions
 
