@@ -1,0 +1,71 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace rfbridge {
+
+constexpr std::size_t kWebMaxRawPulses = 256;
+constexpr std::size_t kWebNameCapacity = 16;
+
+enum class WebRulePatch : uint8_t {
+    kEnabled,
+    kLogMode,
+};
+
+struct WebReplayForm {
+    bool latest = true;
+    char name[kWebNameCapacity]{};
+    uint16_t repeats = 1;
+};
+
+struct WebDecodedForm {
+    uint64_t code = 0;
+    uint16_t bits = 0;
+    uint8_t protocol = 0;
+    uint16_t pulse_us = 0;
+    uint16_t repeats = 1;
+};
+
+struct WebRawForm {
+    uint8_t start_level = 0;
+    uint16_t durations[kWebMaxRawPulses]{};
+    std::size_t count = 0;
+    uint16_t repeats = 1;
+};
+
+struct WebRuleAddForm {
+    char trigger[kWebNameCapacity]{};
+    char target[kWebNameCapacity]{};
+    uint8_t repeats = 1;
+};
+
+struct WebRuleRemoveForm {
+    char trigger[kWebNameCapacity]{};
+};
+
+struct WebRulePatchForm {
+    WebRulePatch patch = WebRulePatch::kEnabled;
+    bool enabled = false;
+    char log_mode[8]{};
+};
+
+bool parse_web_learn_form(const char *body, std::size_t length, char *name,
+                          std::size_t name_capacity);
+bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *output);
+bool parse_web_signal_name_form(const char *body, std::size_t length, char *name,
+                                std::size_t name_capacity);
+bool parse_web_decoded_form(const char *body, std::size_t length, WebDecodedForm *output);
+bool parse_web_raw_form(const char *body, std::size_t length, WebRawForm *output);
+bool parse_web_rule_add_form(const char *body, std::size_t length, WebRuleAddForm *output);
+bool parse_web_rule_remove_form(const char *body, std::size_t length, WebRuleRemoveForm *output);
+bool parse_web_rule_patch_form(const char *body, std::size_t length, WebRulePatchForm *output);
+bool web_form_content_type_is_valid(const char *content_type);
+bool web_octet_stream_content_type_is_valid(const char *content_type);
+bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_port);
+bool web_origin_matches_ipv4(const char *origin, uint32_t ipv4, uint16_t expected_port);
+bool web_origin_matches_host(const char *origin, const char *host);
+bool escape_web_html(const char *input, char *output, std::size_t capacity,
+                     std::size_t *output_length = nullptr);
+
+}  // namespace rfbridge

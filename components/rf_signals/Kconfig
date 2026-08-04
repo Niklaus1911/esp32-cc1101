@@ -1,0 +1,13 @@
+menu "Learned RF signal service"
+
+config RF_MAX_LEARNED_SIGNALS
+    int "Maximum learned signals cached for live matching"
+    range 1 64
+    default 32
+    help
+        Maximum number of learned decoded/raw signals loaded into bounded RAM for
+        annotating received events. NVS records above this limit remain readable
+        and removable, but live learned-name annotation is disabled until the
+        count is reduced.
+
+endmenu

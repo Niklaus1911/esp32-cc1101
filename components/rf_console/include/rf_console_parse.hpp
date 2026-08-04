@@ -7,12 +7,6 @@
 
 namespace rfbridge {
 
-enum class LearnFrameDisposition : uint8_t {
-    kIgnore,
-    kCapture,
-    kTimeout,
-};
-
 enum class ReplayTarget : uint8_t {
     kRam,
     kNamed,
@@ -30,7 +24,5 @@ bool parse_rule_add_arguments(int argc, const char *const *argv, uint8_t default
 bool parse_rule_log_mode(const char *text, RfAutomationLogMode *mode);
 bool format_rf_automation_event(const RfAutomationEvent &event, const char *result_name, char *output,
                                 std::size_t capacity);
-LearnFrameDisposition classify_learn_frame(int64_t armed_us, int64_t deadline_us, int64_t frame_event_us,
-                                           int64_t frame_capture_start_us);
 
 }  // namespace rfbridge

@@ -1,3 +1,4 @@
+#include "bridge_events.hpp"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -8,7 +9,9 @@
 #include "rf_automation.hpp"
 #include "rf_console.hpp"
 #include "rf_ook.hpp"
+#include "rf_signals.hpp"
 #include "rf_storage.hpp"
+#include "web_ui.hpp"
 
 namespace {
 
@@ -16,7 +19,10 @@ constexpr char kTag[] = "app";
 
 void network_online_changed(bool online, void *)
 {
-    rfbridge::set_ota_network_online(online);
+    const esp_err_t error = rfbridge::set_web_ui_network_online(online);
+    if (error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not update Web UI network state: %s", esp_err_to_name(error));
+    }
 }
 
 }  // namespace
@@ -45,13 +51,25 @@ extern "C" void app_main(void)
     if (ota_error != ESP_OK) {
         ESP_LOGE(kTag, "LAN OTA unavailable: %s", esp_err_to_name(ota_error));
     }
-    if (network_error == ESP_OK && ota_error == ESP_OK) {
+    const esp_err_t events_error = rfbridge::initialize_bridge_events();
+    if (events_error != ESP_OK) {
+        ESP_LOGE(kTag, "Shared event broker unavailable: %s", esp_err_to_name(events_error));
+    }
+    const esp_err_t signals_error = rfbridge::initialize_rf_signals();
+    if (signals_error != ESP_OK) {
+        ESP_LOGE(kTag, "Learned-signal service unavailable: %s", esp_err_to_name(signals_error));
+    }
+    const esp_err_t web_error = rfbridge::initialize_web_ui();
+    if (web_error != ESP_OK) {
+        ESP_LOGE(kTag, "Web UI unavailable: %s", esp_err_to_name(web_error));
+    }
+    if (network_error == ESP_OK && web_error == ESP_OK) {
         ESP_ERROR_CHECK(rfbridge::set_network_wifi_online_sink(network_online_changed, nullptr));
     }
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;
     for (int attempt = 1; attempt <= 3 && error != ESP_OK; ++attempt) {
-        error = rfbridge::start_rf_ook(rfbridge::rf_console_on_frame, nullptr);
+        error = rfbridge::start_rf_ook(rfbridge::rf_signals_on_frame, nullptr);
         if (error != ESP_OK) {
             rfbridge::RfRadioStatus status{};
             if (rfbridge::get_rf_radio_status(&status) == ESP_OK && status.running) {
@@ -70,7 +88,8 @@ extern "C" void app_main(void)
     if (ota_error == ESP_OK) {
         const esp_err_t confirm_error = rfbridge::confirm_running_ota_image();
         if (confirm_error != ESP_OK) {
-            ESP_LOGE(kTag, "Could not confirm the running OTA image: %s", esp_err_to_name(confirm_error));
+            ESP_LOGE(kTag, "Could not confirm the running OTA image: %s",
+                     esp_err_to_name(confirm_error));
         }
     }
     if (network_error == ESP_OK) {

@@ -154,20 +154,6 @@ TEST_CASE("replay parser preserves RAM forms and requires repeats for names", "[
     TEST_ASSERT_FALSE(rfbridge::parse_replay_arguments(3, bad_repeats, 8, &arguments));
 }
 
-TEST_CASE("learn capture window is post-arm and half open", "[rf_console]")
-{
-    using rfbridge::LearnFrameDisposition;
-    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kCapture),
-                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 31000999, 2000)));
-    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kTimeout),
-                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 31001000, 2000)));
-    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kIgnore),
-                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 999, 999)));
-    TEST_ASSERT_EQUAL(static_cast<int>(LearnFrameDisposition::kIgnore),
-                      static_cast<int>(rfbridge::classify_learn_frame(1000, 31001000, 2000, 999)));
-}
-
-
 TEST_CASE("rule add parser validates names and repeats", "[rf_console][rf_automation]")
 {
     const char *default_rule[] = {"rule", "add", "B", "A"};

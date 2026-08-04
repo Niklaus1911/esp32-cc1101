@@ -14,6 +14,8 @@
 #include "rf_console_parse.hpp"
 #include "rf_activity_led_policy.hpp"
 #include "rf_storage_format.hpp"
+#include "rf_signals_match.hpp"
+#include "web_form.hpp"
 
 namespace {
 
@@ -392,24 +394,52 @@ void test_rf_activity_led_policy()
             "activity LED turns off at the latest deadline");
 }
 
-void test_learn_deadline_classification()
+void test_learned_signal_matching()
 {
-    using rfbridge::LearnFrameDisposition;
-    require(rfbridge::classify_learn_frame(1000, 31001000, 1000, 1000) ==
-                LearnFrameDisposition::kCapture,
+    using rfbridge::LearnedMatchKind;
+    using rfbridge::RfLearnFrameDisposition;
+    require(rfbridge::classify_learn_frame_window(1000, 31001000, 1000, 1000) ==
+                RfLearnFrameDisposition::kCapture,
             "frame at arm boundary captured");
-    require(rfbridge::classify_learn_frame(1000, 31001000, 31000999, 2000) ==
-                LearnFrameDisposition::kCapture,
+    require(rfbridge::classify_learn_frame_window(1000, 31001000, 31000999, 2000) ==
+                RfLearnFrameDisposition::kCapture,
             "frame before learn deadline captured");
-    require(rfbridge::classify_learn_frame(1000, 31001000, 31001000, 2000) ==
-                LearnFrameDisposition::kTimeout,
+    require(rfbridge::classify_learn_frame_window(1000, 31001000, 31001000, 2000) ==
+                RfLearnFrameDisposition::kTimeout,
             "frame at learn deadline rejected");
-    require(rfbridge::classify_learn_frame(1000, 31001000, 999, 999) ==
-                LearnFrameDisposition::kIgnore,
+    require(rfbridge::classify_learn_frame_window(1000, 31001000, 999, 999) ==
+                RfLearnFrameDisposition::kIgnore,
             "frame accepted before arm ignored");
-    require(rfbridge::classify_learn_frame(1000, 31001000, 2000, 999) ==
-                LearnFrameDisposition::kIgnore,
+    require(rfbridge::classify_learn_frame_window(1000, 31001000, 2000, 999) ==
+                RfLearnFrameDisposition::kIgnore,
             "capture that started before learning is ignored");
+
+    rfbridge::RfStoredSignal incoming{};
+    incoming.decoded.code = 0xA88142;
+    incoming.decoded.pulse_us = 386;
+    incoming.decoded.bits = 24;
+    incoming.decoded.protocol = 1;
+    rfbridge::LearnedSignalEntry entries[2]{};
+    std::strcpy(entries[0].name.value, "gate");
+    entries[0].signal = incoming;
+    std::strcpy(entries[1].name.value, "porch");
+    entries[1].signal = incoming;
+
+    rfbridge::LearnedMatch match =
+        rfbridge::find_learned_signal_match(incoming, entries, 1, true);
+    require(match.kind == LearnedMatchKind::kUnique && match.count == 1 &&
+                std::strcmp(match.name, "gate") == 0,
+            "unique learned signal match retains its name");
+    match = rfbridge::find_learned_signal_match(incoming, entries, 2, true);
+    require(match.kind == LearnedMatchKind::kAmbiguous && match.count == 2 && match.name[0] == '\0',
+            "ambiguous learned signal match does not choose a name");
+    entries[0].signal.decoded.code ^= 1U;
+    match = rfbridge::find_learned_signal_match(incoming, entries, 1, true);
+    require(match.kind == LearnedMatchKind::kNone && match.count == 0,
+            "unmatched learned signal reports none");
+    match = rfbridge::find_learned_signal_match(incoming, nullptr, 0, false);
+    require(match.kind == LearnedMatchKind::kUnavailable,
+            "unavailable learned catalog remains distinguishable");
 }
 
 void test_storage_format()
@@ -612,6 +642,89 @@ void test_automation_rules()
             "automation cooldown logging remainder is rounded up");
 }
 
+void test_web_forms()
+{
+    char name[16]{};
+    require(rfbridge::parse_web_learn_form("name=gate_1", 11, name, sizeof(name)) &&
+                std::strcmp(name, "gate_1") == 0,
+            "Web learn form accepts bounded names");
+    require(!rfbridge::parse_web_learn_form("name=gate%201", 13, name, sizeof(name)),
+            "Web learn form rejects encoded names");
+    require(!rfbridge::parse_web_learn_form("name=gate&x=1", 13, name, sizeof(name)),
+            "Web learn form rejects extra fields");
+
+    rfbridge::WebReplayForm replay{};
+    require(rfbridge::parse_web_replay_form("name=gate_1&repeats=7", 21, &replay) &&
+                !replay.latest && std::strcmp(replay.name, "gate_1") == 0 && replay.repeats == 7,
+            "Web named replay form accepts bounded values");
+    require(rfbridge::parse_web_replay_form("name=&repeats=8", 15, &replay) && replay.latest,
+            "Web latest replay form accepts empty name");
+    require(!rfbridge::parse_web_replay_form("name=gate_1&repeats=7&extra=1", 29, &replay),
+            "Web replay form rejects extra fields");
+
+    rfbridge::WebDecodedForm decoded{};
+    require(rfbridge::parse_web_decoded_form(
+                "code=0xA88142&bits=24&protocol=1&pulse_us=0&repeats=8", 53, &decoded) &&
+                decoded.code == 0xA88142 && decoded.bits == 24 && decoded.protocol == 1,
+            "Web decoded transmit form accepts hexadecimal code");
+    require(!rfbridge::parse_web_decoded_form(
+                "code=0xA88142&bits=24&protocol=1&pulse_us=0&repeats=21", 54, &decoded),
+            "Web decoded transmit form rejects excessive repeats");
+
+    rfbridge::WebRawForm raw{};
+    require(rfbridge::parse_web_raw_form(
+                "start_level=0&durations=100,200,300,400,500,600,700,800&repeats=2", 65, &raw) &&
+                raw.count == 8 && raw.repeats == 2,
+            "Web raw transmit form accepts bounded alternating pulses");
+    require(!rfbridge::parse_web_raw_form("start_level=0&durations=100,200,300&repeats=2", 45, &raw),
+            "Web raw transmit form rejects short signals");
+
+    rfbridge::WebRuleAddForm rule{};
+    require(rfbridge::parse_web_rule_add_form("trigger=gate&target=lamp&repeats=3", 34, &rule) &&
+                std::strcmp(rule.trigger, "gate") == 0 && rule.repeats == 3,
+            "Web rule add form accepts bounded names");
+    require(!rfbridge::parse_web_rule_add_form("trigger=gate&target=gate&repeats=3", 34, &rule),
+            "Web rule add form rejects self references");
+    rfbridge::WebRulePatchForm patch{};
+    require(rfbridge::parse_web_rule_patch_form("enabled=1", 9, &patch) && patch.enabled,
+            "Web rule enabled patch accepts boolean");
+    require(rfbridge::parse_web_rule_patch_form("log_mode=verbose", 16, &patch) &&
+                patch.patch == rfbridge::WebRulePatch::kLogMode,
+            "Web rule log patch accepts exact mode");
+
+    require(rfbridge::web_form_content_type_is_valid("application/x-www-form-urlencoded"),
+            "Web form content type accepted");
+    require(!rfbridge::web_form_content_type_is_valid("application/json"),
+            "Web JSON action rejected");
+    require(rfbridge::web_octet_stream_content_type_is_valid("application/octet-stream"),
+            "Web OTA content type accepted");
+    constexpr uint32_t device_ip = 0x1101A8C0;
+    require(rfbridge::web_host_matches_ipv4("192.168.1.17", device_ip, 80),
+            "Web default-port Host accepted");
+    require(rfbridge::web_host_matches_ipv4("192.168.1.17:80", device_ip, 80),
+            "Web explicit default-port Host accepted");
+    require(!rfbridge::web_host_matches_ipv4("rfbridge.local", device_ip, 80),
+            "Web DNS rebinding Host rejected");
+    require(!rfbridge::web_host_matches_ipv4("192.168.1.17:8032", device_ip, 80),
+            "Web alternate port rejected");
+    require(rfbridge::web_origin_matches_ipv4("http://192.168.1.17", device_ip, 80),
+            "Web browser Origin accepted");
+    require(rfbridge::web_origin_matches_ipv4("http://192.168.1.17:80", device_ip, 80),
+            "Web explicit Origin port accepted");
+    require(!rfbridge::web_origin_matches_ipv4("null", device_ip, 80),
+            "Opaque browser Origin rejected");
+    require(rfbridge::web_origin_matches_host("http://192.168.1.17", "192.168.1.17:80"),
+            "Web normalized same origin accepted");
+
+    char escaped[64]{};
+    require(rfbridge::escape_web_html("<&>\"'", escaped, sizeof(escaped)) &&
+                std::strcmp(escaped, "&lt;&amp;&gt;&quot;&#39;") == 0,
+            "Web HTML escaping covers active characters");
+    char too_small[4]{};
+    require(!rfbridge::escape_web_html("<", too_small, sizeof(too_small)),
+            "Web HTML escaping rejects truncation");
+}
+
 }  // namespace
 
 int main()
@@ -624,11 +737,12 @@ int main()
     test_console_parser();
     test_console_formatter();
     test_rf_activity_led_policy();
-    test_learn_deadline_classification();
+    test_learned_signal_matching();
     test_storage_format();
     test_wifi_config();
     test_ota_policy();
     test_automation_rules();
+    test_web_forms();
     std::puts("All host RF tests passed");
     return 0;
 }

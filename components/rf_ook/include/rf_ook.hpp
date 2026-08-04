@@ -50,7 +50,6 @@ using RfFrameCallback = void (*)(const RfFrame &frame, void *context);
 
 esp_err_t start_rf_ook(RfFrameCallback callback, void *context);
 void stop_rf_ook();
-esp_err_t set_rf_receive_enabled(bool enabled);
 esp_err_t transmit_rf_decoded(const DecodedSignal &signal, uint16_t repeats);
 esp_err_t transmit_rf_raw(const RawSignal &signal, uint16_t repeats);
 esp_err_t replay_last_rf_frame(uint16_t repeats);

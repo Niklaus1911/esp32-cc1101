@@ -5,10 +5,13 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <type_traits>
 
 #include <sys/select.h>
 #include <unistd.h>
 
+#include "bridge_control.hpp"
+#include "bridge_events.hpp"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -20,8 +23,10 @@
 #include "rf_automation.hpp"
 #include "rf_console_format.hpp"
 #include "rf_console_parse.hpp"
+#include "rf_signals.hpp"
 #include "rf_storage.hpp"
 #include "sdkconfig.h"
+#include "web_auth.hpp"
 
 #ifndef CONFIG_ESP_CONSOLE_UART_DEFAULT
 #error "rf_console requires CONFIG_ESP_CONSOLE_UART_DEFAULT"
@@ -33,27 +38,19 @@ namespace {
 constexpr char kTag[] = "rf_console";
 constexpr std::size_t kOutputLineSize = 2048;
 constexpr uint32_t kEventWorkerTaskStackSize = 6144;
-constexpr int64_t kLearnTimeoutUs = 30000000;
-constexpr TickType_t kLearnEnqueueWaitTicks = pdMS_TO_TICKS(100);
 constexpr UBaseType_t kFrameEventQueueDepth = 8;
 constexpr UBaseType_t kAutomationLogQueueDepth = 8;
 constexpr UBaseType_t kNetworkEventQueueDepth = 8;
 constexpr UBaseType_t kOtaEventQueueDepth = 8;
+constexpr UBaseType_t kBridgeEventQueueDepth = 8;
 constexpr std::size_t kAutomationLogLineSize = 256;
 constexpr std::size_t kSystemEventLineSize = 256;
-constexpr uint32_t kCallbackQuiesceAttempts = 100;
 constexpr uint8_t kFrameEventBurst = 4;
 
-enum class ConsoleEventType : uint8_t {
-    kFrame,
-    kLearnRequest,
-};
-
 struct ConsoleEvent {
-    ConsoleEventType type = ConsoleEventType::kFrame;
     int64_t occurred_us = 0;
     RfFrame frame{};
-    char name[kRfStorageNameCapacity]{};
+    LearnedMatch learned{};
 };
 
 struct ConsoleOtaEvent {
@@ -61,30 +58,35 @@ struct ConsoleOtaEvent {
     uint32_t series_generation = 0;
 };
 
-struct PendingLearn {
-    bool active = false;
-    int64_t armed_us = 0;
-    int64_t deadline_us = 0;
-    uint32_t frame_drops_at_arm = 0;
+struct ConsoleSystemEvent {
+    BridgeEventType type = BridgeEventType::kLearnArmed;
+    BridgeEventSource source = BridgeEventSource::kSystem;
+    esp_err_t result = ESP_OK;
+    uint32_t value = 0;
+    uint16_t repeats = 0;
     char name[kRfStorageNameCapacity]{};
+    char target[kRfStorageNameCapacity]{};
 };
+
+static_assert(std::is_trivially_copyable_v<ConsoleSystemEvent>);
+static_assert(sizeof(ConsoleSystemEvent) <= 48U);
+static_assert(kBridgeEventQueueDepth * sizeof(ConsoleSystemEvent) <= 384U);
 
 QueueHandle_t s_event_queue = nullptr;
 QueueHandle_t s_automation_log_queue = nullptr;
 QueueHandle_t s_network_event_queue = nullptr;
 QueueHandle_t s_ota_event_queue = nullptr;
+QueueHandle_t s_bridge_event_queue = nullptr;
 SemaphoreHandle_t s_output_mutex = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
 esp_console_repl_t *s_repl = nullptr;
 bool s_repl_started = false;
-bool s_network_sink_registered = false;
-bool s_ota_sink_registered = false;
+bool s_bridge_sink_registered = false;
+uint8_t s_bridge_sink_id = 0;
 std::atomic<bool> s_started{false};
 std::atomic_flag s_starting = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> s_frame_queue_drops{0};
-std::atomic<uint32_t> s_frame_callbacks_in_flight{0};
 std::atomic<uint32_t> s_ota_series_generation{0};
-std::atomic<bool> s_accept_frame_callbacks{false};
 std::atomic<ConsoleStyle> s_console_style{ConsoleStyle::kPretty};
 RawSignal s_staged_raw{};
 bool s_raw_staging = false;
@@ -274,7 +276,7 @@ void print_dashboard_value(const char *label, const char *value, ConsoleTone ton
     }
 }
 
-void print_frame(const char *prefix, const RfFrame &frame)
+void print_frame(const char *prefix, const RfFrame &frame, const LearnedMatch *learned = nullptr)
 {
     OutputGuard guard;
     if (!guard.locked()) {
@@ -282,9 +284,15 @@ void print_frame(const char *prefix, const RfFrame &frame)
     }
     char line[kOutputLineSize]{};
     std::size_t length = 0;
-    bool formatted = false;
+    bool formatted = true;
+    if (learned != nullptr && learned->kind == LearnedMatchKind::kUnique) {
+        formatted = append_to_line(line, sizeof(line), &length, "learned=%s ", learned->name);
+    } else if (learned != nullptr && learned->kind == LearnedMatchKind::kAmbiguous) {
+        formatted = append_to_line(line, sizeof(line), &length, "learned=ambiguous(%u) ",
+                                   learned->count);
+    }
     if (frame.encoding == RfEncoding::kDecoded) {
-        formatted = append_to_line(
+        formatted = formatted && append_to_line(
             line, sizeof(line), &length,
             "RC code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u confidence=%s repeats=%u "
             "fingerprint=0x%08lX",
@@ -294,8 +302,8 @@ void print_frame(const char *prefix, const RfFrame &frame)
             frame.confidence == RfFrameConfidence::kRepeatedEvidence ? "repeated" : "single",
             frame.observed_repeats, static_cast<unsigned long>(frame.fingerprint));
     } else {
-        formatted = append_to_line(line, sizeof(line), &length,
-                                   "RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=",
+        formatted = formatted && append_to_line(line, sizeof(line), &length,
+                                    "RAW start=%u count=%u repeats=%u fingerprint=0x%08lX durations=",
                                    frame.raw.start_level, frame.raw.count, frame.observed_repeats,
                                    static_cast<unsigned long>(frame.fingerprint));
         for (std::size_t index = 0; formatted && index < frame.raw.count; ++index) {
@@ -324,162 +332,12 @@ void print_frame(const char *prefix, const RfFrame &frame)
     std::fflush(stdout);
 }
 
-void clear_pending_learn(PendingLearn *pending)
+
+void process_console_event(const ConsoleEvent &event)
 {
-    *pending = {};
+    print_frame("RX", event.frame, &event.learned);
 }
 
-void print_learn_timeout(PendingLearn *pending)
-{
-    char name[kRfStorageNameCapacity]{};
-    std::memcpy(name, pending->name, sizeof(name));
-    clear_pending_learn(pending);
-    char plain[96]{};
-    char pretty[96]{};
-    std::snprintf(plain, sizeof(plain), "LEARN TIMEOUT name=%s", name);
-    std::snprintf(pretty, sizeof(pretty), "Timed out waiting for %s", name);
-    print_tagged_line(ConsoleTone::kWarning, "LEARN", plain, pretty);
-    std::fflush(stdout);
-}
-
-RfStoredSignal stored_signal_from_frame(const RfFrame &frame)
-{
-    RfStoredSignal stored{};
-    if (frame.encoding == RfEncoding::kDecoded) {
-        stored.encoding = RfStoredEncoding::kDecoded;
-        stored.decoded = frame.decoded;
-    } else {
-        stored.encoding = RfStoredEncoding::kRaw;
-        stored.raw = frame.raw;
-    }
-    return stored;
-}
-
-void process_learn_request(const ConsoleEvent &event, PendingLearn *pending)
-{
-    RfRadioStatus status{};
-    const esp_err_t status_error = get_rf_radio_status(&status);
-    if (status_error != ESP_OK || !status.running || !status.receive_enabled) {
-        const esp_err_t error = status_error == ESP_OK ? ESP_ERR_INVALID_STATE : status_error;
-        char plain[160]{};
-        char pretty[160]{};
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: RF/RX unavailable: %s (0x%x)",
-                      event.name, esp_err_to_name(error), static_cast<unsigned>(error));
-        std::snprintf(pretty, sizeof(pretty), "Cannot arm %s: RF/RX unavailable (%s)", event.name,
-                      esp_err_to_name(error));
-        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-        std::fflush(stdout);
-        return;
-    }
-
-    bool exists = false;
-    const esp_err_t exists_error = rf_storage_exists(event.name, &exists);
-    if (exists_error != ESP_OK) {
-        char plain[128]{};
-        char pretty[128]{};
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: %s (0x%x)", event.name,
-                      esp_err_to_name(exists_error), static_cast<unsigned>(exists_error));
-        std::snprintf(pretty, sizeof(pretty), "Cannot check %s: %s", event.name,
-                      esp_err_to_name(exists_error));
-        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-        return;
-    }
-    if (exists) {
-        char plain[96]{};
-        char pretty[96]{};
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", event.name);
-        std::snprintf(pretty, sizeof(pretty), "%s already exists", event.name);
-        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-        return;
-    }
-    if (pending->active) {
-        char old_name[kRfStorageNameCapacity]{};
-        std::memcpy(old_name, pending->name, sizeof(old_name));
-        clear_pending_learn(pending);
-        char plain[112]{};
-        char pretty[112]{};
-        std::snprintf(plain, sizeof(plain), "LEARN REPLACED old=%s new=%s", old_name,
-                      event.name);
-        std::snprintf(pretty, sizeof(pretty), "Replaced pending %s with %s", old_name, event.name);
-        print_tagged_line(ConsoleTone::kWarning, "LEARN", plain, pretty);
-    }
-    char plain[96]{};
-    char pretty[96]{};
-    std::snprintf(plain, sizeof(plain), "LEARN ARMED name=%s timeout=30s", event.name);
-    std::snprintf(pretty, sizeof(pretty), "Armed for %s | timeout 30 s", event.name);
-    print_tagged_line(ConsoleTone::kInfo, "LEARN", plain, pretty);
-    std::fflush(stdout);
-
-    // Open the capture window only after the marker has been emitted.
-    const uint32_t frame_drops_at_arm = s_frame_queue_drops.load(std::memory_order_acquire);
-    const int64_t armed_us = esp_timer_get_time();
-    pending->active = true;
-    pending->armed_us = armed_us;
-    pending->deadline_us = armed_us + kLearnTimeoutUs;
-    pending->frame_drops_at_arm = frame_drops_at_arm;
-    std::memcpy(pending->name, event.name, sizeof(pending->name));
-}
-
-void process_frame_event(const ConsoleEvent &event, PendingLearn *pending)
-{
-    if (!pending->active) {
-        print_frame("RX", event.frame);
-        return;
-    }
-    const LearnFrameDisposition disposition =
-        classify_learn_frame(pending->armed_us, pending->deadline_us, event.occurred_us,
-                             event.frame.captured_us);
-    if (disposition == LearnFrameDisposition::kIgnore) {
-        print_frame("RX", event.frame);
-        return;
-    }
-    if (disposition == LearnFrameDisposition::kTimeout) {
-        print_learn_timeout(pending);
-        print_frame("RX", event.frame);
-        return;
-    }
-
-    char name[kRfStorageNameCapacity]{};
-    std::memcpy(name, pending->name, sizeof(name));
-    clear_pending_learn(pending);
-    print_frame("RX", event.frame);
-    const RfStoredSignal stored = stored_signal_from_frame(event.frame);
-    const esp_err_t error = rf_storage_create(name, stored);
-    char plain[128]{};
-    char pretty[128]{};
-    if (error == ESP_OK) {
-        std::snprintf(plain, sizeof(plain), "LEARNED name=%s", name);
-        std::snprintf(pretty, sizeof(pretty), "Saved %s", name);
-        print_tagged_line(ConsoleTone::kSuccess, "LEARN", plain, pretty);
-    } else if (error == ESP_ERR_INVALID_STATE) {
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", name);
-        std::snprintf(pretty, sizeof(pretty), "%s already exists", name);
-        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-    } else {
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s: %s (0x%x)", name,
-                      esp_err_to_name(error), static_cast<unsigned>(error));
-        std::snprintf(pretty, sizeof(pretty), "Could not save %s: %s", name,
-                      esp_err_to_name(error));
-        print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-    }
-    std::fflush(stdout);
-}
-
-void process_console_event(const ConsoleEvent &event, PendingLearn *pending)
-{
-    OutputGuard guard;
-    if (!guard.locked()) {
-        return;
-    }
-    if (event.type == ConsoleEventType::kLearnRequest) {
-        if (pending->active && event.occurred_us >= pending->deadline_us) {
-            print_learn_timeout(pending);
-        }
-        process_learn_request(event, pending);
-    } else {
-        process_frame_event(event, pending);
-    }
-}
 
 
 void process_automation_log_event(const RfAutomationEvent &event)
@@ -699,101 +557,206 @@ bool enqueue_ota_event(const OtaUpdateEvent &event, void *)
     return true;
 }
 
-TickType_t learn_wait_ticks(int64_t remaining_us)
+void process_bridge_event(const ConsoleSystemEvent &event)
 {
-    const uint64_t ticks = (static_cast<uint64_t>(remaining_us) * configTICK_RATE_HZ + 999999U) / 1000000U;
-    return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
+    char plain[192]{};
+    char pretty[192]{};
+    ConsoleTone tone = ConsoleTone::kInfo;
+    const char *tag = "EVENT";
+    switch (event.type) {
+        case BridgeEventType::kLearnArmed:
+            std::snprintf(plain, sizeof(plain), "LEARN ARMED name=%s timeout=30s", event.name);
+            std::snprintf(pretty, sizeof(pretty), "Armed for %s | timeout 30 s", event.name);
+            tag = "LEARN";
+            break;
+        case BridgeEventType::kLearnReplaced:
+            std::snprintf(plain, sizeof(plain), "LEARN REPLACED old=%s new=%s", event.name,
+                          event.target);
+            std::snprintf(pretty, sizeof(pretty), "Replaced pending %s with %s", event.name,
+                          event.target);
+            tag = "LEARN";
+            tone = ConsoleTone::kWarning;
+            break;
+        case BridgeEventType::kLearnCompleted:
+            std::snprintf(plain, sizeof(plain), "LEARNED name=%s", event.name);
+            std::snprintf(pretty, sizeof(pretty), "Saved %s", event.name);
+            tag = "LEARN";
+            tone = ConsoleTone::kSuccess;
+            break;
+        case BridgeEventType::kLearnCancelled:
+            std::snprintf(plain, sizeof(plain), "LEARN CANCELLED name=%s", event.name);
+            std::snprintf(pretty, sizeof(pretty), "Cancelled learning for %s", event.name);
+            tag = "LEARN";
+            tone = ConsoleTone::kWarning;
+            break;
+        case BridgeEventType::kLearnTimeout:
+            std::snprintf(plain, sizeof(plain), "LEARN TIMEOUT name=%s", event.name);
+            std::snprintf(pretty, sizeof(pretty), "Timed out waiting for %s", event.name);
+            tag = "LEARN";
+            tone = ConsoleTone::kWarning;
+            break;
+        case BridgeEventType::kLearnFailed:
+            std::snprintf(plain, sizeof(plain), "LEARN ERROR name=%s error=%s (0x%x)",
+                          event.name, esp_err_to_name(event.result),
+                          static_cast<unsigned>(event.result));
+            std::snprintf(pretty, sizeof(pretty), "Could not learn %s: %s", event.name,
+                          esp_err_to_name(event.result));
+            tag = "LEARN";
+            tone = ConsoleTone::kError;
+            break;
+        case BridgeEventType::kTxStarted:
+            std::snprintf(plain, sizeof(plain), "TX START source=%u name=%s repeats=%u",
+                          static_cast<unsigned>(event.source), event.name[0] == '\0' ? "-" : event.name,
+                          event.repeats);
+            std::snprintf(pretty, sizeof(pretty), "Started %s | repeats %u",
+                          event.name[0] == '\0' ? "transmission" : event.name, event.repeats);
+            tag = "RF TX";
+            tone = ConsoleTone::kAction;
+            break;
+        case BridgeEventType::kTxCompleted:
+            std::snprintf(plain, sizeof(plain), "TX COMPLETE source=%u name=%s repeats=%u result=%s",
+                          static_cast<unsigned>(event.source), event.name[0] == '\0' ? "-" : event.name,
+                          event.repeats, esp_err_to_name(event.result));
+            std::snprintf(pretty, sizeof(pretty), "%s | %s",
+                          event.name[0] == '\0' ? "Transmission" : event.name,
+                          event.result == ESP_OK ? "complete" : esp_err_to_name(event.result));
+            tag = "RF TX";
+            tone = event.result == ESP_OK ? ConsoleTone::kSuccess : ConsoleTone::kError;
+            break;
+        case BridgeEventType::kWebStarted:
+            std::snprintf(plain, sizeof(plain), "WEB STARTED port=%lu",
+                          static_cast<unsigned long>(event.value));
+            std::snprintf(pretty, sizeof(pretty), "Web UI started on port %lu",
+                          static_cast<unsigned long>(event.value));
+            tag = "WEB";
+            tone = ConsoleTone::kSuccess;
+            break;
+        case BridgeEventType::kWebStopped:
+            std::snprintf(plain, sizeof(plain), "WEB STOPPED");
+            std::snprintf(pretty, sizeof(pretty), "Web UI stopped");
+            tag = "WEB";
+            tone = ConsoleTone::kMuted;
+            break;
+        default:
+            return;
+    }
+    print_tagged_line(tone, tag, plain, pretty);
+    std::fflush(stdout);
 }
+
+bool enqueue_bridge_event(const BridgeEvent &event, void *)
+{
+    switch (event.type) {
+        case BridgeEventType::kRx: {
+            ConsoleEvent console_event{};
+            console_event.occurred_us = event.occurred_us;
+            console_event.frame = event.payload.rf.frame;
+            console_event.learned = event.payload.rf.learned;
+            if (s_event_queue == nullptr || xQueueSend(s_event_queue, &console_event, 0) != pdTRUE) {
+                s_frame_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            break;
+        }
+        case BridgeEventType::kAutomation:
+            return enqueue_automation_log_event(event.payload.automation, nullptr);
+        case BridgeEventType::kNetwork:
+            return enqueue_network_event(event.payload.network, nullptr);
+        case BridgeEventType::kOta:
+            return enqueue_ota_event(event.payload.ota, nullptr);
+        case BridgeEventType::kLearnArmed:
+        case BridgeEventType::kLearnReplaced:
+        case BridgeEventType::kLearnCompleted:
+        case BridgeEventType::kLearnCancelled:
+        case BridgeEventType::kLearnTimeout:
+        case BridgeEventType::kLearnFailed:
+        case BridgeEventType::kTxStarted:
+        case BridgeEventType::kTxCompleted:
+        case BridgeEventType::kWebStarted:
+        case BridgeEventType::kWebStopped: {
+            ConsoleSystemEvent system_event{};
+            system_event.type = event.type;
+            system_event.source = event.source;
+            system_event.result = event.result;
+            system_event.value = event.value;
+            system_event.repeats = event.repeats;
+            std::memcpy(system_event.name, event.payload.rf.name, sizeof(system_event.name));
+            std::memcpy(system_event.target, event.payload.rf.target, sizeof(system_event.target));
+            if (s_bridge_event_queue == nullptr ||
+                xQueueSend(s_bridge_event_queue, &system_event, 0) != pdTRUE) {
+                return false;
+            }
+            break;
+        }
+        case BridgeEventType::kOperationCompleted:
+            return true;
+    }
+    if (s_event_worker_task != nullptr) {
+        xTaskNotifyGive(s_event_worker_task);
+    }
+    return true;
+}
+
 
 void event_worker_task(void *)
 {
-    PendingLearn pending{};
     uint8_t frame_budget = kFrameEventBurst;
     uint8_t system_cursor = 0;
     while (true) {
-        ConsoleEvent event{};
-        if (pending.active &&
-            s_frame_queue_drops.load(std::memory_order_acquire) != pending.frame_drops_at_arm) {
-            char name[kRfStorageNameCapacity]{};
-            std::memcpy(name, pending.name, sizeof(name));
-            clear_pending_learn(&pending);
-            char plain[128]{};
-            char pretty[128]{};
-            std::snprintf(plain, sizeof(plain),
-                          "LEARN ERROR name=%s: frame event queue overflowed; retry", name);
-            std::snprintf(pretty, sizeof(pretty), "Cancelled %s: frame queue overflow; retry", name);
-            print_tagged_line(ConsoleTone::kError, "LEARN", plain, pretty);
-            std::fflush(stdout);
-            continue;
-        }
-
-        TickType_t wait_ticks = portMAX_DELAY;
-        if (pending.active) {
-            const int64_t now_us = esp_timer_get_time();
-            if (now_us >= pending.deadline_us) {
-                if (s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
-                    vTaskDelay(1);
-                    continue;
-                }
-                if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-                    process_console_event(event, &pending);
-                    if (frame_budget > 0) {
-                        --frame_budget;
-                    }
-                    continue;
-                }
-                print_learn_timeout(&pending);
-                continue;
-            }
-            wait_ticks = learn_wait_ticks(pending.deadline_us - now_us);
-        }
-
-        if (frame_budget > 0 && xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-            process_console_event(event, &pending);
+        ConsoleEvent frame_event{};
+        if (frame_budget > 0 && xQueueReceive(s_event_queue, &frame_event, 0) == pdTRUE) {
+            process_console_event(frame_event);
             --frame_budget;
             continue;
         }
 
-        bool processed_system_event = false;
-        for (uint8_t offset = 0; offset < 3U && !processed_system_event; ++offset) {
-            const uint8_t queue_index = static_cast<uint8_t>((system_cursor + offset) % 3U);
+        bool processed = false;
+        for (uint8_t offset = 0; offset < 4U && !processed; ++offset) {
+            const uint8_t queue_index = static_cast<uint8_t>((system_cursor + offset) % 4U);
             if (queue_index == 0) {
-                NetworkWifiEvent network_event{};
-                if (xQueueReceive(s_network_event_queue, &network_event, 0) == pdTRUE) {
-                    process_network_event(network_event);
-                    processed_system_event = true;
+                NetworkWifiEvent event{};
+                if (xQueueReceive(s_network_event_queue, &event, 0) == pdTRUE) {
+                    process_network_event(event);
+                    processed = true;
                 }
             } else if (queue_index == 1) {
-                ConsoleOtaEvent ota_event{};
-                if (xQueueReceive(s_ota_event_queue, &ota_event, 0) == pdTRUE) {
-                    process_ota_event(ota_event);
-                    processed_system_event = true;
+                ConsoleOtaEvent event{};
+                if (xQueueReceive(s_ota_event_queue, &event, 0) == pdTRUE) {
+                    process_ota_event(event);
+                    processed = true;
+                }
+            } else if (queue_index == 2) {
+                RfAutomationEvent event{};
+                if (xQueueReceive(s_automation_log_queue, &event, 0) == pdTRUE) {
+                    process_automation_log_event(event);
+                    processed = true;
                 }
             } else {
-                RfAutomationEvent log_event{};
-                if (xQueueReceive(s_automation_log_queue, &log_event, 0) == pdTRUE) {
-                    process_automation_log_event(log_event);
-                    processed_system_event = true;
+                ConsoleSystemEvent event{};
+                if (xQueueReceive(s_bridge_event_queue, &event, 0) == pdTRUE) {
+                    process_bridge_event(event);
+                    processed = true;
                 }
             }
-            if (processed_system_event) {
-                system_cursor = static_cast<uint8_t>((queue_index + 1U) % 3U);
+            if (processed) {
+                system_cursor = static_cast<uint8_t>((queue_index + 1U) % 4U);
                 frame_budget = kFrameEventBurst;
             }
         }
-        if (processed_system_event) {
+        if (processed) {
             continue;
         }
 
         frame_budget = kFrameEventBurst;
-        if (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-            process_console_event(event, &pending);
+        if (xQueueReceive(s_event_queue, &frame_event, 0) == pdTRUE) {
+            process_console_event(frame_event);
             --frame_budget;
             continue;
         }
-        ulTaskNotifyTake(pdTRUE, wait_ticks);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
+
 
 bool parse_bounded(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *value)
 {
@@ -1283,7 +1246,6 @@ int status_command(int argc, char **)
     const int result = render_radio_status(true);
     render_automation_status();
     render_wifi_status();
-    render_ota_status();
     return result;
 }
 
@@ -1435,6 +1397,53 @@ int ota_command(int argc, char **argv)
     return print_usage("usage: ota status (updates are uploaded from the PC HTTP client)");
 }
 
+int web_command(int argc, char **argv)
+{
+    if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
+        std::strcmp(argv[2], "status") == 0) {
+        WebAuthStatus status{};
+        const esp_err_t error = get_web_auth_status(&status);
+        if (error != ESP_OK) {
+            return print_result("web auth status", error);
+        }
+        char plain[128]{};
+        char pretty[128]{};
+        std::snprintf(plain, sizeof(plain),
+                       "WEB_AUTH available=%u provisioned=%u generation=%lu failures=%lu blocked_ms=%lu",
+                       status.available, status.provisioned,
+                       static_cast<unsigned long>(status.generation),
+                      static_cast<unsigned long>(status.failed_attempts),
+                      static_cast<unsigned long>(status.blocked_ms));
+        std::snprintf(pretty, sizeof(pretty), "Provisioned %s | blocked %lu ms",
+                      status.provisioned ? "yes" : "no",
+                      static_cast<unsigned long>(status.blocked_ms));
+        print_tagged_line(ConsoleTone::kInfo, "WEB", plain, pretty, false);
+        return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
+        std::strcmp(argv[2], "rotate") == 0) {
+        WebAuthStatus previous{};
+        const bool recovering =
+            get_web_auth_status(&previous) == ESP_OK && !previous.available;
+        char token[kWebAuthTokenLength + 1U]{};
+        const esp_err_t error = rotate_web_auth_token(token, sizeof(token));
+        if (error != ESP_OK) {
+            return print_result("web auth rotate", error);
+        }
+        OutputGuard guard;
+        if (!guard.locked()) {
+            std::memset(token, 0, sizeof(token));
+            return 1;
+        }
+        std::printf("\nWEB AUTH TOKEN %s\nStore this token; it will not be shown again.%s\n",
+                    token, recovering ? " Reboot to restart Web and OTA services." : "");
+        std::fflush(stdout);
+        std::memset(token, 0, sizeof(token));
+        return 0;
+    }
+    return print_usage("usage: web auth <status|rotate>");
+}
+
 int radio_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "info") == 0) {
@@ -1444,18 +1453,9 @@ int radio_command(int argc, char **argv)
         return print_result("radio reset", reset_rf_radio());
     }
     if (argc == 2 && std::strcmp(argv[1], "start") == 0) {
-        return print_result("radio start", start_rf_ook(rf_console_on_frame, nullptr));
+        return print_result("radio start", bridge_control_start_radio());
     }
     return print_usage("usage: radio <info|reset|start>");
-}
-
-int rx_command(int argc, char **argv)
-{
-    if (argc != 2 || (std::strcmp(argv[1], "on") != 0 && std::strcmp(argv[1], "off") != 0)) {
-        return print_usage("usage: rx <on|off>");
-    }
-    const bool enabled = std::strcmp(argv[1], "on") == 0;
-    return print_result(enabled ? "rx on" : "rx off", set_rf_receive_enabled(enabled));
 }
 
 int last_command(int argc, char **)
@@ -1464,11 +1464,12 @@ int last_command(int argc, char **)
         return print_usage("usage: last");
     }
     RfFrame frame{};
-    const esp_err_t error = get_last_rf_frame(&frame);
+    LearnedMatch learned{};
+    const esp_err_t error = get_last_rf_frame_with_match(&frame, &learned);
     if (error != ESP_OK) {
         return print_result("last", error);
     }
-    print_frame("LAST", frame);
+    print_frame("LAST", frame, &learned);
     return 0;
 }
 
@@ -1534,52 +1535,18 @@ int learn_command(int argc, char **argv)
     if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
         return print_usage("usage: learn <name>|list (name: letter then up to 14 letters/digits/_/-)");
     }
-    if (!rf_storage_is_available()) {
-        return print_result("learn", rf_storage_initialization_error());
-    }
-    bool exists = false;
-    esp_err_t error = rf_storage_exists(argv[1], &exists);
-    if (error != ESP_OK) {
-        return print_result("learn", error);
-    }
-    if (exists) {
-        char plain[96]{};
-        char pretty[96]{};
-        std::snprintf(plain, sizeof(plain), "ERROR learn name=%s already exists", argv[1]);
-        std::snprintf(pretty, sizeof(pretty), "Learned signal %s already exists", argv[1]);
-        return print_validation_error(plain, pretty);
-    }
-    RfRadioStatus status{};
-    error = get_rf_radio_status(&status);
-    if (error != ESP_OK) {
-        return print_result("learn", error);
-    }
-    if (!status.running || !status.receive_enabled) {
-        return print_validation_error("ERROR learn requires running RF with RX enabled",
-                                      "Learning requires running RF with RX enabled");
-    }
-
-    ConsoleEvent event{};
-    event.type = ConsoleEventType::kLearnRequest;
-    event.occurred_us = esp_timer_get_time();
-    std::memcpy(event.name, argv[1], std::strlen(argv[1]) + 1U);
-    if (s_event_queue == nullptr ||
-        xQueueSend(s_event_queue, &event, kLearnEnqueueWaitTicks) != pdTRUE) {
-        return print_validation_error("ERROR learn event queue busy",
-                                      "Learning queue is busy; retry");
-    }
-    if (s_event_worker_task != nullptr) {
-        xTaskNotifyGive(s_event_worker_task);
-    }
-    return 0;
+    const esp_err_t error =
+        rf_signals_arm_learning(argv[1], BridgeEventSource::kUart);
+    return error == ESP_OK ? 0 : print_result("learn", error);
 }
+
 
 int forget_command(int argc, char **argv)
 {
     if (argc != 2 || !rf_storage_name_is_valid(argv[1])) {
         return print_usage("usage: forget <name>");
     }
-    const esp_err_t error = rf_storage_forget(argv[1]);
+    const esp_err_t error = bridge_control_forget_signal(argv[1]);
     if (error == ESP_ERR_INVALID_STATE) {
         return print_validation_error(
             "ERROR forget: learned name is referenced by an automation rule",
@@ -1595,18 +1562,13 @@ int replay_command(int argc, char **argv)
         return print_usage("usage: replay [repeats:1..20] | replay <name> <repeats:1..20>");
     }
     if (arguments.target == ReplayTarget::kRam) {
-        return print_result("replay", replay_last_rf_frame(arguments.repeats));
+        return print_result("replay", bridge_control_replay_last(
+                                          arguments.repeats, BridgeEventSource::kUart));
     }
 
-    RfStoredSignal stored{};
-    const esp_err_t load_error = rf_storage_load(argv[1], &stored);
-    if (load_error != ESP_OK) {
-        return print_result("replay named load", load_error);
-    }
-    const esp_err_t transmit_error = stored.encoding == RfStoredEncoding::kDecoded
-                                         ? transmit_rf_decoded(stored.decoded, arguments.repeats)
-                                         : transmit_rf_raw(stored.raw, arguments.repeats);
-    return print_result("replay named", transmit_error);
+    return print_result("replay named", bridge_control_replay_named(
+                                              argv[1], arguments.repeats,
+                                              BridgeEventSource::kUart));
 }
 
 
@@ -1821,13 +1783,14 @@ int send_value_command(int argc, char **argv)
         return print_validation_error("ERROR repeats must be 1..20",
                                       "Repeat count must be 1..20");
     }
-    DecodedSignal signal{};
-    signal.code = code;
-    signal.pulse_us = static_cast<uint16_t>(pulse_us);
-    signal.bits = static_cast<uint8_t>(bits);
-    signal.protocol = static_cast<uint8_t>(protocol_number);
-    signal.inverted = protocol->inverted;
-    return print_result("send", transmit_rf_decoded(signal, static_cast<uint16_t>(repeats)));
+    DecodedTransmitRequest request{};
+    request.code = code;
+    request.pulse_us = static_cast<uint16_t>(pulse_us);
+    request.bits = static_cast<uint8_t>(bits);
+    request.protocol = static_cast<uint8_t>(protocol_number);
+    request.repeats = static_cast<uint16_t>(repeats);
+    return print_result("send", bridge_control_transmit_decoded(
+                                    request, BridgeEventSource::kUart));
 }
 
 void print_staged_raw()
@@ -1932,7 +1895,11 @@ int raw_command(int argc, char **argv)
             return print_validation_error(
                 plain, "Raw frame needs 8..256 alternating pulses and an even count");
         }
-        return print_result("raw send", transmit_rf_raw(s_staged_raw, static_cast<uint16_t>(repeats)));
+        RawTransmitRequest request{};
+        request.signal = s_staged_raw;
+        request.repeats = static_cast<uint16_t>(repeats);
+        return print_result("raw send", bridge_control_transmit_raw(
+                                            request, BridgeEventSource::kUart));
     }
     return print_usage("usage: raw <begin|append|show|send|clear> ...");
 }
@@ -1959,8 +1926,8 @@ constexpr CommandDefinition kCommands[] = {
     {"console", "Select colored or machine-readable output", "style [pretty|plain]", console_command},
     {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
+    {"web", "Inspect or rotate Web UI authentication", "auth <status|rotate>", web_command},
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
-    {"rx", "Enable or disable reception", "<on|off>", rx_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
@@ -1999,47 +1966,17 @@ void deregister_commands(std::size_t registered_count)
 
 void cleanup_failed_start(std::size_t registered_count)
 {
-    s_accept_frame_callbacks.store(false, std::memory_order_release);
-    for (uint32_t attempt = 0;
-         attempt < kCallbackQuiesceAttempts &&
-         s_frame_callbacks_in_flight.load(std::memory_order_acquire) != 0;
-         ++attempt) {
-        vTaskDelay(1);
+    esp_err_t sink_error = ESP_OK;
+    if (s_bridge_sink_registered) {
+        sink_error = bridge_events_remove_sink(s_bridge_sink_id);
+        if (sink_error == ESP_OK) {
+            s_bridge_sink_registered = false;
+        }
     }
-    const bool callbacks_quiesced =
-        s_frame_callbacks_in_flight.load(std::memory_order_acquire) == 0;
-    if (!callbacks_quiesced) {
-        ESP_LOGE(kTag, "Could not quiesce RF frame callbacks; retaining event queues");
-    }
-
-    esp_err_t sink_error = rf_automation_set_event_sink(nullptr, nullptr);
+    const bool safe_to_delete_events = sink_error == ESP_OK;
     if (sink_error != ESP_OK) {
-        vTaskDelay(1);
-        sink_error = rf_automation_set_event_sink(nullptr, nullptr);
-    }
-    const bool automation_sink_detached = sink_error == ESP_OK;
-    if (!automation_sink_detached) {
-        ESP_LOGE(kTag, "Could not detach automation log sink: %s; retaining event queues",
+        ESP_LOGE(kTag, "Could not detach shared event sink: %s; retaining event queues",
                  esp_err_to_name(sink_error));
-    }
-    esp_err_t network_sink_error = ESP_OK;
-    if (s_network_sink_registered) {
-        network_sink_error = set_network_wifi_event_sink(nullptr, nullptr);
-        if (network_sink_error == ESP_OK) {
-            s_network_sink_registered = false;
-        }
-    }
-    esp_err_t ota_sink_error = ESP_OK;
-    if (s_ota_sink_registered) {
-        ota_sink_error = set_ota_update_event_sink(nullptr, nullptr);
-        if (ota_sink_error == ESP_OK) {
-            s_ota_sink_registered = false;
-        }
-    }
-    const bool safe_to_delete_events = automation_sink_detached && network_sink_error == ESP_OK &&
-                                       ota_sink_error == ESP_OK && callbacks_quiesced;
-    if (network_sink_error != ESP_OK || ota_sink_error != ESP_OK) {
-        ESP_LOGE(kTag, "Could not detach network/OTA event sinks; retaining event queues");
     }
 
     if (safe_to_delete_events && s_event_worker_task != nullptr) {
@@ -2061,6 +1998,10 @@ void cleanup_failed_start(std::size_t registered_count)
     if (safe_to_delete_events && s_ota_event_queue != nullptr) {
         vQueueDelete(s_ota_event_queue);
         s_ota_event_queue = nullptr;
+    }
+    if (safe_to_delete_events && s_bridge_event_queue != nullptr) {
+        vQueueDelete(s_bridge_event_queue);
+        s_bridge_event_queue = nullptr;
     }
 
     deregister_commands(registered_count);
@@ -2107,7 +2048,8 @@ esp_err_t start_rf_console()
     }
     if (s_started.load(std::memory_order_acquire) || s_repl != nullptr || s_event_queue != nullptr ||
         s_automation_log_queue != nullptr || s_network_event_queue != nullptr ||
-        s_ota_event_queue != nullptr || s_output_mutex != nullptr || s_event_worker_task != nullptr) {
+        s_ota_event_queue != nullptr || s_bridge_event_queue != nullptr ||
+        s_output_mutex != nullptr || s_event_worker_task != nullptr) {
         s_starting.clear(std::memory_order_release);
         return ESP_ERR_INVALID_STATE;
     }
@@ -2141,12 +2083,13 @@ esp_err_t start_rf_console()
     s_automation_log_queue = xQueueCreate(kAutomationLogQueueDepth, sizeof(RfAutomationEvent));
     s_network_event_queue = xQueueCreate(kNetworkEventQueueDepth, sizeof(NetworkWifiEvent));
     s_ota_event_queue = xQueueCreate(kOtaEventQueueDepth, sizeof(ConsoleOtaEvent));
+    s_bridge_event_queue = xQueueCreate(kBridgeEventQueueDepth, sizeof(ConsoleSystemEvent));
     if (s_event_queue == nullptr || s_automation_log_queue == nullptr ||
-        s_network_event_queue == nullptr || s_ota_event_queue == nullptr) {
+        s_network_event_queue == nullptr || s_ota_event_queue == nullptr ||
+        s_bridge_event_queue == nullptr) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
     s_frame_queue_drops.store(0, std::memory_order_relaxed);
-    s_frame_callbacks_in_flight.store(0, std::memory_order_relaxed);
     s_ota_series_generation.store(0, std::memory_order_relaxed);
     s_ota_progress_series_active = false;
     s_rendered_ota_series_generation = 0;
@@ -2154,27 +2097,12 @@ esp_err_t start_rf_console()
                     &s_event_worker_task) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, registered_count);
     }
-    error = rf_automation_set_event_sink(enqueue_automation_log_event, nullptr);
+    error = bridge_events_add_sink(enqueue_bridge_event, nullptr, &s_bridge_sink_id);
     if (error != ESP_OK) {
-        ESP_LOGE(kTag, "Could not register automation log sink: %s", esp_err_to_name(error));
+        ESP_LOGE(kTag, "Could not register shared event sink: %s", esp_err_to_name(error));
         return fail_start(error, registered_count);
     }
-    NetworkWifiStatus network_status{};
-    if (get_network_wifi_status(&network_status) == ESP_OK && network_status.available) {
-        error = set_network_wifi_event_sink(enqueue_network_event, nullptr);
-        if (error != ESP_OK) {
-            return fail_start(error, registered_count);
-        }
-        s_network_sink_registered = true;
-    }
-    OtaUpdateStatus ota_status{};
-    if (get_ota_update_status(&ota_status) == ESP_OK && ota_status.available) {
-        error = set_ota_update_event_sink(enqueue_ota_event, nullptr);
-        if (error != ESP_OK) {
-            return fail_start(error, registered_count);
-        }
-        s_ota_sink_registered = true;
-    }
+    s_bridge_sink_registered = true;
 
     {
         OutputGuard output_guard;
@@ -2198,30 +2126,29 @@ esp_err_t start_rf_console()
         return fail_start(error, registered_count);
     }
 
-    s_accept_frame_callbacks.store(true, std::memory_order_release);
     s_started.store(true, std::memory_order_release);
     s_starting.clear(std::memory_order_release);
     return ESP_OK;
 }
 
-void rf_console_on_frame(const RfFrame &frame, void *)
+ConsoleStyle get_rf_console_style()
 {
-    s_frame_callbacks_in_flight.fetch_add(1, std::memory_order_acq_rel);
-    if (!s_accept_frame_callbacks.load(std::memory_order_acquire)) {
-        s_frame_callbacks_in_flight.fetch_sub(1, std::memory_order_release);
-        return;
-    }
-    rf_automation_on_frame(frame);
-    ConsoleEvent event{};
-    event.type = ConsoleEventType::kFrame;
-    event.frame = frame;
-    event.occurred_us = esp_timer_get_time();
-    if (s_event_queue == nullptr || xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
-        s_frame_queue_drops.fetch_add(1, std::memory_order_relaxed);
-    } else if (s_event_worker_task != nullptr) {
-        xTaskNotifyGive(s_event_worker_task);
-    }
-    s_frame_callbacks_in_flight.fetch_sub(1, std::memory_order_release);
+    return current_console_style();
 }
+
+esp_err_t set_rf_console_style(ConsoleStyle style)
+{
+    if (style != ConsoleStyle::kPretty && style != ConsoleStyle::kPlain) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_console_style.store(style, std::memory_order_release);
+    return ESP_OK;
+}
+
+void rf_console_on_frame(const RfFrame &frame, void *context)
+{
+    rf_signals_on_frame(frame, context);
+}
+
 
 }  // namespace rfbridge

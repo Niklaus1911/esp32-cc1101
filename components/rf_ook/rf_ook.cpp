@@ -66,7 +66,6 @@ enum class CommandState : uint8_t {
 };
 
 enum class RadioCommandType : uint8_t {
-    kSetReceive,
     kTransmitDecoded,
     kTransmitRaw,
     kReplayLast,
@@ -81,7 +80,6 @@ enum class RadioCommandType : uint8_t {
 struct RadioCommand {
     uint32_t id;
     RadioCommandType type;
-    bool enabled;
     uint16_t repeats;
     DecodedSignal decoded;
     RawSignal raw;
@@ -132,7 +130,6 @@ CommandState s_active_command_state = CommandState::kIdle;
 std::atomic_flag s_lifecycle_busy = ATOMIC_FLAG_INIT;
 rmt_receive_config_t s_receive_config{};
 Cc1101 s_radio{};
-std::atomic<bool> s_receive_enabled{true};
 std::atomic<bool> s_receive_active{false};
 std::atomic<bool> s_has_last_frame{false};
 RfFrame s_last_frame{};
@@ -682,7 +679,7 @@ bool IRAM_ATTR rx_done_callback(rmt_channel_handle_t, const rmt_rx_done_event_da
 
 esp_err_t arm_receiver_owned()
 {
-    if (s_rx_channel == nullptr || !s_receive_enabled || s_receive_active ||
+    if (s_rx_channel == nullptr || s_receive_active ||
         s_transmitting.load(std::memory_order_relaxed) ||
         s_maintenance_active.load(std::memory_order_relaxed) ||
         !s_running.load(std::memory_order_relaxed)) {
@@ -718,9 +715,6 @@ esp_err_t stop_rmt_receive_owned()
 esp_err_t restore_receive_owned()
 {
     s_receive_active = false;
-    if (!s_receive_enabled) {
-        return s_radio.enter_idle();
-    }
     esp_err_t error = s_radio.enter_receive(50);
     if (error != ESP_OK) {
         error = s_radio.recover_receive();
@@ -742,23 +736,6 @@ esp_err_t restore_receive_owned()
     return error;
 }
 
-esp_err_t set_receive_enabled_owned(bool enabled)
-{
-    if (enabled && s_receive_enabled && s_receive_active) {
-        return ESP_OK;
-    }
-    if (!enabled) {
-        s_receive_enabled = false;
-        s_receive_active = false;
-        const esp_err_t rmt_error = stop_rmt_receive_owned();
-        const esp_err_t radio_error = s_radio.enter_idle(50);
-        return rmt_error != ESP_OK ? rmt_error : radio_error;
-    }
-
-    s_receive_enabled = true;
-    return restore_receive_owned();
-}
-
 void recover_dropped_receive_owned()
 {
     if (!s_rx_rearm_required.exchange(false, std::memory_order_acq_rel) ||
@@ -770,11 +747,9 @@ void recover_dropped_receive_owned()
     if (stop_error != ESP_OK) {
         ESP_LOGW(kTag, "Could not stop dropped RX transaction: %s", esp_err_to_name(stop_error));
     }
-    if (s_receive_enabled) {
-        const esp_err_t restore_error = restore_receive_owned();
-        if (restore_error != ESP_OK) {
-            ESP_LOGE(kTag, "Could not rearm RX after queue drop: %s", esp_err_to_name(restore_error));
-        }
+    const esp_err_t restore_error = restore_receive_owned();
+    if (restore_error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not rearm RX after queue drop: %s", esp_err_to_name(restore_error));
     }
 }
 
@@ -907,13 +882,11 @@ esp_err_t transmit_symbols_owned(const rmt_symbol_word_t *symbols, std::size_t c
         }
     }
 
-    if (s_receive_enabled) {
-        const esp_err_t restore_error = restore_receive_owned();
-        if (restore_error != ESP_OK) {
-            ESP_LOGE(kTag, "Could not restore RX after TX: %s", esp_err_to_name(restore_error));
-            if (error == ESP_OK) {
-                error = restore_error;
-            }
+    const esp_err_t restore_error = restore_receive_owned();
+    if (restore_error != ESP_OK) {
+        ESP_LOGE(kTag, "Could not restore RX after TX: %s", esp_err_to_name(restore_error));
+        if (error == ESP_OK) {
+            error = restore_error;
         }
     }
     return error;
@@ -941,7 +914,7 @@ esp_err_t transmit_raw_owned(const RawSignal &raw, uint16_t repeats)
 
 void process_receive_item(const RxQueueItem &item)
 {
-    if (!s_receive_enabled || s_transmitting.load(std::memory_order_relaxed) ||
+    if (s_transmitting.load(std::memory_order_relaxed) ||
         s_maintenance_requested.load(std::memory_order_relaxed) ||
         item.generation != s_rx_generation.load(std::memory_order_relaxed)) {
         return;
@@ -1008,7 +981,7 @@ void fill_software_status(RfRadioStatus *status)
 {
     *status = {};
     status->running = s_service_state.load(std::memory_order_acquire) == ServiceState::kRunning;
-    status->receive_enabled = s_receive_enabled.load(std::memory_order_relaxed);
+    status->receive_enabled = true;
     status->receive_active = s_receive_active.load(std::memory_order_relaxed);
     status->transmitting = s_transmitting.load(std::memory_order_relaxed);
     status->maintenance_active = s_maintenance_requested.load(std::memory_order_relaxed);
@@ -1060,9 +1033,6 @@ bool execute_command(const RadioCommand &command)
     RadioReply reply{};
     reply.id = command.id;
     switch (command.type) {
-        case RadioCommandType::kSetReceive:
-            reply.result = set_receive_enabled_owned(command.enabled);
-            break;
         case RadioCommandType::kTransmitDecoded:
             reply.result = transmit_decoded_owned(command.decoded, command.repeats);
             break;
@@ -1092,7 +1062,7 @@ bool execute_command(const RadioCommand &command)
         case RadioCommandType::kReset: {
             const esp_err_t stop_error = stop_rmt_receive_owned();
             reply.result = stop_error == ESP_OK ? s_radio.reset_and_configure() : stop_error;
-            if (reply.result == ESP_OK && s_receive_enabled) {
+            if (reply.result == ESP_OK) {
                 reply.result = restore_receive_owned();
             }
             break;
@@ -1107,9 +1077,7 @@ bool execute_command(const RadioCommand &command)
             reply.result = receive_error != ESP_OK ? receive_error : idle_error;
             if (reply.result != ESP_OK) {
                 s_maintenance_active.store(false, std::memory_order_release);
-                if (s_receive_enabled) {
-                    restore_receive_owned();
-                }
+                restore_receive_owned();
             }
             break;
         }
@@ -1119,7 +1087,7 @@ bool execute_command(const RadioCommand &command)
                 break;
             }
             s_maintenance_active.store(false, std::memory_order_release);
-            reply.result = s_receive_enabled ? restore_receive_owned() : s_radio.enter_idle(50);
+            reply.result = restore_receive_owned();
             if (reply.result != ESP_OK) {
                 s_maintenance_active.store(true, std::memory_order_release);
             }
@@ -1167,7 +1135,7 @@ void radio_task(void *)
             }
         }
         recover_dropped_receive_owned();
-        if (ready == nullptr && s_receive_enabled && !s_receive_active &&
+        if (ready == nullptr && !s_receive_active &&
             !s_maintenance_requested.load(std::memory_order_relaxed)) {
             const esp_err_t recovery_error = restore_receive_owned();
             if (recovery_error != ESP_OK) {
@@ -1347,7 +1315,7 @@ bool capture_input_is_valid(const uint8_t *levels, const uint16_t *durations, st
 
 bool command_is_blocked_by_maintenance(RadioCommandType type)
 {
-    return type == RadioCommandType::kSetReceive || type == RadioCommandType::kTransmitDecoded ||
+    return type == RadioCommandType::kTransmitDecoded ||
            type == RadioCommandType::kTransmitRaw || type == RadioCommandType::kReplayLast ||
            type == RadioCommandType::kReset;
 }
@@ -1516,7 +1484,6 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
 
     s_frame_callback = callback;
     s_callback_context = context;
-    s_receive_enabled = true;
     s_receive_active = false;
     s_has_last_frame = false;
     s_last_frame = {};
@@ -1637,14 +1604,6 @@ void stop_rf_ook()
     if (cleanup_error != ESP_OK) {
         ESP_LOGE(kTag, "Radio cleanup remains incomplete: %s", esp_err_to_name(cleanup_error));
     }
-}
-
-esp_err_t set_rf_receive_enabled(bool enabled)
-{
-    RadioCommand command{};
-    command.type = RadioCommandType::kSetReceive;
-    command.enabled = enabled;
-    return send_command(command, nullptr);
 }
 
 esp_err_t transmit_rf_decoded(const DecodedSignal &signal, uint16_t repeats)

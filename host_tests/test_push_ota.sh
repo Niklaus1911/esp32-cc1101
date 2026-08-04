@@ -73,6 +73,12 @@ run_push success >"$OUTPUT" 2>&1
 grep -q 'OTA accepted: {"ok":true,"rebooting":true}' "$OUTPUT"
 grep -qx -- 'UPLOAD:--no-progress-meter' "$CURL_LOG"
 grep -qx -- "UPLOAD:@$IMAGE" "$CURL_LOG"
+grep -qx -- 'UPLOAD:Origin: http://192.168.1.17' "$CURL_LOG"
+grep -qx -- 'UPLOAD:http://192.168.1.17/api/v1/ota' "$CURL_LOG"
+if grep -q -- 'Authorization:' "$CURL_LOG"; then
+    printf 'Unexpected authorization header in unauthenticated OTA request\n' >&2
+    exit 1
+fi
 
 set +e
 run_push fail >"$OUTPUT" 2>&1

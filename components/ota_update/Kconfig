@@ -2,12 +2,12 @@ menu "LAN OTA update"
 
 config OTA_HTTP_PORT
     int "LAN OTA HTTP port"
-    range 1024 65535
-    default 8032
+    range 80 65535
+    default 80
 
 config OTA_HTTP_TASK_STACK_SIZE
     int "LAN OTA HTTP server task stack size"
     range 8192 16384
-    default 10240
+    default 8192
 
 endmenu

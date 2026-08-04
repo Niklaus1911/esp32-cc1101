@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="data:,">
+  <title>RFBridge</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div>
+        <h1>RFBridge</h1>
+        <p id="device-state" class="subtle">Connecting</p>
+      </div>
+      <span id="connection" class="state state-warn">Connecting</span>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="Primary views">
+    <div class="tabs-inner">
+      <button type="button" class="tab active" data-view="overview">Overview</button>
+      <button type="button" class="tab" data-view="signals">Signals</button>
+      <button type="button" class="tab" data-view="transmit">Transmit</button>
+      <button type="button" class="tab" data-view="rules">Rules</button>
+      <button type="button" class="tab" data-view="system">System</button>
+    </div>
+  </nav>
+
+  <main>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section class="view active" data-panel="overview">
+      <div class="metric-grid" aria-label="Live status">
+        <div class="metric"><span>Radio</span><strong id="radio-state">Unknown</strong></div>
+        <div class="metric"><span>Receiver</span><strong id="rx-state">Unknown</strong></div>
+        <div class="metric"><span>Network</span><strong id="network-state">Unknown</strong></div>
+        <div class="metric"><span>Accepted</span><strong id="accepted-count">0</strong></div>
+      </div>
+
+      <section class="band live-band">
+        <div class="section-heading">
+          <div><h2>Latest frame</h2><p id="last-age" class="subtle">No frame captured</p></div>
+          <div class="inline-controls">
+            <label>Repeats<input id="last-repeats" type="number" min="1" max="20" value="8"></label>
+            <button id="replay-last" type="button" class="primary" disabled>Replay</button>
+          </div>
+        </div>
+        <dl id="last-frame" class="details"><dt>State</dt><dd>No frame captured</dd></dl>
+      </section>
+
+      <section class="band">
+        <div class="section-heading"><h2>Learning</h2><span id="learning-state" class="state">Idle</span></div>
+        <form id="learn-form" class="form-row">
+          <label>Signal name<input id="learn-name" name="name" maxlength="15" pattern="[A-Za-z][A-Za-z0-9_\-]{0,14}" required></label>
+          <button type="submit" class="primary">Arm learning</button>
+          <button id="cancel-learning" type="button" class="danger" hidden>Cancel</button>
+        </form>
+      </section>
+
+      <section class="band">
+        <div class="section-heading"><h2>Observed activity</h2><button id="clear-activity" type="button" class="quiet">Clear</button></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Received</th><th>Frame</th><th>Match</th></tr></thead>
+            <tbody id="activity-list"><tr><td colspan="3" class="empty">No new frames this session.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="view" data-panel="signals" hidden>
+      <section class="band first-band">
+        <div class="section-heading"><div><h2>Learned signals</h2><p id="signal-count" class="subtle">Loading</p></div><button id="refresh-signals" type="button" class="quiet">Refresh</button></div>
+        <div id="signal-list" class="item-list"><p class="empty">Loading signals.</p></div>
+      </section>
+    </section>
+
+    <section class="view" data-panel="transmit" hidden>
+      <section class="band first-band">
+        <h2>Decoded transmission</h2>
+        <form id="decoded-form" class="form-grid">
+          <label>Code<input name="code" value="0x0" required></label>
+          <label>Bits<input name="bits" type="number" min="4" max="64" value="24" required></label>
+          <label>Protocol<input name="protocol" type="number" min="1" max="12" value="1" required></label>
+          <label>Pulse us<input name="pulse_us" type="number" min="0" max="29000" value="0" required></label>
+          <label>Repeats<input name="repeats" type="number" min="1" max="20" value="8" required></label>
+          <button type="submit" class="primary command">Transmit</button>
+        </form>
+      </section>
+      <section class="band">
+        <h2>Raw transmission</h2>
+        <form id="raw-form" class="form-grid raw-form">
+          <label>Start level<select name="start_level"><option value="0">Low</option><option value="1">High</option></select></label>
+          <label>Repeats<input name="repeats" type="number" min="1" max="20" value="8" required></label>
+          <label class="wide">Pulse durations us<textarea name="durations" rows="5" placeholder="350,1050,350,1050,350,1050,350,1050" required></textarea></label>
+          <button type="submit" class="primary command">Transmit raw</button>
+        </form>
+      </section>
+    </section>
+
+    <section class="view" data-panel="rules" hidden>
+      <section class="band first-band">
+        <div class="section-heading">
+          <div><h2>Automation</h2><p id="automation-summary" class="subtle">Loading</p></div>
+          <div class="settings-row">
+            <label class="toggle"><input id="automation-enabled" type="checkbox"><span>Enabled</span></label>
+            <label>Log mode<select id="automation-log"><option value="off">Off</option><option value="actions">Actions</option><option value="verbose">Verbose</option></select></label>
+          </div>
+        </div>
+        <form id="rule-form" class="form-grid">
+          <label>Trigger<select name="trigger" required></select></label>
+          <label>Replay<select name="target" required></select></label>
+          <label>Repeats<input name="repeats" type="number" min="1" max="20" value="8" required></label>
+          <button type="submit" class="primary command">Add rule</button>
+        </form>
+      </section>
+      <section class="band">
+        <div class="section-heading"><h2>Rules</h2><button id="refresh-rules" type="button" class="quiet">Refresh</button></div>
+        <div id="rule-list" class="item-list"><p class="empty">Loading rules.</p></div>
+      </section>
+    </section>
+
+    <section class="view" data-panel="system" hidden>
+      <section class="band first-band">
+        <div class="section-heading"><div><h2>Firmware update</h2><p id="ota-state" class="subtle">Loading</p></div><button id="refresh-ota" type="button" class="quiet">Refresh</button></div>
+        <p class="security-note">Unauthenticated trusted-LAN update</p>
+        <form id="ota-form" class="form-row">
+          <label>Application image<input id="ota-file" type="file" accept=".bin,application/octet-stream" required></label>
+          <button type="submit" class="danger">Install and reboot</button>
+        </form>
+        <progress id="ota-progress" value="0" max="100" hidden></progress>
+        <dl id="ota-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
+      </section>
+      <section class="band">
+        <h2>Runtime</h2>
+        <dl id="runtime-details" class="details"><dt>Connection</dt><dd>Loading</dd></dl>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

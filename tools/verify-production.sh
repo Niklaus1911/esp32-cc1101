@@ -4,7 +4,7 @@ set -eo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly IDF_ACTIVATE="$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+readonly IDF_EXPORT="$HOME/.espressif/v6.0.2/esp-idf/export.sh"
 readonly BUILD_DIR="/tmp/esp32-cc1101-production-build"
 readonly LOG_DIR="/tmp/esp32-cc1101-production-logs"
 readonly BUILD_LOG="$LOG_DIR/build.log"
@@ -18,45 +18,16 @@ readonly PRODUCTION_SDKCONFIG="$LOG_DIR/sdkconfig"
 readonly OTA_SLOT_SIZE=$((0x1e0000))
 readonly OTA_MIN_FREE=$((OTA_SLOT_SIZE / 4))
 
-if [[ ! -f "$IDF_ACTIVATE" ]]; then
-    printf 'ESP-IDF activation script not found: %s\n' "$IDF_ACTIVATE" >&2
+if [[ ! -f "$IDF_EXPORT" ]]; then
+    printf 'ESP-IDF export script not found: %s\n' "$IDF_EXPORT" >&2
     exit 1
 fi
 
 rm -rf -- "$BUILD_DIR" "$LOG_DIR"
 mkdir -p -- "$LOG_DIR"
 
-# The activation helper's -e mode emits newline-delimited NAME=value records.
-activation_env="$("$IDF_ACTIVATE" -e)"
-idf_path=""
-system_path=""
-while IFS='=' read -r name value; do
-    case "$name" in
-        PATH)
-            idf_path="$value"
-            ;;
-        SYSTEM_PATH)
-            system_path="$value"
-            ;;
-        *)
-            if [[ ! "$name" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
-                printf 'Invalid variable from ESP-IDF activation: %s\n' "$name" >&2
-                exit 1
-            fi
-            printf -v "$name" '%s' "$value"
-            export "$name"
-            ;;
-    esac
-done <<<"$activation_env"
-
-if [[ -z "$idf_path" || -z "$system_path" ]]; then
-    printf 'ESP-IDF activation did not provide PATH and SYSTEM_PATH\n' >&2
-    exit 1
-fi
-
-PATH="$idf_path:$system_path"
-export PATH
-unset activation_env idf_path system_path name value
+# Source the stable ESP-IDF checkout export; generated EIM activation helpers are not required.
+source "$IDF_EXPORT" >/dev/null
 
 readonly IDF_PYTHON="$IDF_PYTHON_ENV_PATH/bin/python"
 readonly IDF_CLI="$IDF_PATH/tools/idf.py"
@@ -128,8 +99,10 @@ require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_ENABLE 
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_GPIO 2$' 'RF activity LED GPIO2 default'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_ACTIVE_HIGH 1$' 'RF activity LED active-high default'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_PULSE_MS 25$' 'RF activity LED pulse duration'
-require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_PORT 8032$' 'bounded LAN OTA HTTP port'
-require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_TASK_STACK_SIZE 10240$' 'bounded OTA HTTP task stack'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_PORT 80$' 'shared Web and OTA HTTP port'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_TASK_STACK_SIZE 8192$' 'bounded OTA HTTP task stack contract'
+require_log_pattern "$PROJECT_ROOT/components/web_ui/web_ui.cpp" '^constexpr uint16_t kHttpPort = 80;$' 'fixed responsive Web HTTP port'
+require_log_pattern "$PROJECT_ROOT/components/web_ui/web_ui.cpp" '^constexpr uint32_t kHttpTaskStackSize = 8192;$' 'bounded responsive Web HTTP task stack'
 
 printf '\nProduction verification passed.\n\n'
 printf 'Build summary:\n'

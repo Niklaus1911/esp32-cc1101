@@ -26,8 +26,6 @@ namespace rfbridge {
 namespace {
 
 constexpr TickType_t kMutexWait = pdMS_TO_TICKS(1000);
-constexpr uint32_t kServiceTaskStackSize = 4096;
-constexpr UBaseType_t kServiceTaskPriority = 3;
 constexpr uint32_t kRebootTaskStackSize = 2048;
 constexpr UBaseType_t kRebootTaskPriority = 3;
 constexpr std::size_t kReceiveChunkSize = 2048;
@@ -39,16 +37,15 @@ constexpr std::size_t kImagePrefixSize =
     sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
 
 SemaphoreHandle_t s_mutex = nullptr;
-TaskHandle_t s_service_task = nullptr;
 TaskHandle_t s_reboot_task = nullptr;
-httpd_handle_t s_http_server = nullptr;
 std::atomic<bool> s_initialization_started{false};
 std::atomic<bool> s_available{false};
 std::atomic<bool> s_upload_active{false};
 std::atomic<bool> s_reboot_pending{false};
-std::atomic<bool> s_network_online{false};
 std::atomic<uint32_t> s_sink_callbacks_in_flight{0};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
+OtaHttpAuthorize s_http_authorize = nullptr;
+void *s_http_authorize_context = nullptr;
 OtaUpdateStatus s_status{};
 OtaUpdateEventSink s_event_sink = nullptr;
 void *s_event_sink_context = nullptr;
@@ -134,6 +131,9 @@ esp_err_t send_json(httpd_req_t *request, const char *status, const char *json)
     httpd_resp_set_status(request, status);
     httpd_resp_set_type(request, kJsonContentType);
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Referrer-Policy", "same-origin");
+    httpd_resp_set_hdr(request, "X-Content-Type-Options", "nosniff");
+    httpd_resp_set_hdr(request, "X-Frame-Options", "DENY");
     return httpd_resp_send(request, json, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -141,20 +141,26 @@ void make_status_json(char *output, std::size_t capacity, const OtaUpdateStatus 
 {
     std::snprintf(output, capacity,
                   "{\"state\":\"%s\",\"server\":%s,\"upload\":%s,\"port\":%u,"
-                  "\"running_partition\":\"%s\",\"update_partition\":\"%s\","
-                  "\"running_version\":\"%s\",\"candidate_version\":\"%s\","
+                   "\"running_partition\":\"%s\",\"update_partition\":\"%s\","
+                   "\"running_version\":\"%s\",\"candidate_version\":\"%s\","
+                   "\"rollback_possible\":%s,\"pending_verification\":%s,"
                    "\"bytes\":%lu,\"total\":%lu,\"error\":\"%s\","
                    "\"maintenance_error\":\"%s\"}",
                   ota_update_state_name(status.state), status.server_running ? "true" : "false",
                   status.upload_active ? "true" : "false", status.port, status.running_partition,
-                  status.update_partition, status.running_version, status.candidate_version,
-                  static_cast<unsigned long>(status.bytes_received),
+                   status.update_partition, status.running_version, status.candidate_version,
+                   status.rollback_possible ? "true" : "false",
+                   status.pending_verification ? "true" : "false",
+                   static_cast<unsigned long>(status.bytes_received),
                    static_cast<unsigned long>(status.content_length), esp_err_to_name(status.last_error),
                    esp_err_to_name(status.maintenance_error));
 }
 
 esp_err_t status_handler(httpd_req_t *request)
 {
+    if (s_http_authorize != nullptr && s_http_authorize(request, s_http_authorize_context) != ESP_OK) {
+        return ESP_FAIL;
+    }
     OtaUpdateStatus status{};
     const esp_err_t error = get_ota_update_status(&status);
     if (error != ESP_OK) {
@@ -210,10 +216,15 @@ void schedule_reboot()
 
 esp_err_t upload_handler(httpd_req_t *request)
 {
+    if (s_http_authorize != nullptr && s_http_authorize(request, s_http_authorize_context) != ESP_OK) {
+        return ESP_FAIL;
+    }
     bool expected = false;
     if (s_reboot_pending.load(std::memory_order_acquire) ||
         !s_upload_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return send_json(request, "409 Conflict", "{\"error\":\"ota_busy\"}");
+        httpd_resp_set_hdr(request, "Connection", "close");
+        (void)send_json(request, "409 Conflict", "{\"error\":\"ota_busy\"}");
+        return ESP_FAIL;
     }
 
     esp_err_t result = ESP_OK;
@@ -313,7 +324,6 @@ esp_err_t upload_handler(httpd_req_t *request)
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
-        s_upload_active.store(false, std::memory_order_release);
         set_status_state(OtaUpdateState::kFailed, result);
         {
             StatusLock lock;
@@ -328,6 +338,10 @@ esp_err_t upload_handler(httpd_req_t *request)
         event.error = result;
         event.maintenance_error = maintenance_error;
         emit_event(event);
+        const bool body_unread = bytes_received < content_length;
+        if (body_unread) {
+            httpd_resp_set_hdr(request, "Connection", "close");
+        }
         char response[192]{};
         std::snprintf(response, sizeof(response),
                       "{\"error\":\"%s\",\"code\":%d,\"maintenance_error\":\"%s\"}",
@@ -339,14 +353,11 @@ esp_err_t upload_handler(httpd_req_t *request)
                          ? "400 Bad Request"
                          : "500 Internal Server Error",
             response);
-        if (!s_network_online.load(std::memory_order_acquire)) {
-            xTaskNotifyGive(s_service_task);
-        }
-        return response_error;
+        s_upload_active.store(false, std::memory_order_release);
+        return body_unread ? ESP_FAIL : response_error;
     }
 
     s_reboot_pending.store(true, std::memory_order_release);
-    s_upload_active.store(false, std::memory_order_release);
     set_status_state(OtaUpdateState::kPendingReboot, ESP_OK);
     OtaUpdateEvent event{};
     event.type = OtaUpdateEventType::kCompleted;
@@ -355,100 +366,9 @@ esp_err_t upload_handler(httpd_req_t *request)
     std::memcpy(event.candidate_version, candidate.version, sizeof(candidate.version));
     emit_event(event);
     const esp_err_t response_error = send_json(request, "200 OK", "{\"ok\":true,\"rebooting\":true}");
+    s_upload_active.store(false, std::memory_order_release);
     schedule_reboot();
     return response_error;
-}
-
-esp_err_t start_http_server()
-{
-    if (s_http_server != nullptr) {
-        return ESP_OK;
-    }
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = CONFIG_OTA_HTTP_PORT;
-    config.stack_size = CONFIG_OTA_HTTP_TASK_STACK_SIZE;
-    config.max_uri_handlers = 2;
-    config.lru_purge_enable = false;
-    config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 10;
-    esp_err_t error = httpd_start(&s_http_server, &config);
-    if (error != ESP_OK) {
-        return error;
-    }
-    httpd_uri_t status_uri{};
-    status_uri.uri = kStatusUri;
-    status_uri.method = HTTP_GET;
-    status_uri.handler = status_handler;
-    error = httpd_register_uri_handler(s_http_server, &status_uri);
-    httpd_uri_t upload_uri{};
-    upload_uri.uri = kUploadUri;
-    upload_uri.method = HTTP_POST;
-    upload_uri.handler = upload_handler;
-    if (error == ESP_OK) {
-        error = httpd_register_uri_handler(s_http_server, &upload_uri);
-    }
-    if (error != ESP_OK) {
-        httpd_stop(s_http_server);
-        s_http_server = nullptr;
-        return error;
-    }
-    {
-        StatusLock lock;
-        if (lock.locked()) {
-            s_status.server_running = true;
-            s_status.state = OtaUpdateState::kIdle;
-            s_status.last_error = ESP_OK;
-        }
-    }
-    OtaUpdateEvent event{};
-    event.type = OtaUpdateEventType::kServerStarted;
-    emit_event(event);
-    return ESP_OK;
-}
-
-void stop_http_server()
-{
-    if (s_http_server == nullptr) {
-        return;
-    }
-    const esp_err_t error = httpd_stop(s_http_server);
-    if (error == ESP_OK) {
-        s_http_server = nullptr;
-    }
-    {
-        StatusLock lock;
-        if (lock.locked()) {
-            s_status.server_running = s_http_server != nullptr;
-            s_status.last_error = error;
-            if (error == ESP_OK) {
-                s_status.state = OtaUpdateState::kIdle;
-            }
-        }
-    }
-    OtaUpdateEvent event{};
-    event.type = error == ESP_OK ? OtaUpdateEventType::kServerStopped : OtaUpdateEventType::kFailed;
-    event.error = error;
-    emit_event(event);
-}
-
-void service_task(void *)
-{
-    while (true) {
-        TickType_t wait = portMAX_DELAY;
-        if (s_network_online.load(std::memory_order_acquire)) {
-            const esp_err_t error = start_http_server();
-            if (error != ESP_OK) {
-                set_status_state(OtaUpdateState::kFailed, error);
-                wait = pdMS_TO_TICKS(5000);
-            }
-        } else if (!s_upload_active.load(std::memory_order_acquire)) {
-            stop_http_server();
-            if (s_http_server != nullptr) {
-                wait = pdMS_TO_TICKS(5000);
-            }
-        }
-        ulTaskNotifyTake(pdTRUE, wait);
-    }
 }
 
 void reboot_task(void *)
@@ -505,26 +425,70 @@ esp_err_t initialize_ota_update()
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(service_task, "ota_service", kServiceTaskStackSize, nullptr, kServiceTaskPriority,
-                    &s_service_task) != pdPASS) {
-        vTaskDelete(s_reboot_task);
-        s_reboot_task = nullptr;
-        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
-        return ESP_ERR_NO_MEM;
-    }
     s_available.store(true, std::memory_order_release);
     s_initialization_error.store(ESP_OK, std::memory_order_release);
     return ESP_OK;
 }
 
-esp_err_t set_ota_network_online(bool online)
+esp_err_t register_ota_http_handlers(httpd_handle_t server, OtaHttpAuthorize authorize,
+                                     void *authorize_context)
+{
+    if (server == nullptr || authorize == nullptr || !s_available.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_http_authorize = authorize;
+    s_http_authorize_context = authorize_context;
+    httpd_uri_t status_uri{};
+    status_uri.uri = kStatusUri;
+    status_uri.method = HTTP_GET;
+    status_uri.handler = status_handler;
+    esp_err_t error = httpd_register_uri_handler(server, &status_uri);
+    if (error != ESP_OK) {
+        return error;
+    }
+    httpd_uri_t upload_uri{};
+    upload_uri.uri = kUploadUri;
+    upload_uri.method = HTTP_POST;
+    upload_uri.handler = upload_handler;
+    error = httpd_register_uri_handler(server, &upload_uri);
+    if (error != ESP_OK) {
+        httpd_unregister_uri_handler(server, kStatusUri, HTTP_GET);
+    }
+    return error;
+}
+
+void set_ota_http_server_running(bool running, esp_err_t error)
 {
     if (!s_available.load(std::memory_order_acquire)) {
-        return s_initialization_error.load(std::memory_order_acquire);
+        return;
     }
-    s_network_online.store(online, std::memory_order_release);
-    xTaskNotifyGive(s_service_task);
-    return ESP_OK;
+    bool changed = false;
+    {
+        StatusLock lock;
+        if (lock.locked()) {
+            changed = s_status.server_running != running || s_status.last_error != error;
+            s_status.server_running = running;
+            s_status.last_error = error;
+            if (error == ESP_OK && !s_upload_active.load(std::memory_order_relaxed) &&
+                !s_reboot_pending.load(std::memory_order_relaxed)) {
+                s_status.state = OtaUpdateState::kIdle;
+            }
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    OtaUpdateEvent event{};
+    event.type = error != ESP_OK ? OtaUpdateEventType::kFailed
+                                 : (running ? OtaUpdateEventType::kServerStarted
+                                            : OtaUpdateEventType::kServerStopped);
+    event.error = error;
+    emit_event(event);
+}
+
+bool ota_update_upload_is_active()
+{
+    return s_upload_active.load(std::memory_order_acquire);
 }
 
 esp_err_t get_ota_update_status(OtaUpdateStatus *status)

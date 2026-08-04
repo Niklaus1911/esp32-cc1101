@@ -8,6 +8,8 @@
 #include <cstring>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -20,6 +22,7 @@
 namespace rfbridge {
 namespace {
 
+constexpr char kTag[] = "network_wifi";
 constexpr TickType_t kApiWait = pdMS_TO_TICKS(100);
 constexpr TickType_t kMutexWait = pdMS_TO_TICKS(1000);
 constexpr uint32_t kTaskStackSize = 6144;
@@ -99,6 +102,7 @@ void *s_online_sink_context = nullptr;
 WifiCredentials s_saved_credentials{};
 WifiCredentials s_active_credentials{};
 bool s_driver_initialized = false;
+bool s_wifi_library_initialized = false;
 bool s_netif_attached = false;
 std::atomic<bool> s_driver_started{false};
 bool s_start_in_progress = false;
@@ -337,7 +341,10 @@ void cleanup_failed_driver_initialization()
         esp_wifi_clear_default_wifi_driver_and_handlers(s_sta_netif);
         s_netif_attached = false;
     }
-    esp_wifi_deinit();
+    if (s_wifi_library_initialized) {
+        (void)esp_wifi_deinit();
+        s_wifi_library_initialized = false;
+    }
     if (s_sta_netif != nullptr) {
         esp_netif_destroy(s_sta_netif);
         s_sta_netif = nullptr;
@@ -377,9 +384,19 @@ esp_err_t ensure_driver_initialized()
 
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     config.nvs_enable = 0;
+    constexpr uint32_t kInternalHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGI(kTag, "Wi-Fi init heap: free=%u largest=%u",
+             static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
     error = esp_wifi_init(&config);
     if (error == ESP_OK) {
+        s_wifi_library_initialized = true;
         error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    } else {
+        ESP_LOGE(kTag, "Wi-Fi init failed: %s; heap free=%u largest=%u",
+                 esp_err_to_name(error),
+                 static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
     }
     if (error == ESP_OK) {
         error = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -398,6 +415,9 @@ esp_err_t ensure_driver_initialized()
     }
 
     s_driver_initialized = true;
+    ESP_LOGI(kTag, "Wi-Fi initialized; heap free=%u largest=%u",
+             static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
     {
         StatusLock lock;
         if (lock.locked()) {
@@ -576,7 +596,7 @@ void process_scan_done()
     complete.type = error == ESP_OK ? NetworkWifiEventType::kScanCompleted : NetworkWifiEventType::kError;
     complete.error = error;
     complete.reason = count;
-    deliver_event(complete);
+    queue_critical_event(complete);
     if (s_scan_then_stop) {
         s_scan_then_stop = false;
         s_operator_stopped = true;

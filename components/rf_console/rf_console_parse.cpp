@@ -148,14 +148,4 @@ bool format_rf_automation_event(const RfAutomationEvent &event, const char *resu
     return written >= 0 && static_cast<std::size_t>(written) < capacity;
 }
 
-LearnFrameDisposition classify_learn_frame(int64_t armed_us, int64_t deadline_us, int64_t frame_event_us,
-                                           int64_t frame_capture_start_us)
-{
-    if (armed_us < 0 || deadline_us <= armed_us || frame_event_us < armed_us ||
-        frame_capture_start_us < armed_us) {
-        return LearnFrameDisposition::kIgnore;
-    }
-    return frame_event_us < deadline_us ? LearnFrameDisposition::kCapture : LearnFrameDisposition::kTimeout;
-}
-
 }  // namespace rfbridge

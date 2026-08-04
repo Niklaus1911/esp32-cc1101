@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-readonly OTA_PORT="${OTA_HTTP_PORT:-8032}"
-readonly IDF_ACTIVATE="$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+readonly OTA_PORT="${OTA_HTTP_PORT:-80}"
+readonly IDF_EXPORT="$HOME/.espressif/v6.0.2/esp-idf/export.sh"
 readonly CONNECT_TIMEOUT_SECONDS=5
 readonly UPLOAD_TIMEOUT_SECONDS=900
 
@@ -30,7 +30,7 @@ for octet in "${octets[@]}"; do
         exit 2
     fi
 done
-if [[ ! "$OTA_PORT" =~ ^[0-9]+$ ]] || ((OTA_PORT < 1024 || OTA_PORT > 65535)); then
+if [[ ! "$OTA_PORT" =~ ^[0-9]+$ ]] || ((OTA_PORT < 80 || OTA_PORT > 65535)); then
     printf 'Invalid OTA_HTTP_PORT: %s\n' "$OTA_PORT" >&2
     exit 2
 fi
@@ -52,11 +52,11 @@ fi
 inspect_image() {
     if command -v esptool >/dev/null 2>&1; then
         esptool --chip esp32 image-info "$IMAGE"
-    elif [[ -f "$IDF_ACTIVATE" ]]; then
+    elif [[ -f "$IDF_EXPORT" ]]; then
         bash -c 'set +u; source "$1" >/dev/null; set -u; "$IDF_PYTHON_ENV_PATH/bin/python" -m esptool --chip esp32 image-info "$2"' \
-            bash "$IDF_ACTIVATE" "$IMAGE"
+            bash "$IDF_EXPORT" "$IMAGE"
     else
-        printf 'esptool is unavailable and ESP-IDF 6.0.2 cannot be activated\n' >&2
+        printf 'esptool is unavailable and ESP-IDF 6.0.2 cannot be exported\n' >&2
         return 1
     fi
 }
@@ -70,7 +70,11 @@ require_image_metadata() {
     fi
 }
 
-readonly BASE_URL="http://${DEVICE_IP}:${OTA_PORT}"
+if ((OTA_PORT == 80)); then
+    readonly BASE_URL="http://${DEVICE_IP}"
+else
+    readonly BASE_URL="http://${DEVICE_IP}:${OTA_PORT}"
+fi
 response_file="$(mktemp)"
 image_info_file="$(mktemp)"
 trap 'rm -f -- "$response_file" "$image_info_file"' EXIT
@@ -106,6 +110,7 @@ if curl --show-error --fail-with-body \
     --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
     --max-time "$UPLOAD_TIMEOUT_SECONDS" \
     --header 'Content-Type: application/octet-stream' \
+    --header "Origin: $BASE_URL" \
     --header 'Expect:' \
     --data-binary "@$IMAGE" \
     --output "$response_file" \

@@ -10,7 +10,7 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with DHCP and direct PC-initiated LAN OTA; MQTT is not included.
+- Optional runtime Wi-Fi station mode with DHCP, a responsive trusted-LAN control UI with live polling, and direct PC-initiated LAN OTA; MQTT is not included.
 
 ## Hardware
 
@@ -114,7 +114,7 @@ console style plain
 console style pretty
 ```
 
-`plain` removes application-console ANSI sequences and preserves stable machine-readable `RX`, `RULE`, `WIFI`, and `OTA` records. ESP-IDF application and bootloader severity logs embed their own ANSI colors; `tio --log-strip` removes all control sequences from saved logs. An OTA upload installs the colored application console and application logs, but it does not rewrite the second-stage bootloader. Colored bootloader logs take effect only after a later approved wired bootloader flash. The ESP-IDF console renders the prompt as `rf> ` using its native informational color. Linenoise accounts for those escape sequences, preserving history, arrows, editing, hints, and completion. ESP-IDF framework logging is asynchronous, so native log lines can appear after an idle prompt or between application event records; the firmware does not delay local console access for optional RF or Wi-Fi startup and does not manipulate linenoise's private edit buffer to redraw around those logs.
+`plain` removes application-console ANSI sequences and preserves stable machine-readable `RX`, `RULE`, and `WIFI` records. ESP-IDF application and bootloader severity logs embed their own ANSI colors; `tio --log-strip` removes all control sequences from saved logs. Colored bootloader logs take effect only after an approved wired bootloader flash. The ESP-IDF console renders the prompt as `rf> ` using its native informational color. Linenoise accounts for those escape sequences, preserving history, arrows, editing, hints, and completion. ESP-IDF framework logging is asynchronous, so native log lines can appear after an idle prompt or between application event records; the firmware does not delay local console access for optional RF or Wi-Fi startup and does not manipulate linenoise's private edit buffer to redraw around those logs.
 
 ### Wi-Fi
 
@@ -131,6 +131,8 @@ wifi forget
 
 `wifi connect <ssid>` prompts for a bounded password without echo and does not place the password in command history. An open network uses an empty password. Candidate credentials are committed to the versioned, checksummed `net_cfg/station` NVS record only after DHCP succeeds; a failed candidate leaves the previously saved network unchanged. A valid saved network starts connecting asynchronously after normal console and RF startup on later boots. `wifi stop` is temporary, `wifi start` reconnects the saved network, and `wifi forget` deletes the saved record, stops Wi-Fi, and prevents boot reconnection.
 
+When DHCP supplies an address, the responsive Web UI starts automatically on port `80` and stops after connectivity is lost. Open `http://<esp32-ip>/`. The device remains station-only and does not create a fallback access point. Wi-Fi configuration remains UART-only.
+
 Every successful DHCP connection or reconnection emits:
 
 ```text
@@ -139,43 +141,41 @@ WIFI CONNECTED ssid=<ssid> ip=<ip> netmask=<netmask> gateway=<gateway>
 
 Use `wifi status` or the global `status` command for driver, saved-record, DHCP, retry, scan, OTA-lock, persistence-error, and event-drop state. Network failures are nonfatal to RF, storage, automation, and the UART console. Firmware never erases NVS to repair Wi-Fi data; a malformed network record disables only saved-network startup until `wifi forget` or a later successful connection replaces it.
 
-### LAN OTA
+### Web UI
 
-When Wi-Fi has a DHCP address, the device serves:
+The Web UI is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps only a small session activity list; it is not a guaranteed event history.
 
-```text
-GET  /api/v1/ota/status
-POST /api/v1/ota
-```
+The Web surface calls typed services directly and provides:
 
-Build and verify the application, then upload it directly from the PC:
+- Live radio, receiver, Wi-Fi, learning, latest-frame, and automation status.
+- Learning and cancellation.
+- Latest-frame and named learned-signal replay with bounded repeats.
+- Learned-signal metadata and deletion with rule-reference protection.
+- Decoded and raw RF transmission forms.
+- Automation rule add/remove/enable/disable and log-mode controls.
+- OTA status and direct application-image upload with progress and reboot recovery.
+
+The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
+
+The Web UI intentionally has no authentication. Any client already on the local network can read status, transmit RF, change persistent automation, delete learned signals, or install firmware. Exact current-IP Host and same-origin checks reduce browser cross-origin abuse but are not authentication. Do not expose port `80` to an untrusted network or the Internet.
+
+The OTA endpoint uses the existing inactive-partition writer, chip/project/image validation, maintenance locks, rollback support, and running-image confirmation. The same endpoint is available to the validated CLI uploader:
 
 ```bash
-tools/verify-production.sh
-tools/push-ota.sh <esp32-ip> /tmp/esp32-cc1101-production-build/esp32-cc1101.bin
+tools/push-ota.sh <esp32-ipv4> <application-image.bin>
 ```
 
-In an interactive PC terminal, the uploader shows curl's live percentage, transferred bytes, speed, and ETA while retaining the final device JSON separately. Redirected/noninteractive runs suppress the carriage-return meter but keep errors visible. The UART prints bounded discrete progress records so asynchronous RF and ESP-IDF logs cannot corrupt an in-place line. The first record starts on a fresh line to move past an idle prompt; later records in the same upload are contiguous unless framework logs interleave:
-
-```text
-[OTA  ]  42% [########------------] 394 KiB / 936 KiB
-```
-
-Plain console style retains the exact byte record `OTA PROGRESS bytes=<received> total=<length>`.
-
-The upload endpoint requires `application/octet-stream` and an exact positive `Content-Length`. It rejects oversized images and validates the classic ESP32 image header, chip revision bounds, project name, complete ESP-IDF image structure, checksum, and appended hash before selecting the inactive slot. A successful response is sent before a delayed reboot. The next boot confirms the image only after platform/NVS setup, partition sanity, console startup, and bounded RF startup attempts; a crash or reset before confirmation allows the bootloader rollback policy to select the previous slot. External AP availability and CC1101 wiring are not image-health requirements.
-
-OTA temporarily locks disruptive Wi-Fi commands, pauses automation, drains current radio work, and disables RX/TX/replay. A short body, disconnect, timeout, validation failure, or flash-write error aborts the inactive update and restores the prior runtime state. `ota status` and global `status` expose server, slot, progress, rollback, and maintenance cleanup state.
-
-The OTA server is intentionally plain, unauthenticated HTTP for a trusted personal LAN. It provides compatibility and corruption checks, not origin authentication. TLS, passwords, firmware signing, Secure Boot, flash encryption, and eFuse anti-rollback are not enabled. Any host that can reach the OTA port can replace the firmware; do not expose port 8032 to an untrusted network or the Internet.
+Firmware can also still be installed through the approved wired serial flashing process.
 
 ### Receive
 
 RX starts automatically. Known frames are printed as:
 
 ```text
-RX RC code=11043138 hex=0xA88142 bits=24 protocol=1 pulse_us=386 confidence=repeated repeats=3 fingerprint=0x...
+RX learned=gate RC code=11043138 hex=0xA88142 bits=24 protocol=1 pulse_us=386 confidence=repeated repeats=3 fingerprint=0x...
 ```
+
+`learned=<name>` appears when exactly one committed learned signal is canonically equivalent. Ambiguous matches are reported with `learned_ambiguous=<count>` instead of selecting an arbitrary name. The same annotation appears in `last`, while the Web event console and timeline render the unique name as a learned badge.
 
 Unknown stable repeated frames are printed in copyable form:
 
@@ -185,12 +185,7 @@ RX RAW start=1 count=20 repeats=3 fingerprint=0x... durations=210,740,330,...
 
 Repeated observations from one hold are suppressed for 350 ms by default. The activity LED pulses once per accepted logical `RX` event after this duplicate suppression, so malformed noise and repeated packets from the same button hold do not cause extra flashes. Accepted frames arriving within the 25 ms LED pulse extend it to 25 ms after the newest frame. A single complete decoded frame is accepted only when its capture boundary is trusted and is marked `confidence=single`. Raw fallback requires at least two aligned periods and is never accepted from a truncation-suspected capture. A final delimiter stopped by the 30 ms RMT threshold is treated as censored timing evidence rather than an exact duration.
 
-Control reception with:
-
-```text
-rx off
-rx on
-```
+Reception is always enabled whenever the radio is running. Transmission and maintenance temporarily pause capture and restore it automatically.
 
 ### Send a decoded rc-switch value
 
@@ -266,7 +261,7 @@ Rule behavior:
 - One trigger name has at most one action and cannot be overwritten. Remove its rule before adding a replacement. Any number of different triggers may replay the same target.
 - Rules, repeat counts, the fixed 1000 ms cooldown, and global enable/disable state persist across reboot. Runtime cooldown timestamps restart at boot and successful or failed action attempts are spaced by monotonic action time.
 - Decoded and raw learned signals use the same canonical matching as receive duplicate detection. Equivalent duplicate triggers, self-rules, ambiguous target aliases, and directed cycles are rejected. If tolerance boundaries make one received raw frame match multiple otherwise-distinct triggers, no action fires and the ambiguity counter increases.
-- An incoming frame fires at most one action. The same rule cannot fire again until its 1000 ms cooldown expires. Frames queued before add/remove/enable/disable are discarded by configuration generation. RX remains disabled during the bounded transmission, preventing local self-triggering.
+- An incoming frame fires at most one action. The same rule cannot fire again until its 1000 ms cooldown expires. Frames queued before add/remove/enable/disable are discarded by configuration generation. RX is temporarily paused during the bounded transmission, then restored automatically.
 - `forget <name>` fails while the learned name is referenced as a trigger or target. Remove all referencing rules first.
 - Automation startup failures never erase NVS or stop ordinary receive/manual replay. Learned-code load/list/replay remains available if only the new automation namespaces lack capacity. Automation fails closed if persisted rules are corrupt, dangling, cyclic, equivalent, ambiguous, or exceed the configured bounded table (default and maximum 32).
 - Automation activity logging is persistent and defaults to `actions`. `rule log off` disables it, `rule log actions` prints trigger and TX completion/error lines, and `rule log verbose` additionally prints cooldown suppressions, ambiguous/stale skips, and automation frame-queue drop summaries. Unmatched frames are never logged.
@@ -299,16 +294,15 @@ Raw rules:
 status
 radio info
 wifi status
-ota status
 radio reset
 radio start
 ```
 
-`status` renders the complete System/RF, Automation, Wi-Fi, and OTA dashboard. `radio info`, `wifi status`, and `ota status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
+`status` renders the System/RF, Automation, and Wi-Fi dashboard. `radio info` and `wifi status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
 
 Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled/logging state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, emitted log events, dropped log events, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
 
-`radio reset` disables capture, performs the CC1101 reset/profile/readback/calibration sequence, and restores the prior desired RX state. `radio start` retries complete initialization after wiring or power is corrected. Boot also makes three bounded startup attempts. All command, SPI-ready, and radio-state waits are bounded. An unrecoverable classic-ESP32 RMT TX timeout attempts to force the CC1101 idle and leaves the service faulted; reboot is then required rather than risking a late transmission or an unbounded driver abort.
+`radio reset` temporarily disables capture, performs the CC1101 reset/profile/readback/calibration sequence, and restores the always-on RX state. `radio start` retries complete initialization after wiring or power is corrected. Boot also makes three bounded startup attempts. All command, SPI-ready, and radio-state waits are bounded. An unrecoverable classic-ESP32 RMT TX timeout attempts to force the CC1101 idle and leaves the service faulted; reboot is then required rather than risking a late transmission or an unbounded driver abort.
 
 ## Radio profile
 
@@ -372,4 +366,4 @@ idf.py -B build build
 # idf.py -B build -p /dev/ttyUSB0 flash monitor
 ```
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw matching, parser/deadline bounds, console style/ANSI bounds, OTA percentage/bar formatting, uploader success/error behavior, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, OTA power interruption, rollback, RF maintenance restoration, timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF and Wi-Fi records, OTA compatibility policy, frequency calculation, and PA selection. CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.
