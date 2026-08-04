@@ -67,5 +67,8 @@ bool web_origin_matches_ipv4(const char *origin, uint32_t ipv4, uint16_t expecte
 bool web_origin_matches_host(const char *origin, const char *host);
 bool escape_web_html(const char *input, char *output, std::size_t capacity,
                      std::size_t *output_length = nullptr);
+bool escape_web_json_string(const char *input, char *output, std::size_t capacity,
+                            std::size_t *output_length = nullptr);
+bool format_web_ipv4(uint32_t ipv4, char *output, std::size_t capacity);
 
 }  // namespace rfbridge

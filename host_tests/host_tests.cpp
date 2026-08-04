@@ -1070,6 +1070,66 @@ void test_web_forms()
     char too_small[4]{};
     require(!rfbridge::escape_web_html("<", too_small, sizeof(too_small)),
             "Web HTML escaping rejects truncation");
+
+    constexpr char json_active[] = {'s', 's', 'i', 'd', '"', '\\', '\b', '\f', '\n', '\r',
+                                    '\t', '\x01', '\0'};
+    char json_escaped[64]{};
+    std::size_t json_length = 0;
+    require(rfbridge::escape_web_json_string(json_active, json_escaped,
+                                             sizeof(json_escaped), &json_length) &&
+                std::strcmp(json_escaped, "ssid\\\"\\\\\\b\\f\\n\\r\\t\\u0001") == 0 &&
+                json_length == std::strlen(json_escaped),
+            "Web JSON escaping covers active and control characters");
+    char json_too_small[2] = {'x', '\0'};
+    json_length = 99;
+    require(!rfbridge::escape_web_json_string("\"", json_too_small,
+                                              sizeof(json_too_small), &json_length) &&
+                json_too_small[0] == '\0' && json_length == 0,
+            "Web JSON escaping rejects truncation atomically");
+
+    char max_ssid[33]{};
+    char expected_max_ssid[65]{};
+    for (std::size_t index = 0; index < sizeof(max_ssid) - 1; ++index) {
+        max_ssid[index] = (index % 2 == 0) ? '"' : '\\';
+        expected_max_ssid[index * 2] = '\\';
+        expected_max_ssid[index * 2 + 1] = max_ssid[index];
+    }
+    char escaped_max_ssid[65]{};
+    json_length = 0;
+    require(rfbridge::escape_web_json_string(max_ssid, escaped_max_ssid,
+                                             sizeof(escaped_max_ssid), &json_length) &&
+                json_length == sizeof(expected_max_ssid) - 1 &&
+                std::strcmp(escaped_max_ssid, expected_max_ssid) == 0,
+            "Web JSON escaping fits a worst-case 32-byte printable SSID exactly");
+    char escaped_max_ssid_short[64] = {'x', '\0'};
+    json_length = 99;
+    require(!rfbridge::escape_web_json_string(max_ssid, escaped_max_ssid_short,
+                                              sizeof(escaped_max_ssid_short), &json_length) &&
+                escaped_max_ssid_short[0] == '\0' && json_length == 0,
+            "Web JSON escaping rejects a worst-case SSID buffer one byte short");
+
+    char ipv4[16]{};
+    require(rfbridge::format_web_ipv4(0x1101A8C0, ipv4, sizeof(ipv4)) &&
+                std::strcmp(ipv4, "192.168.1.17") == 0,
+            "Web IPv4 formatting preserves network byte order");
+    char ipv4_max[16]{};
+    require(rfbridge::format_web_ipv4(0xFFFFFFFF, ipv4_max, sizeof(ipv4_max)) &&
+                std::strcmp(ipv4_max, "255.255.255.255") == 0,
+            "Web IPv4 formatting fits the longest address at exact capacity");
+    char ipv4_too_small[15] = {'x', '\0'};
+    require(!rfbridge::format_web_ipv4(0xFFFFFFFF, ipv4_too_small,
+                                      sizeof(ipv4_too_small)) &&
+                ipv4_too_small[0] == '\0',
+            "Web IPv4 formatting rejects an exact-capacity buffer one byte short");
+    char ipv4_zero[8]{};
+    require(rfbridge::format_web_ipv4(0, ipv4_zero, sizeof(ipv4_zero)) &&
+                std::strcmp(ipv4_zero, "0.0.0.0") == 0,
+            "Web IPv4 formatting handles the minimum address at exact capacity");
+    char ipv4_zero_capacity = 'x';
+    require(!rfbridge::format_web_ipv4(0, nullptr, sizeof(ipv4_max)) &&
+                !rfbridge::format_web_ipv4(0, &ipv4_zero_capacity, 0) &&
+                ipv4_zero_capacity == 'x',
+            "Web IPv4 formatting rejects null and zero-capacity outputs");
 }
 
 }  // namespace

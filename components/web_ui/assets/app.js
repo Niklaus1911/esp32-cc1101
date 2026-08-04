@@ -24,6 +24,9 @@ const activityStorageVersion = 1;
 const maximumActivityEntries = 50;
 const maximumActivityStorageLength = 64 * 1024;
 const maximumDateMilliseconds = 8640000000000000;
+const heapCriticalBytes = 12 * 1024;
+const heapWarningBytes = 24 * 1024;
+const marcStateNames = "SLEEP IDLE XOFF VCOON_MC REGON_MC MANCAL VCOON REGON STARTCAL BWBOOST FS_LOCK IFADCON ENDCAL RX RX_END RX_RST TXRX_SWITCH RXFIFO_OVERFLOW FSTXON TX TX_END RXTX_SWITCH TXFIFO_UNDERFLOW".split(" ");
 
 const byId = (id) => document.getElementById(id);
 const text = (value) => document.createTextNode(String(value));
@@ -74,6 +77,10 @@ function setConnection(connected, label) {
   badge.textContent = label;
   badge.className = `state ${connected ? "state-ok" : "state-bad"}`;
   byId("device-state").textContent = connected ? "Live receiver" : "HTTP unavailable";
+  byId("system-status").classList.toggle("is-stale", !connected);
+  if (connected) return;
+  document.querySelectorAll("#system-status .metric strong, #system-status .section-heading > .state")
+    .forEach((target) => setStatus(target.id, "Disconnected", "bad", target.classList.contains("state")));
 }
 
 async function readJson(path, timeoutMs = 3500) {
@@ -125,7 +132,8 @@ async function pollLive() {
   const generation = state.pollGeneration;
   const controller = new AbortController();
   state.pollController = controller;
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 3500);
   try {
     const response = await fetch("/api/live", { cache: "no-store", signal: controller.signal });
     const live = await response.json();
@@ -142,7 +150,7 @@ async function pollLive() {
     }
     renderLive(live);
   } catch (error) {
-    if (generation === state.pollGeneration && error.name !== "AbortError") {
+    if (generation === state.pollGeneration && (error.name !== "AbortError" || timedOut)) {
       state.backoff = Math.min(state.backoff * 2, 5000);
       setConnection(false, "Disconnected");
     }
@@ -161,12 +169,171 @@ function stateClass(value) {
       : "value-bad";
 }
 
-function renderDetails(target, entries) {
-  const fragment = document.createDocumentFragment();
-  entries.forEach(([label, value]) => {
-    fragment.append(element("dt", "", label), element("dd", "", value));
-  });
-  target.replaceChildren(fragment);
+function renderDetails(target, data) {
+  const frag = document.createDocumentFragment();
+  for (const [label, value] of data) {
+    frag.append(element("dt", "", label), element("dd", "", value ?? "-"));
+  }
+  target.replaceChildren(frag);
+}
+
+function rows(o, spec) { return spec.split("|").map((pair) => {
+  const [label, field] = pair.split(":"); return [label, o?.[field]];
+}); }
+
+function formatUptime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  let s = Math.floor(ms / 1000);
+  const p = [];
+  for (const [u, suffix] of [[86400, "d"], [3600, "h"], [60, "m"], [1, "s"]]) {
+    if (p.length || s >= u || u === 1) p.push(`${Math.floor(s / u)}${suffix}`);
+    s %= u;
+  }
+  return p.join(" ");
+}
+
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "-";
+  return n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MiB` :
+    n >= 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${n} B`;
+}
+
+function formatHalfDbm(n) { return Number.isFinite(n) ? `${(n / 2).toFixed(Math.abs(n % 2) === 1 ? 1 : 0)} dBm` : "-"; }
+
+function formatWifiQuality(n) { return !Number.isFinite(n) ? "-" :
+  n >= -50 ? "Excellent" : n >= -60 ? "Good" : n >= -70 ? "Fair" : "Weak"; }
+
+function formatMarcState(n) {
+  const x = formatHexByte(n);
+  return x === "-" ? x : `${marcStateNames[n] || "Unknown"} (${x})`;
+}
+
+function formatBoolean(v, yes = "Yes", no = "No") { return typeof v === "boolean" ? (v ? yes : no) : "-"; }
+
+function formatHexByte(n) { return Number.isInteger(n) && n >= 0 && n <= 0xff ? `0x${n.toString(16).toUpperCase().padStart(2, "0")}` : "-"; }
+
+function formatError(v) { return v === undefined ? "-" : hasError(v) ? v : "None"; }
+function hasError(v) { return v && v !== "ESP_OK"; }
+function hasCount(...values) { return values.some((v) => v > 0); }
+
+function formatState(v) { return !v ? "-" : v === "waiting_dhcp" ? "Waiting for DHCP" :
+  v === "retry_wait" ? "Retry wait" : v.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()); }
+
+function formatAddress(v) { return v && v !== "0.0.0.0" ? v : "-"; }
+
+function setStatus(id, v, tone, badge = false) { const target = byId(id);
+  target.textContent = v; target.className = badge ? `state state-${tone}` : `value-${tone}`; }
+
+function renderSystem(live) {
+  if (!live || byId("system-status").classList.contains("is-stale")) return;
+  const { radio: r, learning: l, automation: a, network: w, system: s = null, errors: e = {} } = live;
+  const chip = r.cc1101;
+  const info = chip?.available ? chip : {};
+  const busy = Boolean(r.transmitting || r.maintenance);
+  const deferred = chip && !chip.available && busy &&
+    ["ESP_ERR_TIMEOUT", "ESP_ERR_INVALID_STATE"].includes(chip.error);
+  const rfLimited = !chip || r.truncated == null;
+  const rfDegraded = hasCount(r.truncated, r.queue_drops, r.timeouts,
+                              chip?.recoveries, chip?.ready_timeouts, chip?.state_timeouts);
+  const rfFaulted = !r.available || !r.running || chip && !chip.available && !deferred;
+  const rfPaused = deferred || busy || r.rx !== "active";
+  const rfTone = rfFaulted ? "bad" : rfPaused || rfLimited || rfDegraded ? "warn" : "ok";
+  const rfBadge = rfFaulted ? "Faulted" : rfPaused ? "Paused" :
+    rfLimited ? "Limited" : rfDegraded ? "Degraded" : "Healthy";
+  const wLimited = w.state == null || w.event_drops == null;
+  const wTone = !w.available || w.state === "fault" || w.state === "off" ||
+    hasError(e.wifi) || hasError(w.initialization_error) ? "bad" :
+    !w.online || wLimited || hasCount(w.event_drops) ||
+    hasError(w.persistence_error) || hasError(w.last_error) ? "warn" : "ok";
+  const wBadge = wTone === "bad" ? "Faulted" :
+    wLimited ? "Limited" : w.online ? "Online" : formatState(w.state);
+  const svcLimited = l.catalog_available == null || a.log_drops == null;
+  const svcFaulted = !l.available || !a.available || hasError(e.signals) || hasError(e.automation);
+  const svcDegraded = l.catalog_available === false || a.runtime_paused ||
+    hasCount(l.queue_drops, l.catalog_errors, a.tx_errors, a.queue_drops, a.log_drops) ||
+    hasError(l.initialization_error) || hasError(a.initialization_error) || hasError(a.last_error);
+  const svcTone = svcFaulted ? "bad" : svcLimited || svcDegraded ? "warn" : "ok";
+  const sysLimited = !s || s.heap_free == null;
+  const hTone = sysLimited ? "warn" : s.heap_free < heapCriticalBytes ? "bad" :
+    s.heap_free < heapWarningBytes ? "warn" : "ok";
+  const runTone = svcTone === "bad" || hTone === "bad" ? "bad" :
+    svcTone === "warn" || hTone === "warn" ? "warn" : "ok";
+  const signal = Number.isFinite(w.rssi) ? `${w.rssi} dBm / ${formatWifiQuality(w.rssi)}` : "-";
+
+  setStatus("system-radio-summary",
+            r.available ? `${r.running ? "Running" : "Faulted"} / ${formatState(r.rx)}` : "Unavailable",
+            rfTone);
+  setStatus("system-cc1101-summary", !chip ? "Diagnostics unavailable" : chip.available
+    ? `Available / ${formatMarcState(chip.marc_state)}`
+    : deferred ? `Deferred / ${chip.error}` : `Unavailable / ${formatError(chip.error)}`,
+            !chip || deferred ? "warn" : chip.available ? rfTone : "bad");
+  setStatus("system-wifi-summary", w.online
+    ? `${w.state ? formatState(w.state) : "Online"} / ${signal}` : formatState(w.state),
+            wTone);
+  setStatus("system-memory-summary", sysLimited ? "Diagnostics unavailable" : formatBytes(s.heap_free), hTone);
+  setStatus("system-radio-badge", rfBadge, rfTone, true);
+  setStatus("system-wifi-badge", wBadge, wTone, true);
+  setStatus("system-runtime-badge",
+            svcFaulted ? "Faulted" : sysLimited || svcLimited ? "Limited" : hTone !== "ok" ? "Low memory" :
+              runTone === "warn" ? "Degraded" : "Healthy",
+            runTone, true);
+
+  renderDetails(byId("system-radio-details"), [
+    ["Service", r.available ? (r.running ? "Running" : "Faulted") : "Unavailable"], ["Receiver", r.available ? formatState(r.rx) : "-"],
+    ["Transmitter", r.available ? formatBoolean(r.transmitting, "Active", "Idle") : "-"], ["Maintenance", r.available ? formatBoolean(r.maintenance, "Active", "Inactive") : "-"],
+    ["Frequency", Number.isFinite(r.frequency_hz) ? `${(r.frequency_hz / 1000000).toFixed(3)} MHz` : "-"],
+    ["TX power", Number.isFinite(r.tx_power_dbm) ? `${r.tx_power_dbm} dBm` : "-"],
+  ]);
+  renderDetails(byId("system-cc1101-details"), !chip ? [["State", "Diagnostics unavailable."]] : [
+    ["Available", deferred ? "Deferred" : formatBoolean(chip.available)], ["Error", formatError(chip.error)],
+    ["Part number", formatHexByte(info.part)], ["Version", formatHexByte(info.version)],
+    ["MARC state", formatMarcState(info.marc_state)], ["RSSI", formatHalfDbm(info.rssi_dbm_x2)],
+    ["Carrier sense", formatBoolean(info.carrier_sense)], ["Clear channel", formatBoolean(info.clear_channel)],
+  ]);
+  renderDetails(byId("system-wifi-details"), [
+    ["State", formatState(w.state)], ["Active SSID", w.ssid || "-"], ["Signal", w.online ? signal : "-"],
+    ["Saved network", w.saved_known == null ? "-" : !w.saved_known ? "Unknown" : !w.saved ? "Not configured" :
+      w.active_saved ? "Active" : "Configured"],
+  ]);
+  renderDetails(byId("system-network-details"), [
+    ["IP address", formatAddress(w.ip)], ["Gateway", formatAddress(w.gateway)],
+    ["Driver", w.driver_initialized == null ? "-" : w.driver_initialized && w.driver_started ? "Started" :
+      w.driver_initialized ? "Initialized" : "Not initialized"],
+    ["Scan", formatBoolean(w.scan_running, "Running", "Idle")], ["OTA lock", formatBoolean(w.ota_locked, "Active", "Inactive")],
+  ]);
+  renderDetails(byId("system-runtime-details"), sysLimited ? [["State", "Diagnostics unavailable."]] : [
+    ["Uptime", formatUptime(s.uptime_ms)], ["Reset reason", formatState(s.reset_reason)],
+    ["Free heap", formatBytes(s.heap_free)], ["Largest free block", formatBytes(s.heap_largest)],
+    ["Minimum free heap", formatBytes(s.heap_minimum)],
+  ]);
+  renderDetails(byId("system-services-details"), [
+    ["Learned signals", l.available ? `${l.count} / catalog ${l.catalog_available === undefined ? "-" : l.catalog_available ? "ready" : "unavailable"}` : "Unavailable"],
+    ["Automation", a.available ? `${a.enabled ? "Enabled" : "Disabled"}${a.runtime_paused ? " / paused" : ""} / ${a.rules} rules` : "Unavailable"],
+    ...[["RF", "radio"], ["Signals", "signals"], ["Automation", "automation"], ["Wi-Fi", "wifi"]]
+      .map(([label, key]) => [`${label} error`, formatError(e[key])]),
+  ]);
+  renderDetails(byId("system-rf-diagnostics"), [
+    ...rows(r, "Accepted frames:accepted|Suppressed duplicates:duplicates|Truncated captures:truncated|RF queue drops:queue_drops|Command timeouts:timeouts"),
+    ...rows(info,
+                    "Resets:resets|Recoveries:recoveries|Ready timeouts:ready_timeouts|State timeouts:state_timeouts"),
+  ]);
+  renderDetails(byId("system-wifi-diagnostics"), [
+    ["Netmask", formatAddress(w.netmask)],
+    ["DNS", formatAddress(w.dns)],
+    ["Saved SSID", w.saved_known && w.saved ? w.saved_ssid || "-" : "-"],
+    ["Retries", w.retries],
+    ["Disconnect reason", w.disconnect_reason == null ? "-" : w.disconnect_reason || "None"],
+    ["Event drops", w.event_drops],
+    ...["initialization", "persistence", "last"]
+      .map((name) => [`${formatState(name)} error`, formatError(w[`${name}_error`])]),
+  ]);
+  renderDetails(byId("system-services-diagnostics"), [
+    ...rows(l, "Learning queue drops:queue_drops|Catalog errors:catalog_errors"),
+    ["Learning initialization error", formatError(l.initialization_error)],
+    ...rows(a, "Frames:frames|Stale frames:stale|Ambiguous frames:ambiguous|Matches:matches|Actions:actions|Cooldown suppressed:suppressed|TX errors:tx_errors|Queue drops:queue_drops|Log events:log_events|Log drops:log_drops"),
+    ["Initialization error", formatError(a.initialization_error)],
+    ["Last error", formatError(a.last_error)],
+  ]);
 }
 
 function frameSummary(frame) {
@@ -347,13 +514,7 @@ function renderLive(live) {
   renderLast(live.last);
   renderLearning(live.learning);
   byId("automation-summary").textContent = `${live.automation.rules} rules / ${live.automation.actions} actions`;
-  renderDetails(byId("runtime-details"), [
-    ["Radio", live.radio.running ? "Running" : live.errors.radio],
-    ["Receiver", live.radio.rx],
-    ["RF queue drops", live.radio.queue_drops],
-    ["Command timeouts", live.radio.timeouts],
-    ["Network", live.network.online ? `${live.network.rssi} dBm` : live.errors.wifi],
-  ]);
+  renderSystem(live);
 }
 
 function signalMeta(signal) {
@@ -483,17 +644,23 @@ function activateView(name) {
   if (name === "system") refreshOta();
 }
 
+function bindPostForm(id, path, prepare, complete) {
+  byId(id).addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let data = Object.fromEntries(new FormData(event.currentTarget));
+    if (prepare) data = prepare(data);
+    if (await requestAction(path, "POST", formBody(data)) && complete) await complete();
+  });
+}
+
 function bindActions() {
   document.querySelector(".tabs-inner").addEventListener("click", (event) => {
     const tab = event.target.closest("[data-view]");
     if (tab) activateView(tab.dataset.view);
   });
 
-  byId("learn-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const name = byId("learn-name").value.trim();
-    if (await requestAction("/api/learn", "POST", formBody({ name }))) byId("learn-name").value = "";
-  });
+  bindPostForm("learn-form", "/api/learn", (data) => ({ name: data.name.trim() }),
+               () => { byId("learn-name").value = ""; });
   byId("cancel-learning").addEventListener("click", () => requestAction("/api/learn", "DELETE"));
   byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: byId("last-repeats").value })));
   byId("clear-activity").addEventListener("click", () => {
@@ -520,22 +687,12 @@ function bindActions() {
     }
   });
 
-  byId("decoded-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    await requestAction("/api/transmit/decoded", "POST", formBody(Object.fromEntries(data)));
-  });
-  byId("raw-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.currentTarget));
+  bindPostForm("decoded-form", "/api/transmit/decoded");
+  bindPostForm("raw-form", "/api/transmit/raw", (data) => {
     data.durations = data.durations.trim().split(/[\s,]+/).filter(Boolean).join(",");
-    await requestAction("/api/transmit/raw", "POST", formBody(data));
+    return data;
   });
-  byId("rule-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.currentTarget));
-    if (await requestAction("/api/rules", "POST", formBody(data))) await refreshRules();
-  });
+  bindPostForm("rule-form", "/api/rules", null, refreshRules);
   byId("rule-list").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-action=remove-rule]");
     const item = event.target.closest("[data-trigger]");

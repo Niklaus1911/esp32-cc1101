@@ -17,6 +17,22 @@ const radioHeader = readFileSync(join(root, "components", "rf_ook", "include", "
 const consoleSource = readFileSync(join(root, "components", "rf_console", "rf_console.cpp"), "utf8");
 const source = `${api}\n${forms}\n${lifecycle}\n${cmake}`;
 
+function sourceSection(content, start, end, label) {
+  const startOffset = content.indexOf(start);
+  const endOffset = content.indexOf(end, startOffset + start.length);
+  assert(startOffset >= 0 && endOffset > startOffset, `${label} source section missing`);
+  return content.slice(startOffset, endOffset);
+}
+
+function assertFields(content, fields, label) {
+  for (const field of fields) {
+    assert(content.includes(`\\"${field}\\"`), `${label} field missing: ${field}`);
+  }
+}
+
+const compactSource = (content) => content.replace(/\s+/g, " ");
+const occurrenceCount = (content, value) => content.split(value).length - 1;
+
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = 80;/);
 assert.match(lifecycle, /config\.max_uri_handlers = 20;/);
 assert.match(lifecycle, /config\.max_open_sockets = 2;/);
@@ -62,6 +78,166 @@ assert(api.includes("img-src 'self' data:"), "favicon CSP contract missing");
 assert(index.includes("Replay"), "Replay control missing");
 assert(index.includes("Install and reboot"), "OTA control missing");
 assert(js.includes("/api/live") && js.includes("schedulePoll"), "live polling missing");
+const liveApi = sourceSection(api, "esp_err_t live_handler(", "esp_err_t signals_handler(",
+                              "live API");
+const radioApi = sourceSection(liveApi, '"{\\"radio\\":{', '"\\"learning\\":{',
+                               "live radio");
+const learningApi = sourceSection(liveApi, '"\\"learning\\":{',
+                                  '"\\"last\\":null,', "live learning");
+const automationApi = sourceSection(liveApi, '"\\"automation\\":{',
+                                    '"\\"network\\":{', "live automation");
+const networkApi = sourceSection(liveApi, '"\\"network\\":{',
+                                 '"\\"system\\":{', "live network");
+const systemApi = sourceSection(liveApi, '"\\"system\\":{',
+                                '"\\"errors\\":{', "live system");
+const errorsApi = sourceSection(liveApi, '"\\"errors\\":{',
+                                "if (error != ESP_OK)", "live errors");
+assertFields(radioApi, [
+  "available", "running", "rx", "transmitting", "maintenance", "accepted", "duplicates",
+  "queue_drops", "timeouts", "truncated", "frequency_hz", "tx_power_dbm", "cc1101", "error",
+  "part", "version", "marc_state", "rssi_dbm_x2", "carrier_sense", "clear_channel", "resets",
+  "recoveries", "ready_timeouts", "state_timeouts",
+], "live radio");
+assertFields(learningApi, [
+  "available", "state", "revision", "name", "result", "count", "catalog_available",
+  "queue_drops", "catalog_errors", "initialization_error",
+], "live learning");
+assertFields(automationApi, [
+  "available", "enabled", "runtime_paused", "log_mode", "rules", "frames", "matches", "stale",
+  "ambiguous", "actions", "suppressed", "tx_errors", "queue_drops", "log_events", "log_drops",
+  "initialization_error", "last_error", "last_trigger", "last_target",
+], "live automation");
+assertFields(networkApi, [
+  "available", "online", "rssi", "state", "driver_initialized", "driver_started", "scan_running",
+  "ota_locked", "ssid", "saved_ssid", "saved_known", "saved", "active_saved", "ip", "netmask",
+  "gateway", "dns", "retries", "event_drops", "disconnect_reason", "initialization_error",
+  "persistence_error", "last_error",
+], "live network");
+assertFields(systemApi, [
+  "uptime_ms", "reset_reason", "heap_free", "heap_minimum", "heap_largest",
+], "live system");
+assertFields(errorsApi, ["radio", "signals", "automation", "wifi"], "live errors");
+assert(compactSource(radioApi).includes(
+  'radio_error == ESP_OK ? "true" : "false", radio_error == ESP_OK && radio.running ? "true" : "false"'),
+  "live radio availability must retain the outer status result");
+assert(compactSource(learningApi).includes(
+  'signals_error == ESP_OK && signals.available ? "true" : "false"'),
+  "live learning availability must use the successful copied snapshot");
+assert(compactSource(automationApi).includes(
+  'automation_error == ESP_OK && automation.available ? "true" : "false"'),
+  "live automation availability must use the successful copied snapshot");
+assert(radioApi.includes('radio.cc1101_info_valid ? "true" : "false", esp_err_to_name(radio.cc1101_error)') &&
+       radioApi.includes("error == ESP_OK && radio.cc1101_info_valid"),
+       "CC1101 availability and optional details must use the chip-info snapshot");
+const compactNetworkApi = compactSource(networkApi);
+assert(compactNetworkApi.includes(
+  'wifi_error == ESP_OK && wifi.available ? "true" : "false", wifi_error == ESP_OK && wifi.available && wifi.state == NetworkWifiState::kOnline && wifi.ip != 0 ? "true" : "false"'),
+  "live network availability and online state must use one successful copied snapshot");
+assert(!api.includes("network_wifi_is_online()"),
+       "live API online state must come from the copied Wi-Fi snapshot");
+assert(liveApi.includes("escape_web_json_string(wifi.active_ssid") &&
+       liveApi.includes("escape_web_json_string(wifi.saved_ssid") &&
+       liveApi.includes("MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT") &&
+       systemApi.includes("heap_caps_get_minimum_free_size"),
+       "live SSID escaping or internal-heap telemetry contract missing");
+for (const id of [
+  "system-status", "system-radio-summary", "system-cc1101-summary", "system-wifi-summary",
+  "system-memory-summary", "system-radio-badge", "system-wifi-badge", "system-runtime-badge",
+  "system-radio-details", "system-cc1101-details", "system-wifi-details", "system-network-details",
+  "system-runtime-details", "system-services-details", "system-rf-diagnostics",
+  "system-wifi-diagnostics", "system-services-diagnostics",
+]) assert(index.includes(`id="${id}"`), `system status DOM target missing: ${id}`);
+for (const formatter of [
+  "formatUptime", "formatBytes", "formatHalfDbm", "formatWifiQuality", "formatMarcState",
+  "formatBoolean",
+]) assert(js.includes(`function ${formatter}(`), `system formatter missing: ${formatter}`);
+assert(js.includes("function renderSystem(live)") && js.includes("renderSystem(live);"),
+       "live system render path missing");
+const connectionSource = sourceSection(js, "function setConnection(",
+                                       "async function readJson(", "connection renderer");
+const pollSource = sourceSection(js, "async function pollLive(",
+                                 "function stateClass(", "live poll");
+const systemRenderer = sourceSection(js, "function renderSystem(",
+                                     "function frameSummary(", "system renderer");
+const liveRenderer = sourceSection(js, "function renderLive(",
+                                   "function signalMeta(", "live renderer");
+assert(connectionSource.includes('byId("system-status").classList.toggle("is-stale", !connected)'),
+       "disconnected system snapshot handling missing");
+assert(connectionSource.includes("if (connected) return;") &&
+       !connectionSource.includes("renderSystem("),
+       "connected state must not render the previous System snapshot");
+assert(occurrenceCount(pollSource, "renderLive(live);") === 1 &&
+       occurrenceCount(liveRenderer, "renderSystem(live);") === 1,
+       "successful live polling must render the System snapshot exactly once");
+assert(js.includes('classList.contains("is-stale")'),
+       "cached system snapshots must not overwrite disconnected status");
+assert(js.includes("timedOut = true") && js.includes('error.name !== "AbortError" || timedOut'),
+       "live poll timeout must mark system status disconnected");
+assert(connectionSource.includes(
+  'document.querySelectorAll("#system-status .metric strong, #system-status .section-heading > .state")') &&
+       connectionSource.includes('setStatus(target.id, "Disconnected", "bad"'),
+       "disconnected system status treatment missing");
+assert.match(js, /heapCriticalBytes = 12 \* 1024;/, "critical heap threshold changed");
+assert.match(js, /heapWarningBytes = 24 \* 1024;/, "warning heap threshold changed");
+assert.match(systemRenderer,
+             /setStatus\("system-memory-summary", \w+ \? "Diagnostics unavailable" : formatBytes\(\w+\.heap_free\), \w+\)/,
+       "heap health tone missing from system summary");
+assert.match(systemRenderer,
+             /const \w+ = \w+ === "bad" \|\| \w+ === "bad" \? "bad" :\s*\w+ === "warn" \|\| \w+ === "warn" \? "warn" : "ok";/,
+       "runtime badge must include heap and service health");
+const compactSystemRenderer = compactSource(systemRenderer);
+const systemBindings =
+  /const \{ radio: (\w+), learning: (\w+), automation: (\w+), network: (\w+), system: (\w+) = null, errors: (\w+) = \{\} \} = live;/.exec(
+    compactSystemRenderer);
+assert(systemBindings, "previous live-schema object defaults missing");
+const [, radioBinding, learningBinding, automationBinding, networkBinding, systemBinding] =
+  systemBindings;
+assert(compactSystemRenderer.includes(`const chip = ${radioBinding}.cc1101;`) &&
+       systemRenderer.includes('"Diagnostics unavailable"') &&
+       systemRenderer.includes('"Diagnostics unavailable."') &&
+       js.includes('value ?? "-"') &&
+       /function formatError\(\w+\) \{ return \w+ (?:=== undefined|== null) \? "-"/.test(js) &&
+       /function formatBoolean\(\w+,[^}]+typeof \w+ === "boolean"/.test(js) &&
+       compactSystemRenderer.includes(`const sysLimited = !${systemBinding} || ${systemBinding}.heap_free == null;`) &&
+       compactSystemRenderer.includes(`const rfLimited = !chip || ${radioBinding}.truncated == null;`) &&
+       compactSystemRenderer.includes(
+         `const wLimited = ${networkBinding}.state == null || ${networkBinding}.event_drops == null;`) &&
+       compactSystemRenderer.includes(
+         `const svcLimited = ${learningBinding}.catalog_available == null || ${automationBinding}.log_drops == null;`),
+       "previous live-schema diagnostics must use bounded defaults and visible fallbacks");
+assert(compactSystemRenderer.includes('const wBadge = wTone === "bad" ? "Faulted" :'),
+       "hard Wi-Fi failures must not retain a stale online badge label");
+assert(compactSystemRenderer.includes(
+  `Boolean(${radioBinding}.transmitting || ${radioBinding}.maintenance)`) &&
+       compactSystemRenderer.includes("chip && !chip.available") &&
+       compactSystemRenderer.includes('["ESP_ERR_TIMEOUT", "ESP_ERR_INVALID_STATE"].includes(chip.error)') &&
+       /\? `Deferred \/ \$\{chip\.error\}`/.test(systemRenderer) &&
+       /!chip \|\| \w+ \? "warn"/.test(systemRenderer),
+       "busy CC1101 status deferral must remain warning-classified and retain its error");
+const bindingNames = new Map([
+  [radioBinding, "radio"], [learningBinding, "learn"], [automationBinding, "auto"],
+  [networkBinding, "wifi"],
+]);
+const healthCounterInputs = [...systemRenderer.matchAll(/hasCount\(([^)]*)\)/gs)]
+  .map((match) => {
+    let inputs = match[1].replaceAll("?.", ".");
+    for (const [binding, name] of bindingNames) inputs = inputs.replaceAll(`${binding}.`, `${name}.`);
+    return inputs;
+  })
+  .join(",");
+for (const counter of [
+  "radio.truncated", "radio.queue_drops", "radio.timeouts", "chip.recoveries",
+  "chip.ready_timeouts", "chip.state_timeouts", "wifi.event_drops", "learn.queue_drops",
+  "learn.catalog_errors", "auto.tx_errors", "auto.queue_drops", "auto.log_drops",
+]) assert(healthCounterInputs.includes(counter), `health counter input missing: ${counter}`);
+for (const counter of [
+  "radio.duplicates", "chip.resets", "auto.stale", "auto.ambiguous", "auto.suppressed",
+  "auto.log_events",
+]) assert(!healthCounterInputs.includes(counter), `normal counter must not degrade health: ${counter}`);
+for (const id of ["system-rf-diagnostics", "system-wifi-diagnostics", "system-services-diagnostics"]) {
+  assert(js.includes(`renderDetails(byId("${id}")`), `system diagnostics renderer missing: ${id}`);
+}
+assert(!js.includes('byId("runtime-details")'), "stale runtime details renderer remains");
 assert(js.includes("document.hidden"), "visibility-aware polling missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(js.includes("otaRebooting"), "OTA reconnect state missing");
@@ -111,7 +287,7 @@ for (const forbidden of [
          `forbidden or stale Web contract remains: ${forbidden}`);
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
-  const maximumSize = name === "app.js" ? 24 * 1024 : 20000;
+  const maximumSize = name === "app.js" ? 32 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

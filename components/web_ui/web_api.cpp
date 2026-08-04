@@ -8,6 +8,9 @@
 #include <new>
 
 #include "bridge_control.hpp"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "network_wifi.hpp"
 #include "rf_automation.hpp"
 #include "rf_automation_event.hpp"
@@ -255,6 +258,29 @@ const char *match_kind_name(LearnedMatchKind kind)
     return "invalid";
 }
 
+const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_UNKNOWN: return "unknown";
+        case ESP_RST_POWERON: return "power_on";
+        case ESP_RST_EXT: return "external";
+        case ESP_RST_SW: return "software";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep_sleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "sdio";
+        case ESP_RST_USB: return "usb";
+        case ESP_RST_JTAG: return "jtag";
+        case ESP_RST_EFUSE: return "efuse";
+        case ESP_RST_PWR_GLITCH: return "power_glitch";
+        case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+    }
+    return "unknown";
+}
+
 esp_err_t static_asset_handler(httpd_req_t *request)
 {
     const esp_err_t validation = require_empty_get(request);
@@ -290,6 +316,23 @@ esp_err_t live_handler(httpd_req_t *request)
     const esp_err_t wifi_error = get_network_wifi_status(&wifi);
     const esp_err_t frame_error = get_last_rf_frame_with_match(&frame, &match);
 
+    char escaped_ssid[kWifiSsidCapacity * 6U]{};
+    char escaped_saved_ssid[kWifiSsidCapacity * 6U]{};
+    char ip[16]{};
+    char netmask[16]{};
+    char gateway[16]{};
+    char dns[16]{};
+    if (!escape_web_json_string(wifi.active_ssid, escaped_ssid, sizeof(escaped_ssid)) ||
+        !escape_web_json_string(wifi.saved_ssid, escaped_saved_ssid,
+                                sizeof(escaped_saved_ssid)) ||
+        !format_web_ipv4(wifi.ip, ip, sizeof(ip)) ||
+        !format_web_ipv4(wifi.netmask, netmask, sizeof(netmask)) ||
+        !format_web_ipv4(wifi.gateway, gateway, sizeof(gateway)) ||
+        !format_web_ipv4(wifi.dns, dns, sizeof(dns))) {
+        return send_api_error(request, "500 Internal Server Error", "status_format_failed",
+                              ESP_ERR_INVALID_SIZE);
+    }
+
     esp_err_t error = start_chunked_json(request);
     char scratch[kScratchSize]{};
     if (error == ESP_OK) {
@@ -302,25 +345,55 @@ esp_err_t live_handler(httpd_req_t *request)
             scratch, sizeof(scratch),
             "{\"radio\":{\"available\":%s,\"running\":%s,\"rx\":\"%s\","
             "\"transmitting\":%s,\"maintenance\":%s,\"accepted\":%lu,"
-            "\"duplicates\":%lu,\"queue_drops\":%lu,\"timeouts\":%lu},",
+            "\"duplicates\":%lu,\"queue_drops\":%lu,\"timeouts\":%lu,"
+            "\"truncated\":%lu,\"frequency_hz\":%lu,\"tx_power_dbm\":%d,"
+            "\"cc1101\":{\"available\":%s,\"error\":\"%s\"",
             radio_error == ESP_OK ? "true" : "false",
             radio_error == ESP_OK && radio.running ? "true" : "false", rx_state,
             radio.transmitting ? "true" : "false", radio.maintenance_active ? "true" : "false",
             static_cast<unsigned long>(radio.accepted_frames),
             static_cast<unsigned long>(radio.suppressed_duplicates),
             static_cast<unsigned long>(radio.rx_queue_drops),
-            static_cast<unsigned long>(radio.command_timeouts));
+            static_cast<unsigned long>(radio.command_timeouts),
+            static_cast<unsigned long>(radio.truncated_captures),
+            static_cast<unsigned long>(CONFIG_CC1101_FREQUENCY_HZ),
+            static_cast<int>(CONFIG_CC1101_TX_POWER_DBM),
+            radio.cc1101_info_valid ? "true" : "false", esp_err_to_name(radio.cc1101_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK && radio.cc1101_info_valid) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            ",\"part\":%u,\"version\":%u,\"marc_state\":%u,\"rssi_dbm_x2\":%d,"
+            "\"carrier_sense\":%s,\"clear_channel\":%s,\"resets\":%lu,"
+            "\"recoveries\":%lu,\"ready_timeouts\":%lu,\"state_timeouts\":%lu}},",
+            radio.cc1101.part_number, radio.cc1101.version, radio.cc1101.marc_state,
+            static_cast<int>(radio.cc1101.rssi_dbm_x2),
+            radio.cc1101.carrier_sense ? "true" : "false",
+            radio.cc1101.clear_channel ? "true" : "false",
+            static_cast<unsigned long>(radio.cc1101.reset_count),
+            static_cast<unsigned long>(radio.cc1101.recovery_count),
+            static_cast<unsigned long>(radio.cc1101.ready_timeout_count),
+            static_cast<unsigned long>(radio.cc1101.state_timeout_count));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    } else if (error == ESP_OK) {
+        error = send_chunk(request, "}},");
     }
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
             "\"learning\":{\"available\":%s,\"state\":\"%s\",\"revision\":%lu,"
-            "\"name\":\"%s\",\"result\":\"%s\",\"count\":%u},",
+            "\"name\":\"%s\",\"result\":\"%s\",\"count\":%u,"
+            "\"catalog_available\":%s,\"queue_drops\":%lu,\"catalog_errors\":%lu,"
+            "\"initialization_error\":\"%s\"},",
             signals_error == ESP_OK && signals.available ? "true" : "false",
             learning_state_name(signals.learning_state),
             static_cast<unsigned long>(signals.learning_revision), signals.learning_name,
-            esp_err_to_name(signals.learning_result), signals.learned_count);
+            esp_err_to_name(signals.learning_result), signals.learned_count,
+            signals.catalog_available ? "true" : "false",
+            static_cast<unsigned long>(signals.queue_drops),
+            static_cast<unsigned long>(signals.catalog_errors),
+            esp_err_to_name(signals.initialization_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK && frame_error == ESP_ERR_NOT_FOUND) {
@@ -358,27 +431,91 @@ esp_err_t live_handler(httpd_req_t *request)
             scratch, sizeof(scratch),
             "\"automation\":{\"available\":%s,\"enabled\":%s,\"runtime_paused\":%s,"
             "\"log_mode\":\"%s\",\"rules\":%u,\"frames\":%lu,\"matches\":%lu,"
-            "\"actions\":%lu,\"suppressed\":%lu,\"tx_errors\":%lu,"
-            "\"last_trigger\":\"%s\",\"last_target\":\"%s\"},",
+            "\"stale\":%lu,\"ambiguous\":%lu,",
             automation_error == ESP_OK && automation.available ? "true" : "false",
             automation.enabled ? "true" : "false", automation.runtime_paused ? "true" : "false",
             automation.log_mode_known ? rf_automation_log_mode_name(automation.log_mode) : "unknown",
             automation.rule_count, static_cast<unsigned long>(automation.frames_seen),
             static_cast<unsigned long>(automation.matches),
+            static_cast<unsigned long>(automation.stale_frames),
+            static_cast<unsigned long>(automation.ambiguous_frames));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"actions\":%lu,\"suppressed\":%lu,\"tx_errors\":%lu,"
+            "\"queue_drops\":%lu,\"log_events\":%lu,\"log_drops\":%lu,"
+            "\"initialization_error\":\"%s\",\"last_error\":\"%s\","
+            "\"last_trigger\":\"%s\",\"last_target\":\"%s\"},",
             static_cast<unsigned long>(automation.actions_succeeded),
             static_cast<unsigned long>(automation.cooldown_suppressed),
-            static_cast<unsigned long>(automation.tx_errors), automation.last_trigger,
+            static_cast<unsigned long>(automation.tx_errors),
+            static_cast<unsigned long>(automation.queue_drops),
+            static_cast<unsigned long>(automation.log_events),
+            static_cast<unsigned long>(automation.log_drops),
+            esp_err_to_name(automation.initialization_error),
+            esp_err_to_name(automation.last_error), automation.last_trigger,
             automation.last_target);
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "\"network\":{\"available\":%s,\"online\":%s,\"rssi\":%d},"
+            "\"network\":{\"available\":%s,\"online\":%s,\"rssi\":%d,"
+            "\"state\":\"%s\",\"driver_initialized\":%s,\"driver_started\":%s,"
+            "\"scan_running\":%s,\"ota_locked\":%s,",
+            wifi_error == ESP_OK && wifi.available ? "true" : "false",
+            wifi_error == ESP_OK && wifi.available &&
+                    wifi.state == NetworkWifiState::kOnline && wifi.ip != 0
+                ? "true"
+                : "false",
+            static_cast<int>(wifi.rssi),
+            network_wifi_state_name(wifi.state), wifi.driver_initialized ? "true" : "false",
+            wifi.driver_started ? "true" : "false", wifi.scan_running ? "true" : "false",
+            wifi.ota_locked ? "true" : "false");
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"ssid\":\"%s\",\"saved_ssid\":\"%s\",\"saved_known\":%s,"
+            "\"saved\":%s,\"active_saved\":%s,",
+            escaped_ssid, escaped_saved_ssid, wifi.saved_known ? "true" : "false",
+            wifi.saved ? "true" : "false", wifi.active_saved ? "true" : "false");
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"ip\":\"%s\",\"netmask\":\"%s\",\"gateway\":\"%s\",\"dns\":\"%s\","
+            "\"retries\":%lu,\"event_drops\":%lu,\"disconnect_reason\":%ld,"
+            "\"initialization_error\":\"%s\",\"persistence_error\":\"%s\","
+            "\"last_error\":\"%s\"},",
+            ip, netmask, gateway, dns, static_cast<unsigned long>(wifi.retry_count),
+            static_cast<unsigned long>(wifi.event_drops),
+            static_cast<long>(wifi.disconnect_reason), esp_err_to_name(wifi.initialization_error),
+            esp_err_to_name(wifi.persistence_error), esp_err_to_name(wifi.last_error));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        constexpr uint32_t kHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"system\":{\"uptime_ms\":%llu,\"reset_reason\":\"%s\",\"heap_free\":%u,"
+            "\"heap_minimum\":%u,\"heap_largest\":%u},",
+            static_cast<unsigned long long>(esp_timer_get_time() / 1000),
+            reset_reason_name(esp_reset_reason()),
+            static_cast<unsigned>(heap_caps_get_free_size(kHeapCaps)),
+            static_cast<unsigned>(heap_caps_get_minimum_free_size(kHeapCaps)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(kHeapCaps)));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
             "\"errors\":{\"radio\":\"%s\",\"signals\":\"%s\","
             "\"automation\":\"%s\",\"wifi\":\"%s\"}}",
-            wifi_error == ESP_OK && wifi.available ? "true" : "false",
-            network_wifi_is_online() ? "true" : "false", static_cast<int>(wifi.rssi),
             esp_err_to_name(radio_error), esp_err_to_name(signals_error),
             esp_err_to_name(automation_error), esp_err_to_name(wifi_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));

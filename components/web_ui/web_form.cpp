@@ -166,16 +166,6 @@ bool valid_name_or_empty(const Field &field, char *output, std::size_t capacity)
     return valid_name(field, output, capacity);
 }
 
-bool format_ipv4(uint32_t ipv4, char *output, std::size_t capacity)
-{
-    const int length = std::snprintf(output, capacity, "%u.%u.%u.%u",
-                                     static_cast<unsigned>(ipv4 & 0xffU),
-                                     static_cast<unsigned>((ipv4 >> 8U) & 0xffU),
-                                     static_cast<unsigned>((ipv4 >> 16U) & 0xffU),
-                                     static_cast<unsigned>((ipv4 >> 24U) & 0xffU));
-    return length > 0 && static_cast<std::size_t>(length) < capacity;
-}
-
 bool host_matches_ipv4_text(const char *host, const char *address, uint16_t port)
 {
     if (host == nullptr || address == nullptr) {
@@ -414,7 +404,7 @@ bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_po
         return false;
     }
     char address[32]{};
-    return format_ipv4(ipv4, address, sizeof(address)) &&
+    return format_web_ipv4(ipv4, address, sizeof(address)) &&
            host_matches_ipv4_text(host, address, expected_port);
 }
 
@@ -463,6 +453,74 @@ bool escape_web_html(const char *input, char *output, std::size_t capacity,
     output[used] = '\0';
     if (output_length != nullptr) {
         *output_length = used;
+    }
+    return true;
+}
+
+bool escape_web_json_string(const char *input, char *output, std::size_t capacity,
+                            std::size_t *output_length)
+{
+    if (output_length != nullptr) {
+        *output_length = 0;
+    }
+    if (input == nullptr || output == nullptr || capacity == 0) {
+        return false;
+    }
+    constexpr char kHexDigits[] = "0123456789ABCDEF";
+    std::size_t used = 0;
+    for (const char *cursor = input; *cursor != '\0'; ++cursor) {
+        const unsigned char character = static_cast<unsigned char>(*cursor);
+        char escaped[6]{};
+        const char *replacement = cursor;
+        std::size_t replacement_length = 1;
+        switch (character) {
+            case '"': replacement = "\\\""; replacement_length = 2; break;
+            case '\\': replacement = "\\\\"; replacement_length = 2; break;
+            case '\b': replacement = "\\b"; replacement_length = 2; break;
+            case '\f': replacement = "\\f"; replacement_length = 2; break;
+            case '\n': replacement = "\\n"; replacement_length = 2; break;
+            case '\r': replacement = "\\r"; replacement_length = 2; break;
+            case '\t': replacement = "\\t"; replacement_length = 2; break;
+            default:
+                if (character < 0x20U) {
+                    escaped[0] = '\\';
+                    escaped[1] = 'u';
+                    escaped[2] = '0';
+                    escaped[3] = '0';
+                    escaped[4] = kHexDigits[character >> 4U];
+                    escaped[5] = kHexDigits[character & 0x0fU];
+                    replacement = escaped;
+                    replacement_length = sizeof(escaped);
+                }
+                break;
+        }
+        if (replacement_length >= capacity - used) {
+            output[0] = '\0';
+            return false;
+        }
+        std::memcpy(output + used, replacement, replacement_length);
+        used += replacement_length;
+    }
+    output[used] = '\0';
+    if (output_length != nullptr) {
+        *output_length = used;
+    }
+    return true;
+}
+
+bool format_web_ipv4(uint32_t ipv4, char *output, std::size_t capacity)
+{
+    if (output == nullptr || capacity == 0) {
+        return false;
+    }
+    const int length = std::snprintf(output, capacity, "%u.%u.%u.%u",
+                                     static_cast<unsigned>(ipv4 & 0xffU),
+                                     static_cast<unsigned>((ipv4 >> 8U) & 0xffU),
+                                     static_cast<unsigned>((ipv4 >> 16U) & 0xffU),
+                                     static_cast<unsigned>((ipv4 >> 24U) & 0xffU));
+    if (length < 0 || static_cast<std::size_t>(length) >= capacity) {
+        output[0] = '\0';
+        return false;
     }
     return true;
 }

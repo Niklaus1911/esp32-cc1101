@@ -151,13 +151,17 @@ The Web UI is a compact static HTML/CSS/JavaScript application served on port `8
 
 The Web surface calls typed services directly and provides:
 
-- Live radio, receiver, Wi-Fi, learning, latest-frame, and automation status.
+- A health-first System dashboard with live CC1101 identity/state, RF configuration
+  and counters, Wi-Fi addressing and retry diagnostics, uptime/reset reason,
+  internal-heap telemetry, and learning/automation service health.
 - Learning and cancellation.
 - Latest-frame and named learned-signal replay with bounded repeats.
 - Learned-signal metadata and deletion with rule-reference protection.
 - Decoded and raw RF transmission forms.
 - Automation rule add/remove/enable/disable and log-mode controls.
 - OTA status and direct application-image upload with progress and reboot recovery.
+
+The System dashboard is diagnostic-only apart from its existing firmware upload. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
 
 The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
 
