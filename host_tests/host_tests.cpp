@@ -636,6 +636,18 @@ void test_console_formatter()
                 std::strstr(line, "Console drops") != nullptr,
             "system dashboard row accepts existing labels");
     require(rfbridge::format_console_dashboard_row(
+                "Advertised", "32", ConsoleTone::kInfo, "Current", "32",
+                ConsoleTone::kInfo, line, sizeof(line)),
+            "MQTT discovery count row fits the dashboard");
+    require(rfbridge::format_console_dashboard_value(
+                "Heap bytes", "123456 / 123456 / 123456", ConsoleTone::kInfo, line,
+                sizeof(line)),
+            "MQTT heap telemetry fits the dashboard");
+    require(rfbridge::format_console_dashboard_row(
+                "MQTT stack", "6144", ConsoleTone::kInfo, "Worker stack", "4096",
+                ConsoleTone::kInfo, line, sizeof(line)),
+            "MQTT task stack telemetry fits the dashboard");
+    require(rfbridge::format_console_dashboard_row(
                 "1234567890123", "1234567890123456789012", ConsoleTone::kSuccess,
                 "1234567890123", "1234567890123456789012", ConsoleTone::kInfo, line,
                 sizeof(line)),

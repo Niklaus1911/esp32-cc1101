@@ -1347,19 +1347,23 @@ int render_service_status()
                               : status.discovery_state == NetworkMqttDiscoveryState::kFaulted
                                     ? ConsoleTone::kError
                                     : ConsoleTone::kMuted);
-    std::snprintf(left, sizeof(left), "%u advertised / %u current",
-                  status.advertised_count, status.current_count);
+    std::snprintf(left, sizeof(left), "%u", status.advertised_count);
+    std::snprintf(right, sizeof(right), "%u", status.current_count);
+    print_dashboard_row("Advertised", left, ConsoleTone::kInfo, "Current", right,
+                        ConsoleTone::kInfo);
     std::snprintf(right, sizeof(right), "%lu / %lu / %lu",
                   static_cast<unsigned long>(status.heap_free),
                   static_cast<unsigned long>(status.heap_minimum),
                   static_cast<unsigned long>(status.heap_largest));
-    print_dashboard_row("Discovery", left, ConsoleTone::kInfo, "Heap free/min/largest", right,
-                        ConsoleTone::kInfo);
-    std::snprintf(left, sizeof(left), "%lu / %lu",
-                  static_cast<unsigned long>(status.mqtt_stack_minimum_free),
+    print_dashboard_value("Heap bytes", right, ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%lu",
+                  static_cast<unsigned long>(status.mqtt_stack_minimum_free));
+    std::snprintf(right, sizeof(right), "%lu",
                   static_cast<unsigned long>(status.worker_stack_minimum_free));
-    print_dashboard_value("MQTT/worker stack", left,
-                          status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted);
+    print_dashboard_row("MQTT stack", left,
+                        status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted,
+                        "Worker stack", right,
+                        status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted);
     print_dashboard_row("Profile error", esp_err_to_name(status.profile_error),
                         status.profile_error == ESP_OK ? ConsoleTone::kSuccess
                                                        : ConsoleTone::kError,
