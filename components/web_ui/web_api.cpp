@@ -12,6 +12,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "network_wifi.hpp"
+#include "network_mdns.hpp"
 #include "rf_automation.hpp"
 #include "rf_automation_event.hpp"
 #include "rf_ook.hpp"
@@ -117,26 +118,35 @@ bool read_header(httpd_req_t *request, const char *name, char *output, std::size
            httpd_req_get_hdr_value_str(request, name, output, capacity) == ESP_OK;
 }
 
-bool request_host_matches_device(httpd_req_t *request, uint32_t *device_ip)
+bool request_host_matches_device(httpd_req_t *request, WebDeviceHost *validated_host)
 {
     NetworkWifiStatus wifi{};
-    char host[64]{};
+    NetworkHostnameStatus hostname{};
+    NetworkMdnsStatus mdns{};
+    char host[96]{};
     if (!read_header(request, "Host", host, sizeof(host)) ||
         get_network_wifi_status(&wifi) != ESP_OK ||
-        !web_host_matches_ipv4(host, wifi.ip, kHttpPort)) {
+        get_network_hostname_status(&hostname) != ESP_OK) {
         return false;
     }
-    if (device_ip != nullptr) {
-        *device_ip = wifi.ip;
+    (void)get_network_mdns_status(&mdns);
+    WebDeviceHost parsed{};
+    if (!parse_web_device_host(host, wifi.ip, hostname.configured_hostname,
+                               mdns.effective_known ? mdns.effective_hostname : nullptr,
+                               kHttpPort, &parsed)) {
+        return false;
+    }
+    if (validated_host != nullptr) {
+        *validated_host = parsed;
     }
     return true;
 }
 
-bool request_origin_matches_device(httpd_req_t *request, uint32_t device_ip)
+bool request_origin_matches_device(httpd_req_t *request, const WebDeviceHost &host)
 {
-    char origin[96]{};
+    char origin[112]{};
     return read_header(request, "Origin", origin, sizeof(origin)) &&
-           web_origin_matches_ipv4(origin, device_ip, kHttpPort);
+           web_origin_matches_device_host(origin, host, kHttpPort);
 }
 
 bool request_content_type_is(httpd_req_t *request,
@@ -149,9 +159,9 @@ bool request_content_type_is(httpd_req_t *request,
 
 bool validate_mutation_headers(httpd_req_t *request, bool require_form_content_type)
 {
-    uint32_t device_ip = 0;
-    return request_host_matches_device(request, &device_ip) &&
-           request_origin_matches_device(request, device_ip) &&
+    WebDeviceHost host{};
+    return request_host_matches_device(request, &host) &&
+           request_origin_matches_device(request, host) &&
            (!require_form_content_type ||
             request_content_type_is(request, web_form_content_type_is_valid));
 }
@@ -308,12 +318,14 @@ esp_err_t live_handler(httpd_req_t *request)
     RfSignalsStatus signals{};
     RfAutomationStatus automation{};
     NetworkWifiStatus wifi{};
+    NetworkMdnsStatus mdns{};
     RfFrame frame{};
     LearnedMatch match{};
     const esp_err_t radio_error = get_rf_radio_status(&radio);
     const esp_err_t signals_error = get_rf_signals_status(&signals);
     const esp_err_t automation_error = rf_automation_get_status(&automation);
     const esp_err_t wifi_error = get_network_wifi_status(&wifi);
+    const esp_err_t mdns_error = get_network_mdns_status(&mdns);
     const esp_err_t frame_error = get_last_rf_frame_with_match(&frame, &match);
 
     char escaped_ssid[kWifiSsidCapacity * 6U]{};
@@ -499,6 +511,35 @@ esp_err_t live_handler(httpd_req_t *request)
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"mdns\":{\"available\":%s,\"state\":\"%s\","
+            "\"configured_hostname\":\"%s\",\"hostname_custom\":%s,"
+            "\"effective_hostname\":\"%s\",\"effective_known\":%s,"
+            "\"conflict_renamed\":%s,\"http_registered\":%s,"
+            "\"rfbridge_registered\":%s,",
+            mdns_error == ESP_OK && mdns.available ? "true" : "false",
+            network_mdns_state_name(mdns.state), mdns.configured_hostname,
+            mdns.hostname_custom ? "true" : "false", mdns.effective_hostname,
+            mdns.effective_known ? "true" : "false",
+            mdns.conflict_renamed ? "true" : "false",
+            mdns.http_service_registered ? "true" : "false",
+            mdns.rfbridge_service_registered ? "true" : "false");
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"configured_generation\":%lu,\"applied_generation\":%lu,"
+            "\"heartbeat_age_ms\":%lu,\"initialization_error\":\"%s\","
+            "\"last_error\":\"%s\"},",
+            static_cast<unsigned long>(mdns.configured_generation),
+            static_cast<unsigned long>(mdns.applied_generation),
+            static_cast<unsigned long>(mdns.owner_heartbeat_age_ms),
+            esp_err_to_name(mdns.initialization_error), esp_err_to_name(mdns.last_error));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
         constexpr uint32_t kHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
         const int length = std::snprintf(
             scratch, sizeof(scratch),
@@ -515,9 +556,10 @@ esp_err_t live_handler(httpd_req_t *request)
         const int length = std::snprintf(
             scratch, sizeof(scratch),
             "\"errors\":{\"radio\":\"%s\",\"signals\":\"%s\","
-            "\"automation\":\"%s\",\"wifi\":\"%s\"}}",
+            "\"automation\":\"%s\",\"wifi\":\"%s\",\"mdns\":\"%s\"}}",
             esp_err_to_name(radio_error), esp_err_to_name(signals_error),
-            esp_err_to_name(automation_error), esp_err_to_name(wifi_error));
+            esp_err_to_name(automation_error), esp_err_to_name(wifi_error),
+            esp_err_to_name(mdns_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error != ESP_OK) {
@@ -826,8 +868,8 @@ esp_err_t register_handler(httpd_handle_t server, const char *uri, httpd_method_
 
 esp_err_t authorize_web_ota_request(httpd_req_t *request, void *)
 {
-    uint32_t device_ip = 0;
-    if (request == nullptr || !request_host_matches_device(request, &device_ip)) {
+    WebDeviceHost host{};
+    if (request == nullptr || !request_host_matches_device(request, &host)) {
         if (request != nullptr) {
             reject_request(request, "403 Forbidden", "host_rejected", ESP_ERR_INVALID_STATE);
         }
@@ -841,7 +883,7 @@ esp_err_t authorize_web_ota_request(httpd_req_t *request, void *)
         }
         return ESP_OK;
     }
-    if (request->method != HTTP_POST || !request_origin_matches_device(request, device_ip) ||
+    if (request->method != HTTP_POST || !request_origin_matches_device(request, host) ||
         !request_content_type_is(request, web_octet_stream_content_type_is_valid)) {
         reject_request(request, "403 Forbidden", "origin_rejected", ESP_ERR_INVALID_STATE);
         return ESP_FAIL;

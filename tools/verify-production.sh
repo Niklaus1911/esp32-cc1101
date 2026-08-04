@@ -11,6 +11,8 @@ readonly BUILD_LOG="$LOG_DIR/build.log"
 readonly SIZE_LOG="$LOG_DIR/size.log"
 readonly IMAGE_INFO_LOG="$LOG_DIR/image-info.log"
 readonly PARTITION_INFO_LOG="$LOG_DIR/partition-info.log"
+readonly MDNS_MANIFEST="$PROJECT_ROOT/components/network_mdns/idf_component.yml"
+readonly DEPENDENCY_LOCK="$PROJECT_ROOT/dependencies.lock"
 readonly IMAGE="$BUILD_DIR/esp32-cc1101.bin"
 readonly PARTITION_BIN="$BUILD_DIR/partition_table/partition-table.bin"
 readonly SDKCONFIG_HEADER="$BUILD_DIR/config/sdkconfig.h"
@@ -68,8 +70,9 @@ run_logged "ESP-IDF production build" "$BUILD_LOG" "$IDF_PYTHON" "$IDF_CLI" -B "
     -DSDKCONFIG="$PRODUCTION_SDKCONFIG" build
 run_logged "ESP-IDF size report" "$SIZE_LOG" "$IDF_PYTHON" "$IDF_CLI" -B "$BUILD_DIR" size
 
-if [[ ! -f "$IMAGE" || ! -f "$PARTITION_BIN" || ! -f "$SDKCONFIG_HEADER" ]]; then
-    printf 'Expected image, partition table, or generated sdkconfig was not produced\n' >&2
+if [[ ! -f "$IMAGE" || ! -f "$PARTITION_BIN" || ! -f "$SDKCONFIG_HEADER" ||
+      ! -f "$MDNS_MANIFEST" || ! -f "$DEPENDENCY_LOCK" ]]; then
+    printf 'Expected image, partition table, generated sdkconfig, or dependency metadata was not produced\n' >&2
     exit 1
 fi
 if (( $(wc -c <"$IMAGE") > OTA_SLOT_SIZE - OTA_MIN_FREE )); then
@@ -101,6 +104,19 @@ require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_ACTIVE_
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_RF_ACTIVITY_LED_PULSE_MS 25$' 'RF activity LED pulse duration'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_PORT 80$' 'shared Web and OTA HTTP port'
 require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_OTA_HTTP_TASK_STACK_SIZE 8192$' 'bounded OTA HTTP task stack contract'
+require_log_pattern "$MDNS_MANIFEST" '^  espressif/mdns: "1\.11\.3"$' 'exact mDNS manifest dependency'
+require_log_pattern "$DEPENDENCY_LOCK" '^    version: 1\.11\.3$' 'mDNS 1.11.3 dependency lock'
+require_log_pattern "$DEPENDENCY_LOCK" '^- espressif/mdns$' 'direct mDNS dependency lock entry'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_MDNS_MAX_INTERFACES 2$' 'mDNS two-slot 1.11.3 compatibility bound'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_MDNS_MAX_SERVICES 2$' 'mDNS service bound'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_MDNS_ACTION_QUEUE_LEN 8$' 'mDNS action queue bound'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_MDNS_TASK_STACK_SIZE 4096$' 'mDNS task stack bound'
+require_log_pattern "$SDKCONFIG_HEADER" '^#define CONFIG_MDNS_PREDEF_NETIF_STA 1$' 'mDNS STA interface enabled'
+if grep -Eq '^#define CONFIG_MDNS_(PREDEF_NETIF_AP|PREDEF_NETIF_ETH|ENABLE_CONSOLE_CLI|MULTIPLE_INSTANCE) 1$' \
+        "$SDKCONFIG_HEADER"; then
+    printf 'Production verification failed: an unsupported mDNS interface or feature is enabled\n' >&2
+    exit 1
+fi
 require_log_pattern "$PROJECT_ROOT/components/web_ui/web_ui.cpp" '^constexpr uint16_t kHttpPort = 80;$' 'fixed responsive Web HTTP port'
 require_log_pattern "$PROJECT_ROOT/components/web_ui/web_ui.cpp" '^constexpr uint32_t kHttpTaskStackSize = 8192;$' 'bounded responsive Web HTTP task stack'
 

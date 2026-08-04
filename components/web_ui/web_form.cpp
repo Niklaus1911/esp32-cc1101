@@ -201,6 +201,61 @@ bool same_default_port_host(const char *left, const char *right)
            std::memcmp(left, right, left_length) == 0;
 }
 
+bool strip_expected_port(const char *input, uint16_t expected_port, char *output,
+                         std::size_t capacity)
+{
+    if (input == nullptr || output == nullptr || capacity == 0) {
+        return false;
+    }
+    const std::size_t length = std::strlen(input);
+    char port[8]{};
+    const int port_length = std::snprintf(port, sizeof(port), ":%u",
+                                          static_cast<unsigned>(expected_port));
+    if (port_length <= 0 || static_cast<std::size_t>(port_length) >= sizeof(port)) {
+        return false;
+    }
+    std::size_t host_length = length;
+    if (length > static_cast<std::size_t>(port_length) &&
+        std::memcmp(input + length - port_length, port, port_length) == 0) {
+        host_length -= static_cast<std::size_t>(port_length);
+    } else if (std::strchr(input, ':') != nullptr) {
+        return false;
+    }
+    if (host_length == 0 || host_length >= capacity) {
+        return false;
+    }
+    for (std::size_t index = 0; index < host_length; ++index) {
+        const unsigned char value = static_cast<unsigned char>(input[index]);
+        if (value < 0x21U || value > 0x7eU || value == '/' || value == '@' || value == '#') {
+            return false;
+        }
+        output[index] = value >= 'A' && value <= 'Z'
+                            ? static_cast<char>(value - 'A' + 'a')
+                            : static_cast<char>(value);
+    }
+    output[host_length] = '\0';
+    return true;
+}
+
+bool hostname_local_equals(const char *normalized, const char *hostname)
+{
+    if (normalized == nullptr || hostname == nullptr || hostname[0] == '\0') {
+        return false;
+    }
+    char expected[kWebDeviceHostCapacity]{};
+    const int length = std::snprintf(expected, sizeof(expected), "%s.local", hostname);
+    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(expected)) {
+        return false;
+    }
+    for (std::size_t index = 0; expected[index] != '\0'; ++index) {
+        const unsigned char value = static_cast<unsigned char>(expected[index]);
+        if (value >= 'A' && value <= 'Z') {
+            expected[index] = static_cast<char>(value - 'A' + 'a');
+        }
+    }
+    return std::strcmp(normalized, expected) == 0;
+}
+
 }  // namespace
 
 bool parse_web_learn_form(const char *body, std::size_t length, char *name,
@@ -423,6 +478,43 @@ bool web_origin_matches_host(const char *origin, const char *host)
     return origin != nullptr && host != nullptr &&
            std::strncmp(origin, prefix, sizeof(prefix) - 1U) == 0 &&
            same_default_port_host(origin + sizeof(prefix) - 1U, host);
+}
+
+bool parse_web_device_host(const char *host, uint32_t ipv4, const char *configured_hostname,
+                           const char *effective_hostname, uint16_t expected_port,
+                           WebDeviceHost *output)
+{
+    if (output == nullptr || ipv4 == 0) {
+        return false;
+    }
+    char normalized[kWebDeviceHostCapacity]{};
+    if (!strip_expected_port(host, expected_port, normalized, sizeof(normalized))) {
+        return false;
+    }
+    char address[32]{};
+    if (!format_web_ipv4(ipv4, address, sizeof(address))) {
+        return false;
+    }
+    if (std::strcmp(normalized, address) != 0 &&
+        !hostname_local_equals(normalized, configured_hostname) &&
+        !hostname_local_equals(normalized, effective_hostname)) {
+        return false;
+    }
+    std::memcpy(output->normalized, normalized, std::strlen(normalized) + 1U);
+    return true;
+}
+
+bool web_origin_matches_device_host(const char *origin, const WebDeviceHost &host,
+                                    uint16_t expected_port)
+{
+    constexpr char prefix[] = "http://";
+    if (origin == nullptr || std::strncmp(origin, prefix, sizeof(prefix) - 1U) != 0) {
+        return false;
+    }
+    char normalized[kWebDeviceHostCapacity]{};
+    return strip_expected_port(origin + sizeof(prefix) - 1U, expected_port, normalized,
+                               sizeof(normalized)) &&
+           std::strcmp(normalized, host.normalized) == 0;
 }
 
 bool escape_web_html(const char *input, char *output, std::size_t capacity,

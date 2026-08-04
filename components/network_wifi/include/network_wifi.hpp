@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "network_hostname_config.hpp"
 #include "network_wifi_config.hpp"
 #include "network_wifi_state.hpp"
 
@@ -56,6 +57,17 @@ struct NetworkWifiStatus {
     esp_err_t last_error = ESP_OK;
 };
 
+struct NetworkHostnameStatus {
+    char default_hostname[kNetworkHostnameCapacity]{};
+    char configured_hostname[kNetworkHostnameCapacity]{};
+    char mac_suffix[kNetworkHostnameMacSuffixCapacity]{};
+    bool custom = false;
+    uint32_t configured_generation = 0;
+    uint32_t netif_applied_generation = 0;
+    esp_err_t persistence_error = ESP_OK;
+    esp_err_t last_apply_error = ESP_OK;
+};
+
 // Runs on the network owner task. Sinks must use only bounded zero-wait operations and must not call
 // network Wi-Fi APIs. Returning false asks the owner to retry critical connection events.
 using NetworkWifiEventSink = bool (*)(const NetworkWifiEvent &event, void *context);
@@ -68,6 +80,9 @@ esp_err_t stop_network_wifi();
 esp_err_t forget_network_wifi();
 esp_err_t scan_network_wifi();
 esp_err_t get_network_wifi_status(NetworkWifiStatus *status);
+esp_err_t get_network_hostname_status(NetworkHostnameStatus *status);
+esp_err_t set_network_hostname(const char *hostname);
+esp_err_t reset_network_hostname();
 esp_err_t set_network_wifi_event_sink(NetworkWifiEventSink sink, void *context);
 esp_err_t set_network_wifi_online_sink(NetworkWifiOnlineSink sink, void *context);
 esp_err_t set_network_wifi_ota_lock(bool enabled);

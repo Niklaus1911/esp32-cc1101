@@ -7,6 +7,8 @@ find_program(NODE_EXECUTABLE node REQUIRED)
 
 add_executable(rf_host_tests
     host_tests.cpp
+    ../components/network_mdns/network_mdns_policy.cpp
+    ../components/network_wifi/network_hostname_config.cpp
     ../components/network_wifi/network_wifi_config.cpp
     ../components/network_wifi/network_wifi_state.cpp
     ../components/ota_update/ota_update_policy.cpp
@@ -22,6 +24,7 @@ add_executable(rf_host_tests
     ../components/web_ui/web_form.cpp
 )
 target_include_directories(rf_host_tests PRIVATE
+    ../components/network_mdns/include
     ../components/network_wifi/include
     ../components/ota_update/include
     ../components/rf_automation/include

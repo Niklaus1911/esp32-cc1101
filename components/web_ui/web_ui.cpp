@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "network_mdns.hpp"
 #include "ota_update.hpp"
 #include "web_api.hpp"
 
@@ -22,6 +23,7 @@ constexpr uint32_t kServiceTaskStackSize = 4608;
 constexpr uint32_t kInternalHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr UBaseType_t kServiceTaskPriority = 3;
 constexpr TickType_t kRetryDelay = pdMS_TO_TICKS(5000);
+constexpr TickType_t kMdnsPollDelay = pdMS_TO_TICKS(1000);
 
 static_assert(kHttpTaskStackSize >= 8192U);
 static_assert(kServiceTaskStackSize >= 4096U);
@@ -145,6 +147,19 @@ esp_err_t start_server() {
              static_cast<unsigned>(kHttpPort), static_cast<unsigned>(service_stack_minimum_free()),
              static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
+    ESP_LOGI(kTag, "Starting mDNS after HTTP readiness; service stack min free=%u; heap free=%u largest=%u",
+             static_cast<unsigned>(service_stack_minimum_free()),
+             static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
+    const esp_err_t mdns_error = start_network_mdns(kHttpPort);
+    if (mdns_error != ESP_OK) {
+        ESP_LOGE(kTag, "mDNS startup failed without stopping HTTP: %s",
+                 esp_err_to_name(mdns_error));
+    }
+    ESP_LOGI(kTag, "mDNS startup returned; service stack min free=%u; heap free=%u largest=%u",
+             static_cast<unsigned>(service_stack_minimum_free()),
+             static_cast<unsigned>(heap_caps_get_free_size(kInternalHeapCaps)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kInternalHeapCaps)));
     return ESP_OK;
 }
 
@@ -206,6 +221,12 @@ void service_task(void *) {
             const esp_err_t error = stop_server();
             if (error != ESP_OK) {
                 wait = kRetryDelay;
+            }
+        }
+        if (network_mdns_is_active()) {
+            (void)reconcile_network_mdns();
+            if (wait == portMAX_DELAY || wait > kMdnsPollDelay) {
+                wait = kMdnsPollDelay;
             }
         }
         ulTaskNotifyTake(pdTRUE, wait);

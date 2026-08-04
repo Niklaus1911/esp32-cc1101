@@ -7,6 +7,11 @@ namespace rfbridge {
 
 constexpr std::size_t kWebMaxRawPulses = 256;
 constexpr std::size_t kWebNameCapacity = 16;
+constexpr std::size_t kWebDeviceHostCapacity = 80;
+
+struct WebDeviceHost {
+    char normalized[kWebDeviceHostCapacity]{};
+};
 
 enum class WebRulePatch : uint8_t {
     kEnabled,
@@ -65,6 +70,11 @@ bool web_octet_stream_content_type_is_valid(const char *content_type);
 bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_port);
 bool web_origin_matches_ipv4(const char *origin, uint32_t ipv4, uint16_t expected_port);
 bool web_origin_matches_host(const char *origin, const char *host);
+bool parse_web_device_host(const char *host, uint32_t ipv4, const char *configured_hostname,
+                           const char *effective_hostname, uint16_t expected_port,
+                           WebDeviceHost *output);
+bool web_origin_matches_device_host(const char *origin, const WebDeviceHost &host,
+                                    uint16_t expected_port);
 bool escape_web_html(const char *input, char *output, std::size_t capacity,
                      std::size_t *output_length = nullptr);
 bool escape_web_json_string(const char *input, char *output, std::size_t capacity,

@@ -10,7 +10,7 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with DHCP, a responsive trusted-LAN control UI with live polling, and direct PC-initiated LAN OTA; MQTT is not included.
+- Optional runtime Wi-Fi station mode with DHCP, persistent collision-aware `.local` discovery, a responsive trusted-LAN control UI with live polling, and direct PC-initiated LAN OTA; MQTT is not included.
 
 ## Hardware
 
@@ -131,11 +131,23 @@ wifi connect <ssid>
 wifi start
 wifi stop
 wifi forget
+hostname status
+hostname set workshop-bridge
+hostname reset
 ```
 
 `wifi connect <ssid>` prompts for a bounded password without echo and does not place the password in command history. Asynchronous output redraws only the password prompt and never the entered bytes. An open network uses an empty password. Candidate credentials are committed to the versioned, checksummed `net_cfg/station` NVS record only after DHCP succeeds; a failed candidate leaves the previously saved network unchanged. A valid saved network starts connecting asynchronously after normal console and RF startup on later boots. `wifi stop` is temporary, `wifi start` reconnects the saved network, and `wifi forget` deletes the saved record, stops Wi-Fi, and prevents boot reconnection.
 
-When DHCP supplies an address, the responsive Web UI starts automatically on port `80` and stops after connectivity is lost. Open `http://<esp32-ip>/`. The device remains station-only and does not create a fallback access point. Wi-Fi configuration remains UART-only.
+The DHCP and mDNS identity defaults to `esp32-cc1101-<last-3-STA-MAC-bytes>`, for example `esp32-cc1101-a1b2c3`. `hostname set <label>` persists a custom 1-32 character label; ASCII letters, digits, and interior hyphens are accepted and letters are stored lowercase. Do not include `.local`. `hostname reset` removes the override and restores the MAC-derived default. Changes apply to mDNS immediately without disconnecting Wi-Fi and become the DHCP hostname on the next Wi-Fi start or reconnect. A malformed hostname NVS record is retained for diagnosis, reported as a persistence error, and bypassed in favor of the safe default.
+
+When DHCP supplies an address, the responsive Web UI starts automatically on port `80` and stops after connectivity is lost. After every HTTP handler is ready, mDNS advertises the Web UI at `http://<hostname>.local/`. If another device already owns the name, the mDNS responder selects a conflict suffix such as `-2`; `hostname status`, the Web System dashboard, and `/api/live` report that effective name. The device remains station-only and does not create a fallback access point. Wi-Fi and hostname configuration remain UART-only.
+
+The stable DNS-SD instance `ESP32 CC1101 RF Bridge <MAC-SUFFIX>` publishes:
+
+- `_http._tcp` on port 80 with `path=/`.
+- `_rfbridge._tcp` on port 80 with `txtvers=1`, Web/API/OTA paths, project and running-version identity, supported feature names, and `auth=none`.
+
+Service registration means the records were accepted by the local responder; it does not prove multicast delivery or resolution on every LAN. Client and router mDNS support, multicast filtering, and network isolation still apply. Use the numeric address from `WIFI CONNECTED` when `.local` resolution is unavailable.
 
 Every successful DHCP connection or reconnection emits:
 
@@ -165,13 +177,15 @@ The System dashboard is diagnostic-only apart from its existing firmware upload.
 
 The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
 
-The Web UI intentionally has no authentication. Any client already on the local network can read status, transmit RF, change persistent automation, delete learned signals, or install firmware. Exact current-IP Host and same-origin checks reduce browser cross-origin abuse but are not authentication. Do not expose port `80` to an untrusted network or the Internet.
+The Web UI intentionally has no authentication. Any client already on the local network can read status, transmit RF, change persistent automation, delete learned signals, or install firmware. Requests accept only the exact current IPv4 address, configured `.local` name, or currently cached conflict-resolved `.local` name. Mutations additionally require an exact same-origin match to the Host representation used by that request; valid names cannot be mixed. These checks reduce browser cross-origin abuse but are not authentication. Do not expose port `80` to an untrusted network or the Internet.
 
 The OTA endpoint uses the existing inactive-partition writer, chip/project/image validation, maintenance locks, rollback support, and running-image confirmation. The same endpoint is available to the validated CLI uploader:
 
 ```bash
-tools/push-ota.sh <esp32-ipv4> <application-image.bin>
+tools/push-ota.sh <esp32-ipv4-or-hostname.local> <application-image.bin>
 ```
+
+The uploader accepts a canonical IPv4 address or one strict hostname label followed by `.local`. It lowercases hostname input and canonicalizes IPv4 octets before constructing matching Host and Origin values; ports, paths, trailing dots, whitespace, and shell metacharacters are rejected.
 
 Firmware can also still be installed through the approved wired serial flashing process.
 

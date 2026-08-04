@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "network_wifi.hpp"
+#include "network_mdns.hpp"
 #include "ota_update.hpp"
 #include "platform_nvs.hpp"
 #include "rf_automation.hpp"
@@ -41,6 +42,12 @@ extern "C" void app_main(void)
     const esp_err_t network_error = rfbridge::initialize_network_wifi();
     if (network_error != ESP_OK) {
         ESP_LOGE(kTag, "Optional Wi-Fi unavailable: %s", esp_err_to_name(network_error));
+    }
+    const esp_err_t mdns_error = network_error == ESP_OK
+                                     ? rfbridge::initialize_network_mdns()
+                                     : network_error;
+    if (mdns_error != ESP_OK) {
+        ESP_LOGE(kTag, "Optional mDNS unavailable: %s", esp_err_to_name(mdns_error));
     }
     const esp_err_t automation_error = rfbridge::initialize_rf_automation();
     if (automation_error != ESP_OK) {

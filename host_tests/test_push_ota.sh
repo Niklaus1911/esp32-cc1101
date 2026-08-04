@@ -66,7 +66,7 @@ chmod +x "$MOCK_BIN/esptool" "$MOCK_BIN/curl"
 
 run_push() {
     PATH="$MOCK_BIN:$PATH" MOCK_CURL_LOG="$CURL_LOG" MOCK_UPLOAD_MODE="${1:-success}" \
-        "$PUSH_OTA" 192.168.1.17 "$IMAGE"
+        "$PUSH_OTA" "${2:-192.168.1.17}" "$IMAGE"
 }
 
 run_push success >"$OUTPUT" 2>&1
@@ -79,6 +79,29 @@ if grep -q -- 'Authorization:' "$CURL_LOG"; then
     printf 'Unexpected authorization header in unauthenticated OTA request\n' >&2
     exit 1
 fi
+
+: >"$CURL_LOG"
+run_push success ESP32-CC1101-A1B2C3.local >"$OUTPUT" 2>&1
+grep -qx -- 'UPLOAD:Origin: http://esp32-cc1101-a1b2c3.local' "$CURL_LOG"
+grep -qx -- 'UPLOAD:http://esp32-cc1101-a1b2c3.local/api/v1/ota' "$CURL_LOG"
+
+: >"$CURL_LOG"
+run_push success 192.168.001.017 >"$OUTPUT" 2>&1
+grep -qx -- 'UPLOAD:Origin: http://192.168.1.17' "$CURL_LOG"
+
+valid_max="$(printf 'a%.0s' {1..32}).local"
+run_push success "$valid_max" >"$OUTPUT" 2>&1
+for invalid in \
+    "$(printf 'a%.0s' {1..33}).local" \
+    -bridge.local bridge-.local bridge..local bridge.local. bridge.example.local \
+    'bridge.local:80' 'bridge.local/path' 'bridge_name.local' 'bridge local' \
+    'bridge.local;touch-x' 192.168.1 192.168.1.256 192.168.1.17.; do
+    if run_push success "$invalid" >"$OUTPUT" 2>&1; then
+        printf 'Expected invalid address to fail: %s\n' "$invalid" >&2
+        exit 1
+    fi
+    grep -q 'Invalid ESP32 address' "$OUTPUT"
+done
 
 set +e
 run_push fail >"$OUTPUT" 2>&1

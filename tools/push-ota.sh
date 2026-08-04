@@ -8,7 +8,7 @@ readonly CONNECT_TIMEOUT_SECONDS=5
 readonly UPLOAD_TIMEOUT_SECONDS=900
 
 usage() {
-    printf 'Usage: %s <esp32-ipv4> <application-image.bin>\n' "${0##*/}" >&2
+    printf 'Usage: %s <esp32-ipv4-or-hostname.local> <application-image.bin>\n' "${0##*/}" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -16,20 +16,38 @@ if [[ $# -ne 2 ]]; then
     exit 2
 fi
 
-readonly DEVICE_IP="$1"
+readonly DEVICE_INPUT="$1"
 readonly IMAGE="$2"
 
-IFS='.' read -r -a octets <<<"$DEVICE_IP"
-if [[ ${#octets[@]} -ne 4 ]]; then
-    printf 'Invalid ESP32 IPv4 address: %s\n' "$DEVICE_IP" >&2
-    exit 2
-fi
-for octet in "${octets[@]}"; do
-    if [[ ! "$octet" =~ ^[0-9]{1,3}$ ]] || ((10#$octet > 255)); then
-        printf 'Invalid ESP32 IPv4 address: %s\n' "$DEVICE_IP" >&2
+device_host=""
+lower_input="${DEVICE_INPUT,,}"
+if [[ "$lower_input" == *.local ]]; then
+    if [[ ! "$lower_input" =~ ^([a-z0-9]|[a-z0-9][a-z0-9-]{0,30}[a-z0-9])\.local$ ]]; then
+        printf 'Invalid ESP32 address: %s\n' "$DEVICE_INPUT" >&2
         exit 2
     fi
-done
+    device_host="$lower_input"
+else
+    if [[ ! "$DEVICE_INPUT" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        printf 'Invalid ESP32 address: %s\n' "$DEVICE_INPUT" >&2
+        exit 2
+    fi
+    IFS='.' read -r -a octets <<<"$DEVICE_INPUT"
+    if [[ ${#octets[@]} -ne 4 ]]; then
+        printf 'Invalid ESP32 address: %s\n' "$DEVICE_INPUT" >&2
+        exit 2
+    fi
+    canonical_octets=()
+    for octet in "${octets[@]}"; do
+        if [[ ! "$octet" =~ ^[0-9]{1,3}$ ]] || ((10#$octet > 255)); then
+            printf 'Invalid ESP32 address: %s\n' "$DEVICE_INPUT" >&2
+            exit 2
+        fi
+        canonical_octets+=("$((10#$octet))")
+    done
+    device_host="${canonical_octets[0]}.${canonical_octets[1]}.${canonical_octets[2]}.${canonical_octets[3]}"
+fi
+readonly DEVICE_HOST="$device_host"
 if [[ ! "$OTA_PORT" =~ ^[0-9]+$ ]] || ((OTA_PORT < 80 || OTA_PORT > 65535)); then
     printf 'Invalid OTA_HTTP_PORT: %s\n' "$OTA_PORT" >&2
     exit 2
@@ -71,9 +89,9 @@ require_image_metadata() {
 }
 
 if ((OTA_PORT == 80)); then
-    readonly BASE_URL="http://${DEVICE_IP}"
+    readonly BASE_URL="http://${DEVICE_HOST}"
 else
-    readonly BASE_URL="http://${DEVICE_IP}:${OTA_PORT}"
+    readonly BASE_URL="http://${DEVICE_HOST}:${OTA_PORT}"
 fi
 response_file="$(mktemp)"
 image_info_file="$(mktemp)"

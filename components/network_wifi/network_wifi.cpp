@@ -10,6 +10,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -35,14 +36,37 @@ constexpr std::size_t kCriticalEventCapacity = 4;
 
 SemaphoreHandle_t s_mutex = nullptr;
 SemaphoreHandle_t s_admission_mutex = nullptr;
+SemaphoreHandle_t s_hostname_mutex = nullptr;
 
 class StatusLock {
 public:
-    StatusLock() : locked_(s_mutex != nullptr && xSemaphoreTake(s_mutex, kMutexWait) == pdTRUE) {}
+    explicit StatusLock(TickType_t wait = kMutexWait)
+        : locked_(s_mutex != nullptr && xSemaphoreTake(s_mutex, wait) == pdTRUE)
+    {
+    }
     ~StatusLock()
     {
         if (locked_) {
             xSemaphoreGive(s_mutex);
+        }
+    }
+    bool locked() const { return locked_; }
+
+private:
+    bool locked_;
+};
+
+class HostnameLock {
+public:
+    HostnameLock()
+        : locked_(s_hostname_mutex != nullptr &&
+                  xSemaphoreTake(s_hostname_mutex, kMutexWait) == pdTRUE)
+    {
+    }
+    ~HostnameLock()
+    {
+        if (locked_) {
+            xSemaphoreGive(s_hostname_mutex);
         }
     }
     bool locked() const { return locked_; }
@@ -94,6 +118,7 @@ std::atomic<bool> s_reconcile_required{false};
 std::atomic<uint32_t> s_sink_callbacks_in_flight{0};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 NetworkWifiStatus s_status{};
+NetworkHostnameStatus s_hostname_status{};
 NetworkWifiEventSink s_event_sink = nullptr;
 void *s_event_sink_context = nullptr;
 NetworkWifiOnlineSink s_online_sink = nullptr;
@@ -120,6 +145,7 @@ bool s_scan_then_stop = false;
 bool s_scan_cancelled = false;
 std::array<NetworkWifiEvent, kCriticalEventCapacity> s_critical_events{};
 std::size_t s_critical_event_count = 0;
+uint32_t s_hostname_attempted_generation = 0;
 
 bool credentials_equal(const WifiCredentials &left, const WifiCredentials &right)
 {
@@ -131,6 +157,73 @@ void copy_text(char *destination, std::size_t capacity, const char *source)
 {
     std::strncpy(destination, source, capacity - 1U);
     destination[capacity - 1U] = '\0';
+}
+
+void cleanup_failed_network_initialization()
+{
+    if (s_ota_reply_queue != nullptr) {
+        vQueueDelete(s_ota_reply_queue);
+        s_ota_reply_queue = nullptr;
+    }
+    if (s_driver_event_queue != nullptr) {
+        vQueueDelete(s_driver_event_queue);
+        s_driver_event_queue = nullptr;
+    }
+    if (s_message_queue != nullptr) {
+        vQueueDelete(s_message_queue);
+        s_message_queue = nullptr;
+    }
+    if (s_hostname_mutex != nullptr) {
+        vSemaphoreDelete(s_hostname_mutex);
+        s_hostname_mutex = nullptr;
+    }
+    if (s_admission_mutex != nullptr) {
+        vSemaphoreDelete(s_admission_mutex);
+        s_admission_mutex = nullptr;
+    }
+    if (s_mutex != nullptr) {
+        vSemaphoreDelete(s_mutex);
+        s_mutex = nullptr;
+    }
+}
+
+esp_err_t apply_hostname_to_netif(bool force)
+{
+    if (s_sta_netif == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char hostname[kNetworkHostnameCapacity]{};
+    uint32_t generation = 0;
+    {
+        StatusLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        generation = s_hostname_status.configured_generation;
+        if (!force && generation == s_hostname_attempted_generation) {
+            return s_hostname_status.last_apply_error;
+        }
+        copy_text(hostname, sizeof(hostname), s_hostname_status.configured_hostname);
+    }
+    s_hostname_attempted_generation = generation;
+    const esp_err_t error = esp_netif_set_hostname(s_sta_netif, hostname);
+    {
+        StatusLock lock(portMAX_DELAY);
+        if (lock.locked()) {
+            s_hostname_status.last_apply_error = error;
+            if (error == ESP_OK) {
+                s_hostname_status.netif_applied_generation = generation;
+            }
+        }
+    }
+    if (error == ESP_OK) {
+        ESP_LOGI(kTag, "STA hostname applied: %s generation=%lu", hostname,
+                 static_cast<unsigned long>(generation));
+    } else {
+        ESP_LOGE(kTag, "Could not apply STA hostname %s: %s", hostname,
+                 esp_err_to_name(error));
+    }
+    return error;
 }
 
 bool deliver_event(const NetworkWifiEvent &event)
@@ -349,6 +442,11 @@ void cleanup_failed_driver_initialization()
         esp_netif_destroy(s_sta_netif);
         s_sta_netif = nullptr;
     }
+    s_hostname_attempted_generation = 0;
+    StatusLock lock;
+    if (lock.locked()) {
+        s_hostname_status.netif_applied_generation = 0;
+    }
 }
 
 esp_err_t ensure_driver_initialized()
@@ -375,7 +473,7 @@ esp_err_t ensure_driver_initialized()
         error = esp_wifi_set_default_wifi_sta_handlers();
     }
     if (error == ESP_OK) {
-        error = esp_netif_set_hostname(s_sta_netif, "esp32-cc1101");
+        error = apply_hostname_to_netif(true);
     }
     if (error != ESP_OK) {
         cleanup_failed_driver_initialization();
@@ -488,6 +586,9 @@ void start_connection_now(const WifiCredentials &credentials, bool candidate)
     }
 
     esp_err_t error = configure_station(credentials);
+    if (error == ESP_OK) {
+        error = apply_hostname_to_netif(true);
+    }
     if (error == ESP_OK) {
         set_state(NetworkWifiState::kStarting);
         s_start_in_progress = true;
@@ -704,7 +805,10 @@ void process_message(const Message &message)
             } else {
                 set_state(NetworkWifiState::kStarting);
                 s_start_in_progress = true;
-                const esp_err_t start_error = esp_wifi_start();
+                esp_err_t start_error = apply_hostname_to_netif(true);
+                if (start_error == ESP_OK) {
+                    start_error = esp_wifi_start();
+                }
                 if (start_error != ESP_OK) {
                     s_start_in_progress = false;
                     set_state(NetworkWifiState::kFault, start_error);
@@ -930,6 +1034,12 @@ void network_task(void *)
 {
     while (true) {
         retry_critical_event();
+        NetworkHostnameStatus hostname{};
+        if (get_network_hostname_status(&hostname) == ESP_OK && s_sta_netif != nullptr &&
+            hostname.configured_generation != s_hostname_attempted_generation) {
+            (void)apply_hostname_to_netif(false);
+            continue;
+        }
         Message message{};
         if (xQueueReceive(s_driver_event_queue, &message, 0) == pdTRUE) {
             process_message(message);
@@ -984,13 +1094,52 @@ esp_err_t initialize_network_wifi()
     }
     s_mutex = xSemaphoreCreateMutex();
     s_admission_mutex = xSemaphoreCreateMutex();
+    s_hostname_mutex = xSemaphoreCreateMutex();
     s_message_queue = xQueueCreate(kMessageQueueDepth, sizeof(Message));
     s_driver_event_queue = xQueueCreate(kDriverEventQueueDepth, sizeof(Message));
     s_ota_reply_queue = xQueueCreate(1, sizeof(esp_err_t));
-    if (s_mutex == nullptr || s_admission_mutex == nullptr || s_message_queue == nullptr ||
-        s_driver_event_queue == nullptr || s_ota_reply_queue == nullptr) {
+    if (s_mutex == nullptr || s_admission_mutex == nullptr || s_hostname_mutex == nullptr ||
+        s_message_queue == nullptr || s_driver_event_queue == nullptr ||
+        s_ota_reply_queue == nullptr) {
+        cleanup_failed_network_initialization();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
+    }
+
+    uint8_t station_mac[6]{};
+    esp_err_t mac_error = esp_read_mac(station_mac, ESP_MAC_WIFI_STA);
+    char default_hostname[kNetworkHostnameCapacity]{};
+    char mac_suffix[kNetworkHostnameMacSuffixCapacity]{};
+    if (mac_error == ESP_OK &&
+        !derive_default_network_hostname(station_mac, default_hostname, sizeof(default_hostname),
+                                         mac_suffix, sizeof(mac_suffix))) {
+        mac_error = ESP_ERR_INVALID_SIZE;
+    }
+    if (mac_error != ESP_OK) {
+        cleanup_failed_network_initialization();
+        s_initialization_error.store(mac_error, std::memory_order_release);
+        return mac_error;
+    }
+    char saved_hostname[kNetworkHostnameCapacity]{};
+    const esp_err_t hostname_error =
+        load_saved_network_hostname(saved_hostname, sizeof(saved_hostname));
+    {
+        StatusLock lock;
+        if (!lock.locked()) {
+            cleanup_failed_network_initialization();
+            s_initialization_error.store(ESP_ERR_TIMEOUT, std::memory_order_release);
+            return ESP_ERR_TIMEOUT;
+        }
+        copy_text(s_hostname_status.default_hostname,
+                  sizeof(s_hostname_status.default_hostname), default_hostname);
+        copy_text(s_hostname_status.configured_hostname,
+                  sizeof(s_hostname_status.configured_hostname),
+                  hostname_error == ESP_OK ? saved_hostname : default_hostname);
+        copy_text(s_hostname_status.mac_suffix, sizeof(s_hostname_status.mac_suffix), mac_suffix);
+        s_hostname_status.custom = hostname_error == ESP_OK;
+        s_hostname_status.configured_generation = 1;
+        s_hostname_status.persistence_error =
+            hostname_error == ESP_ERR_NOT_FOUND ? ESP_OK : hostname_error;
     }
 
     WifiCredentials saved{};
@@ -1011,6 +1160,7 @@ esp_err_t initialize_network_wifi()
         }
     }
     if (xTaskCreate(network_task, "wifi_mgr", kTaskStackSize, nullptr, kTaskPriority, &s_task) != pdPASS) {
+        cleanup_failed_network_initialization();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
@@ -1080,6 +1230,112 @@ esp_err_t get_network_wifi_status(NetworkWifiStatus *status)
     *status = s_status;
     status->event_drops = s_event_drops.load(std::memory_order_relaxed);
     status->ota_locked = s_ota_locked.load(std::memory_order_relaxed);
+    return ESP_OK;
+}
+
+esp_err_t get_network_hostname_status(NetworkHostnameStatus *status)
+{
+    if (status == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
+    StatusLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    *status = s_hostname_status;
+    return ESP_OK;
+}
+
+esp_err_t set_network_hostname(const char *hostname)
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
+    char canonical[kNetworkHostnameCapacity]{};
+    if (!canonicalize_network_hostname(hostname, canonical, sizeof(canonical))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char default_hostname[kNetworkHostnameCapacity]{};
+    {
+        StatusLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        copy_text(default_hostname, sizeof(default_hostname),
+                  s_hostname_status.default_hostname);
+    }
+    if (std::strcmp(canonical, default_hostname) == 0) {
+        return reset_network_hostname();
+    }
+    HostnameLock hostname_lock;
+    if (!hostname_lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    const esp_err_t persistence_error = save_network_hostname(canonical);
+    if (persistence_error != ESP_OK) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_hostname_status.persistence_error = persistence_error;
+        }
+        return persistence_error;
+    }
+    {
+        StatusLock lock(portMAX_DELAY);
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        const bool changed = !s_hostname_status.custom ||
+                             std::strcmp(s_hostname_status.configured_hostname, canonical) != 0;
+        copy_text(s_hostname_status.configured_hostname,
+                  sizeof(s_hostname_status.configured_hostname), canonical);
+        s_hostname_status.custom = true;
+        s_hostname_status.persistence_error = ESP_OK;
+        if (changed && ++s_hostname_status.configured_generation == 0) {
+            s_hostname_status.configured_generation = 1;
+        }
+    }
+    xTaskNotifyGive(s_task);
+    return ESP_OK;
+}
+
+esp_err_t reset_network_hostname()
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
+    HostnameLock hostname_lock;
+    if (!hostname_lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    const esp_err_t persistence_error = forget_network_hostname();
+    if (persistence_error != ESP_OK) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_hostname_status.persistence_error = persistence_error;
+        }
+        return persistence_error;
+    }
+    {
+        StatusLock lock(portMAX_DELAY);
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        const bool changed = s_hostname_status.custom ||
+                             std::strcmp(s_hostname_status.configured_hostname,
+                                         s_hostname_status.default_hostname) != 0;
+        copy_text(s_hostname_status.configured_hostname,
+                  sizeof(s_hostname_status.configured_hostname),
+                  s_hostname_status.default_hostname);
+        s_hostname_status.custom = false;
+        s_hostname_status.persistence_error = ESP_OK;
+        if (changed && ++s_hostname_status.configured_generation == 0) {
+            s_hostname_status.configured_generation = 1;
+        }
+    }
+    xTaskNotifyGive(s_task);
     return ESP_OK;
 }
 

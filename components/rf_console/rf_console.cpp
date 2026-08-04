@@ -25,6 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "network_mdns.hpp"
 #include "network_wifi.hpp"
 #include "ota_update.hpp"
 #include "rf_automation.hpp"
@@ -1342,6 +1343,98 @@ int render_ota_status()
     return 0;
 }
 
+int render_hostname_status()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    NetworkHostnameStatus hostname{};
+    NetworkMdnsStatus mdns{};
+    const esp_err_t hostname_error = get_network_hostname_status(&hostname);
+    const esp_err_t mdns_error = get_network_mdns_status(&mdns);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        if (hostname_error != ESP_OK) {
+            std::printf("HOSTNAME available=0 error=%s (0x%x)\n",
+                        esp_err_to_name(hostname_error),
+                        static_cast<unsigned>(hostname_error));
+            return 1;
+        }
+        std::printf("HOSTNAME configured=%s default=%s custom=%u generation=%lu netif_generation=%lu persistence=%s apply=%s mdns_state=%s effective=%s mdns_generation=%lu http_registered=%u rfbridge_registered=%u conflict=%u heartbeat_ms=%lu mdns_error=%s\n",
+                    hostname.configured_hostname, hostname.default_hostname, hostname.custom,
+                    static_cast<unsigned long>(hostname.configured_generation),
+                    static_cast<unsigned long>(hostname.netif_applied_generation),
+                    esp_err_to_name(hostname.persistence_error),
+                    esp_err_to_name(hostname.last_apply_error),
+                    mdns_error == ESP_OK ? network_mdns_state_name(mdns.state) : "unavailable",
+                    mdns.effective_known ? mdns.effective_hostname : "-",
+                    static_cast<unsigned long>(mdns.applied_generation),
+                    mdns.http_service_registered, mdns.rfbridge_service_registered,
+                    mdns.conflict_renamed,
+                    static_cast<unsigned long>(mdns.owner_heartbeat_age_ms),
+                    mdns_error == ESP_OK ? esp_err_to_name(mdns.last_error)
+                                         : esp_err_to_name(mdns_error));
+        return mdns_error == ESP_OK ? 0 : 1;
+    }
+
+    print_dashboard_header("Network hostname");
+    if (hostname_error != ESP_OK) {
+        print_dashboard_value("State", "UNAVAILABLE", ConsoleTone::kError);
+        print_dashboard_value("Error", esp_err_to_name(hostname_error), ConsoleTone::kError);
+        print_dashboard_footer();
+        return 1;
+    }
+    print_dashboard_value("Configured", hostname.configured_hostname,
+                          hostname.custom ? ConsoleTone::kAction : ConsoleTone::kInfo);
+    print_dashboard_value("Default", hostname.default_hostname, ConsoleTone::kMuted);
+    char left[80]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%lu / %lu",
+                  static_cast<unsigned long>(hostname.netif_applied_generation),
+                  static_cast<unsigned long>(hostname.configured_generation));
+    std::snprintf(right, sizeof(right), "%lu / %lu",
+                  static_cast<unsigned long>(mdns.applied_generation),
+                  static_cast<unsigned long>(mdns.configured_generation));
+    print_dashboard_row("DHCP gen", left,
+                        hostname.last_apply_error == ESP_OK ? ConsoleTone::kSuccess
+                                                            : ConsoleTone::kError,
+                        "mDNS gen", right,
+                        mdns_error == ESP_OK && mdns.applied_generation == mdns.configured_generation
+                            ? ConsoleTone::kSuccess
+                            : ConsoleTone::kWarning);
+    print_dashboard_value("mDNS state",
+                          mdns_error == ESP_OK ? network_mdns_state_name(mdns.state) : "unavailable",
+                          mdns_error != ESP_OK || mdns.state == NetworkMdnsState::kFaulted ||
+                                  mdns.state == NetworkMdnsState::kStalled
+                              ? ConsoleTone::kError
+                              : mdns.state == NetworkMdnsState::kReady ? ConsoleTone::kSuccess
+                                                                       : ConsoleTone::kWarning);
+    if (mdns.effective_known) {
+        std::snprintf(left, sizeof(left), "http://%s.local/", mdns.effective_hostname);
+        print_dashboard_value("Address", left,
+                              mdns.conflict_renamed ? ConsoleTone::kWarning
+                                                    : ConsoleTone::kInfo);
+    }
+    std::snprintf(left, sizeof(left), "http %s / rfbridge %s",
+                  mdns.http_service_registered ? "yes" : "no",
+                  mdns.rfbridge_service_registered ? "yes" : "no");
+    print_dashboard_value("Registered", left,
+                          mdns.http_service_registered && mdns.rfbridge_service_registered
+                              ? ConsoleTone::kSuccess
+                              : ConsoleTone::kWarning);
+    print_dashboard_row("Persistence", esp_err_to_name(hostname.persistence_error),
+                        hostname.persistence_error == ESP_OK ? ConsoleTone::kSuccess
+                                                             : ConsoleTone::kError,
+                        "mDNS error",
+                        mdns_error == ESP_OK ? esp_err_to_name(mdns.last_error)
+                                             : esp_err_to_name(mdns_error),
+                        mdns_error == ESP_OK && mdns.last_error == ESP_OK
+                            ? ConsoleTone::kSuccess
+                            : ConsoleTone::kError);
+    print_dashboard_footer();
+    return mdns_error == ESP_OK ? 0 : 1;
+}
+
 int status_command(int argc, char **)
 {
     OutputGuard guard;
@@ -1354,6 +1447,7 @@ int status_command(int argc, char **)
     const int result = render_radio_status(true);
     render_automation_status();
     render_wifi_status();
+    render_hostname_status();
     return result;
 }
 
@@ -1458,6 +1552,26 @@ int wifi_command(int argc, char **argv)
         return print_result("wifi connect", error);
     }
     return print_usage("usage: wifi <status|connect <ssid>|start|stop|forget|scan>");
+}
+
+int hostname_command(int argc, char **argv)
+{
+    if (argc == 2 && std::strcmp(argv[1], "status") == 0) {
+        return render_hostname_status();
+    }
+    if (argc == 3 && std::strcmp(argv[1], "set") == 0) {
+        char canonical[kNetworkHostnameCapacity]{};
+        if (!canonicalize_network_hostname(argv[2], canonical, sizeof(canonical))) {
+            return print_validation_error(
+                "ERROR hostname must be 1..32 letters, digits, or interior hyphens",
+                "Hostname must be 1..32 letters, digits, or interior hyphens");
+        }
+        return print_result("hostname set", set_network_mdns_hostname(canonical));
+    }
+    if (argc == 2 && std::strcmp(argv[1], "reset") == 0) {
+        return print_result("hostname reset", reset_network_mdns_hostname());
+    }
+    return print_usage("usage: hostname <status|set <label>|reset>");
 }
 
 int ota_command(int argc, char **argv)
@@ -1996,6 +2110,7 @@ constexpr CommandDefinition kCommands[] = {
     {"status", "Show the complete system dashboard", nullptr, status_command},
     {"console", "Select colored or machine-readable output", "style [pretty|plain]", console_command},
     {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
+    {"hostname", "Configure shared DHCP and mDNS identity", "<status|set <label>|reset>", hostname_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
     {"web", "Inspect or rotate Web UI authentication", "auth <status|rotate>", web_command},
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},

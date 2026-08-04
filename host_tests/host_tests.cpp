@@ -11,6 +11,8 @@
 #include <unistd.h>
 
 #include "network_wifi_config.hpp"
+#include "network_hostname_config.hpp"
+#include "network_mdns_policy.hpp"
 #include "network_wifi_state.hpp"
 #include "ota_update_policy.hpp"
 #include "rf_automation_engine.hpp"
@@ -894,6 +896,91 @@ void test_wifi_config()
             "Wi-Fi DHCP success line is stable");
 }
 
+void test_network_hostname_config()
+{
+    char hostname[rfbridge::kNetworkHostnameCapacity]{};
+    require(rfbridge::canonicalize_network_hostname("Bridge-A1B2", hostname,
+                                                     sizeof(hostname)) &&
+                std::strcmp(hostname, "bridge-a1b2") == 0,
+            "network hostname canonicalizes ASCII case");
+    for (const char *invalid : {"", "-bridge", "bridge-", "bridge.local", "bridge_name",
+                                "bridge name", "bridge/one", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}) {
+        require(!rfbridge::canonicalize_network_hostname(invalid, hostname, sizeof(hostname)),
+                "invalid network hostname rejected");
+    }
+    require(rfbridge::canonicalize_network_hostname(
+                "a2345678901234567890123456789012", hostname, sizeof(hostname)) &&
+                std::strlen(hostname) == rfbridge::kNetworkHostnameMaxLength,
+            "maximum network hostname accepted");
+
+    constexpr uint8_t mac[] = {0x24, 0x6f, 0x28, 0xa1, 0xb2, 0xc3};
+    char suffix[rfbridge::kNetworkHostnameMacSuffixCapacity]{};
+    require(rfbridge::derive_default_network_hostname(mac, hostname, sizeof(hostname), suffix,
+                                                       sizeof(suffix)) &&
+                std::strcmp(hostname, "esp32-cc1101-a1b2c3") == 0 &&
+                std::strcmp(suffix, "a1b2c3") == 0,
+            "default network hostname uses the station MAC suffix");
+
+    uint8_t record[rfbridge::kNetworkHostnameRecordMaxSize]{};
+    std::size_t size = 0;
+    require(rfbridge::encode_network_hostname_record(hostname, record, sizeof(record), &size) ==
+                    rfbridge::NetworkHostnameFormatResult::kOk &&
+                size == 8U + std::strlen(hostname) + 4U && record[6] == 0 && record[7] == 0,
+            "network hostname record has the bounded v1 layout");
+    char decoded[rfbridge::kNetworkHostnameCapacity]{};
+    require(rfbridge::decode_network_hostname_record(record, size, decoded, sizeof(decoded)) ==
+                    rfbridge::NetworkHostnameFormatResult::kOk &&
+                std::strcmp(decoded, hostname) == 0,
+            "network hostname record round trips");
+    record[8] ^= 1U;
+    require(rfbridge::decode_network_hostname_record(record, size, decoded, sizeof(decoded)) ==
+                rfbridge::NetworkHostnameFormatResult::kInvalidCrc,
+            "network hostname CRC rejects corruption");
+    record[8] ^= 1U;
+    record[4] = 2;
+    require(rfbridge::decode_network_hostname_record(record, size, decoded, sizeof(decoded)) ==
+                rfbridge::NetworkHostnameFormatResult::kInvalidVersion,
+            "network hostname record rejects unknown versions");
+    record[4] = 1;
+    record[6] = 1;
+    require(rfbridge::decode_network_hostname_record(record, size, decoded, sizeof(decoded)) ==
+                rfbridge::NetworkHostnameFormatResult::kInvalidRecord,
+            "network hostname record rejects reserved bytes");
+    require(rfbridge::decode_network_hostname_record(record, size - 1U, decoded,
+                                                       sizeof(decoded)) ==
+                rfbridge::NetworkHostnameFormatResult::kInvalidRecord,
+            "network hostname record rejects inconsistent sizes");
+    require(rfbridge::encode_network_hostname_record("Bridge", record, sizeof(record), &size) ==
+                rfbridge::NetworkHostnameFormatResult::kInvalidArgument,
+            "network hostname records require canonical storage");
+}
+
+void test_network_mdns_policy()
+{
+    using rfbridge::NetworkMdnsState;
+    require(!rfbridge::network_mdns_hostname_apply_needed(4, 4, false, 0, false),
+            "mDNS skips an already applied hostname generation");
+    require(rfbridge::network_mdns_hostname_apply_needed(3, 4, false, 0, false),
+            "mDNS applies a new hostname generation");
+    require(!rfbridge::network_mdns_hostname_apply_needed(3, 4, true, 4, false) &&
+                rfbridge::network_mdns_hostname_apply_needed(3, 5, true, 4, false) &&
+                rfbridge::network_mdns_hostname_apply_needed(3, 4, true, 4, true),
+            "mDNS hostname failures retry only for a new generation or Web lifecycle");
+    require(rfbridge::network_mdns_registration_is_complete(true, true, true) &&
+                !rfbridge::network_mdns_registration_is_complete(true, true, false) &&
+                !rfbridge::network_mdns_registration_is_complete(false, true, true),
+            "mDNS readiness requires initialization and both services");
+    require(rfbridge::network_mdns_reported_state(NetworkMdnsState::kReady, true, 5000, 5000) ==
+                NetworkMdnsState::kReady &&
+                rfbridge::network_mdns_reported_state(NetworkMdnsState::kReady, true, 5001, 5000) ==
+                    NetworkMdnsState::kStalled &&
+                rfbridge::network_mdns_reported_state(NetworkMdnsState::kFaulted, true, 6000, 5000) ==
+                    NetworkMdnsState::kFaulted &&
+                rfbridge::network_mdns_reported_state(NetworkMdnsState::kStarting, false, 0, 5000) ==
+                    NetworkMdnsState::kStarting,
+            "mDNS stall reporting is bounded to live owner states with a heartbeat");
+}
+
 void test_ota_policy()
 {
     require(rfbridge::ota_http_upload_request_is_valid("application/octet-stream", 4096, 8192, 512) &&
@@ -1063,6 +1150,39 @@ void test_web_forms()
     require(rfbridge::web_origin_matches_host("http://192.168.1.17", "192.168.1.17:80"),
             "Web normalized same origin accepted");
 
+    rfbridge::WebDeviceHost device_host{};
+    require(rfbridge::parse_web_device_host("ESP32-CC1101-A1B2C3.local:80", device_ip,
+                                            "esp32-cc1101-a1b2c3",
+                                            "esp32-cc1101-a1b2c3-2", 80, &device_host) &&
+                std::strcmp(device_host.normalized, "esp32-cc1101-a1b2c3.local") == 0,
+            "Web configured mDNS Host accepted and normalized");
+    require(rfbridge::web_origin_matches_device_host(
+                "http://esp32-cc1101-a1b2c3.local", device_host, 80) &&
+                !rfbridge::web_origin_matches_device_host(
+                    "http://esp32-cc1101-a1b2c3-2.local", device_host, 80),
+            "Web mutation origin must match the actual configured Host");
+    require(rfbridge::parse_web_device_host("esp32-cc1101-a1b2c3-2.local", device_ip,
+                                            "esp32-cc1101-a1b2c3",
+                                            "esp32-cc1101-a1b2c3-2", 80, &device_host) &&
+                rfbridge::web_origin_matches_device_host(
+                    "http://ESP32-CC1101-A1B2C3-2.local:80", device_host, 80),
+            "Web effective conflict hostname and same origin accepted");
+    require(rfbridge::parse_web_device_host("192.168.1.17", device_ip,
+                                            "esp32-cc1101-a1b2c3", nullptr, 80,
+                                            &device_host) &&
+                rfbridge::web_origin_matches_device_host("http://192.168.1.17:80",
+                                                         device_host, 80),
+            "Web IPv4 normalized device Host remains accepted");
+    for (const char *invalid_host : {"bridge.local.", "bridge.local:81", "bridge.example.local",
+                                     "user@bridge.local", "https://bridge.local", "192.168.1.017"}) {
+        require(!rfbridge::parse_web_device_host(invalid_host, device_ip, "bridge", nullptr,
+                                                 80, &device_host),
+                "Web malformed or unrelated Host rejected");
+    }
+    require(!rfbridge::web_origin_matches_device_host("https://192.168.1.17", device_host, 80) &&
+                !rfbridge::web_origin_matches_device_host("null", device_host, 80),
+            "Web HTTPS and opaque origins rejected");
+
     char escaped[64]{};
     require(rfbridge::escape_web_html("<&>\"'", escaped, sizeof(escaped)) &&
                 std::strcmp(escaped, "&lt;&amp;&gt;&quot;&#39;") == 0,
@@ -1149,6 +1269,8 @@ int main()
     test_learned_signal_matching();
     test_storage_format();
     test_wifi_config();
+    test_network_hostname_config();
+    test_network_mdns_policy();
     test_ota_policy();
     test_automation_rules();
     test_web_forms();
