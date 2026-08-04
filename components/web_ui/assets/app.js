@@ -757,6 +757,7 @@ function uploadOta(event) {
   request.send(file);
 }
 
+if (!matchMedia("(max-width: 560px)").matches) byId("firmware-disclosure").open = true;
 restoreActivity();
 bindActions();
 renderActivity();

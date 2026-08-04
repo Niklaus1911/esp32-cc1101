@@ -72,6 +72,8 @@ Use the Playwright MCP server for Web UI behavior changes. Validate against a de
 
 Intercept RF transmit and destructive mutation requests unless the user explicitly authorizes those hardware effects. Browser validation complements rather than replaces host tests, the production build, and hardware validation.
 
+Automated overflow, clipping, and error checks are not sufficient visual acceptance. For every frontend change, visually inspect full-page mobile and desktop screenshots for hierarchy, information density, scanability, navigation discoverability, useful first-viewport content, awkward whitespace, and excessive scrolling. Compare before and after screenshots, and revise before handoff if a layout is technically valid but unnecessarily tall, sparse, clipped, or cumbersome to use.
+
 ## Code Conventions
 
 - Keep the firmware native ESP-IDF C/C++; do not introduce Arduino APIs.

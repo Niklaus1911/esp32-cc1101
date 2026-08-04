@@ -186,15 +186,18 @@
         </details>
       </section>
 
-      <section class="band">
-        <div class="section-heading"><div><h2>Firmware update</h2><p id="ota-state" class="subtle">Loading</p></div><button id="refresh-ota" type="button" class="quiet">Refresh</button></div>
-        <p class="security-note">Unauthenticated trusted-LAN update</p>
-        <form id="ota-form" class="form-row">
-          <label>Application image<input id="ota-file" type="file" accept=".bin,application/octet-stream" required></label>
-          <button type="submit" class="danger">Install and reboot</button>
-        </form>
-        <progress id="ota-progress" value="0" max="100" hidden></progress>
-        <dl id="ota-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
+      <section class="band firmware-band">
+        <details id="firmware-disclosure" class="firmware-disclosure">
+          <summary><span class="firmware-heading"><span class="firmware-title">Firmware update</span><span id="ota-state" class="subtle">Loading</span></span></summary>
+          <div class="firmware-toolbar"><button id="refresh-ota" type="button" class="quiet">Refresh</button></div>
+          <p class="security-note">Unauthenticated trusted-LAN update</p>
+          <form id="ota-form" class="form-row">
+            <label>Application image<input id="ota-file" type="file" accept=".bin,application/octet-stream" required></label>
+            <button type="submit" class="danger">Install and reboot</button>
+          </form>
+          <progress id="ota-progress" value="0" max="100" hidden></progress>
+          <dl id="ota-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
+        </details>
       </section>
     </section>
   </main>

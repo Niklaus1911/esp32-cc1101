@@ -147,6 +147,15 @@ for (const id of [
   "system-runtime-details", "system-services-details", "system-rf-diagnostics",
   "system-wifi-diagnostics", "system-services-diagnostics",
 ]) assert(index.includes(`id="${id}"`), `system status DOM target missing: ${id}`);
+const firmwareDisclosure = sourceSection(index, '<details id="firmware-disclosure"',
+                                         "</details>", "firmware disclosure");
+for (const id of ["ota-state", "refresh-ota", "ota-form", "ota-file", "ota-progress", "ota-details"]) {
+  assert(firmwareDisclosure.includes(`id="${id}"`), `firmware disclosure target missing: ${id}`);
+}
+assert(index.includes('id="firmware-disclosure" class="firmware-disclosure"') &&
+       !/<details id="firmware-disclosure"[^>]*\sopen(?:\s|>)/.test(index) &&
+       js.includes('if (!matchMedia("(max-width: 560px)").matches) byId("firmware-disclosure").open = true;'),
+       "firmware disclosure must start closed and open only on initial desktop load");
 for (const formatter of [
   "formatUptime", "formatBytes", "formatHalfDbm", "formatWifiQuality", "formatMarcState",
   "formatBoolean",
@@ -279,6 +288,22 @@ const mobileCss = css.slice(mobileMediaOpen + 1, mobileMediaClose);
 assert.match(mobileCss,
              /#rule-list\s+\.item-actions\s*\{[^}]*\bgrid-template-columns\s*:\s*1fr\s*;/,
              "mobile rule actions must use a single grid column");
+assert.match(mobileCss,
+             /\.tabs-inner\s*\{[^}]*\bmin-width\s*:\s*100%\s*;[^}]*\bpadding\s*:\s*0\s*;/,
+             "mobile navigation must fit the viewport without a scrolling inner width");
+assert.match(mobileCss,
+             /\.tab\s*\{[^}]*\bflex\s*:\s*1\s+1\s+20%\s*;[^}]*\bmin-width\s*:\s*0\s*;/,
+             "mobile navigation tabs must share the viewport evenly");
+assert.match(css, /@media\s*\(max-width\s*:\s*320px\s*\)\s*\{[^}]*\.tab\s*\{[^}]*font-size\s*:\s*\.7rem\s*;/s,
+             "narrow mobile navigation must fit its longest label");
+assert.match(mobileCss,
+             /\.system-status-band\s+\.section-heading\s*\{[^}]*\bflex-direction\s*:\s*row\s*;[^}]*\balign-items\s*:\s*center\s*;/,
+             "mobile System badges must stay beside their section headings");
+assert.match(mobileCss,
+             /#system-status\s+\.details\s*\{[^}]*\bgrid-template-columns\s*:\s*minmax\(104px,\s*132px\)\s+minmax\(0,\s*1fr\)\s*;/,
+             "mobile System details must retain compact label/value columns");
+assert.match(css, /\.firmware-disclosure\s*>\s*summary\s*\{[^}]*\bcursor\s*:\s*pointer\s*;/,
+             "firmware disclosure must retain an interactive native summary");
 for (const forbidden of [
   '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
   "httpd_uri_match_wildcard", "body:{command:", "no-referrer", "8032",
