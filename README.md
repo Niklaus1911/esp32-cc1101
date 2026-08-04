@@ -51,8 +51,8 @@ The machine-local ESP-IDF, MCP, coding-agent, and Playwright arrangement is reco
 Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build:
 
 ```bash
-# Example for a standard ESP-IDF checkout:
-. "$HOME/esp/esp-idf/export.sh"
+# Installed ESP-IDF 6.0.2 checkout:
+. "$HOME/.espressif/v6.0.2/esp-idf/export.sh"
 idf.py set-target esp32
 idf.py build
 idf.py size

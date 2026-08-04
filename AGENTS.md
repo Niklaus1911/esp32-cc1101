@@ -22,7 +22,7 @@
 
 ## Environment and Commands
 
-Run commands from the repository root. Start Pi from this directory so AFT indexes only this project.
+Run commands from the repository root. Start Codex CLI from this directory so project instructions and tool working directories resolve consistently.
 
 Run host tests from a clean native shell before activating the ESP-IDF cross-toolchain:
 
@@ -48,11 +48,11 @@ idf.py -B build build
 
 The production verifier runs a clean out-of-tree firmware build, size report, and image inspection under `/tmp`. It does not access hardware. `idf.py build` is the authoritative compiler gate.
 
-## AFT and Diagnostics
+## Diagnostics
 
-Generic and Espressif clangd both report false ESP-IDF cross-toolchain diagnostics for this project. AFT 0.49 only permits disabling LSP servers in user-level configuration, so keep the global server available and treat these diagnostics as non-authoritative. Keep `validate_on_edit: "syntax"` globally because AFT syntax rejection and rollback remain useful. `idf.py build` is the firmware compilation gate.
+Generic and Espressif clangd can report false ESP-IDF cross-toolchain diagnostics for this project. Treat editor and language-server diagnostics as non-authoritative hints, especially around callbacks, function pointers, FreeRTOS tasks, and hardware entry points. `idf.py build` is the firmware compilation gate.
 
-Use indexed `grep`, `read`, `aft_outline`, and `aft_zoom` for exploration. Use `edit` for focused changes and `aft_safety` checkpoints before risky multi-file work. Treat dead-code and call-graph results as hints around callbacks, function pointers, FreeRTOS tasks, and hardware entry points.
+Use repository search and focused file reads for exploration. Inspect the relevant diff after edits and keep changes scoped to the owning components.
 
 ## External Research
 
@@ -60,7 +60,7 @@ Use targeted Web search whenever it can materially improve a design or debugging
 
 ## Espressif MCP
 
-Start Pi from the repository root so the project MCP configuration loads. Use the Espressif Documentation MCP before generic Web search for ESP-IDF APIs, version-specific behavior, hardware constraints, release notes, and official examples; confirm results apply to ESP-IDF 6.0.2 and classic ESP32. Use broader Web research for upstream defects and implementation patterns not resolved by official material.
+The active Codex CLI setup provides the Espressif Documentation, ESP-IDF Tools, and Playwright MCP servers. Start Codex from the repository root so the ESP-IDF Tools server operates on this project. Use the Espressif Documentation MCP before generic Web search for ESP-IDF APIs, version-specific behavior, hardware constraints, release notes, and official examples; confirm results apply to ESP-IDF 6.0.2 and classic ESP32. Use broader Web research for upstream defects and implementation patterns not resolved by official material.
 
 Use the ESP-IDF Tools MCP `build_project` operation as a fast iterative compiler check. It writes the normal in-tree build output and does not replace host tests, Unity compilation, or `tools/verify-production.sh`; the production verifier remains the final clean build, size, image, and partition gate. MCP success does not prove RF timing, range, recovery, NVS persistence, browser behavior, or hardware behavior.
 
@@ -68,7 +68,7 @@ Do not call `set_target` without approval because it can regenerate project conf
 
 ## Browser Validation
 
-Use Playwright for Web UI behavior changes. Validate against a deterministic local mock first, then against the device when hardware access is authorized. Cover desktop and mobile layouts, horizontal overflow, console and page errors, polling behavior, exact same-origin mutation headers, and reconnect flows such as OTA reboot recovery.
+Use the Playwright MCP server for Web UI behavior changes. Validate against a deterministic local mock first, then against the device when hardware access is authorized. Cover desktop and mobile layouts, horizontal overflow, console and page errors, polling behavior, exact same-origin mutation headers, and reconnect flows such as OTA reboot recovery.
 
 Intercept RF transmit and destructive mutation requests unless the user explicitly authorizes those hardware effects. Browser validation complements rather than replaces host tests, the production build, and hardware validation.
 

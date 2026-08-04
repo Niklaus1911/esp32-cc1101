@@ -14,12 +14,11 @@ Last verified with ESP-IDF 6.0.2, classic ESP32, and Codex CLI 0.146.0.
 | Canonical MCP-capable Python environment | `$HOME/.espressif/python_env/idf6.0_py3.14_env` |
 | Canonical Python executable | `$HOME/.espressif/python_env/idf6.0_py3.14_env/bin/python` |
 | Older VS Code Python environment | `$HOME/.espressif/tools/python/v6.0.2/venv` |
-| Pi MCP configuration | `.pi/mcp.json` |
-| Pi package declaration | `.pi/settings.json` |
-| Planned Codex project configuration | `.codex/config.toml` |
-| Codex user configuration and trust | `$HOME/.codex/config.toml` |
+| Active Codex MCP configuration and trust | `$HOME/.codex/config.toml` |
+| Legacy Pi MCP configuration | `.pi/mcp.json` |
+| Legacy Pi package declaration | `.pi/settings.json` |
 
-All committed configuration should use `$HOME` or discover the Git root. Do not commit `$HOME` paths, OAuth credentials, browser profiles, or generated package caches.
+All committed configuration should use `$HOME` or discover the Git root. Do not commit user-specific absolute home paths, OAuth credentials, browser profiles, or generated package caches.
 
 ## ESP-IDF Installation
 
@@ -64,8 +63,8 @@ $HOME/.espressif/python_env/idf6.0_py3.14_env
 This is the canonical environment for:
 
 - `idf.py mcp-server`
-- Pi's local ESP-IDF Tools MCP server
-- the planned Codex ESP-IDF Tools MCP server
+- Pi's legacy local ESP-IDF Tools MCP server
+- the active Codex ESP-IDF Tools MCP server
 - command-line production verification after activation
 
 Validate it with:
@@ -106,13 +105,15 @@ The ESP-IDF checkout and toolchains are intact, but the EIM registration was emp
 $HOME/.local/share/eim/offline_archives/archive_v6.0.2_linux-x64.zst
 ```
 
+A generated helper currently exists at `$HOME/.espressif/tools/activate_idf_v6.0.2.fish`, but it is not suitable for MCP startup. It exits with status 1 when sourced by non-interactive `fish -lc` and hard-codes the older Python environment. Redirecting its output hides the explanatory error and leaves Codex reporting a closed MCP initialize connection.
+
 Do not rerun `eim fix` unless the required archive and recovery procedure have been deliberately verified. An MCP startup failure is not permission to modify, reinstall, repair, or delete anything under `$HOME/.espressif`.
 
 The direct `export.sh` and `export.fish` workflow is the supported local path for this project.
 
-## Pi MCP Setup
+## Legacy Pi MCP Setup
 
-Pi reads `.pi/mcp.json` when started from the repository root.
+Pi reads `.pi/mcp.json` when started from the repository root. These files remain as transition history and are not used by the active Codex setup.
 
 The remote Espressif Documentation MCP currently uses `mcp-remote`:
 
@@ -149,82 +150,35 @@ Pi's local npm installation cache is intentionally ignored through:
 /.pi/npm/
 ```
 
-## Planned Codex MCP Setup
+## Codex MCP Setup
 
-Codex supports committed, trusted project configuration in `.codex/config.toml`. Keep Pi and Codex configuration side by side during migration.
+Codex CLI reads the active MCP registrations and project trust from `$HOME/.codex/config.toml`. That user-level file also contains personal model settings and must not be committed to this repository.
 
-The planned Codex configuration uses native Streamable HTTP for Espressif documentation and stdio for the local ESP-IDF server:
+The active servers are:
 
-```toml
-[mcp_servers.espressif-docs]
-url = "https://mcp.espressif.com/docs"
-enabled = true
-startup_timeout_sec = 30
-tool_timeout_sec = 60
-default_tools_approval_mode = "approve"
+| Name | Transport | Purpose |
+|---|---|---|
+| `espressif-docs` | Streamable HTTP with OAuth | Search official Espressif documentation |
+| `esp-idf-tools` | Local stdio | Build, clean, set target, and flash ESP-IDF projects |
+| `playwright` | Local stdio | Drive a browser for Web UI validation |
 
-[mcp_servers.esp-idf-tools]
-command = "fish"
-args = [
-    "-c",
-    "set project_root (git rev-parse --show-toplevel); and source \"$HOME/.espressif/v6.0.2/esp-idf/export.fish\" >/dev/null; and test \"$IDF_PYTHON_ENV_PATH\" = \"$HOME/.espressif/python_env/idf6.0_py3.14_env\"; and exec idf.py -C \"$project_root\" mcp-server",
-]
-enabled = true
-startup_timeout_sec = 60
-tool_timeout_sec = 600
-default_tools_approval_mode = "auto"
+The working ESP-IDF Tools launcher is equivalent to:
 
-[mcp_servers.esp-idf-tools.tools.build_project]
-approval_mode = "approve"
-
-[mcp_servers.esp-idf-tools.tools.set_target]
-approval_mode = "prompt"
-
-[mcp_servers.esp-idf-tools.tools.clean_project]
-approval_mode = "prompt"
-
-[mcp_servers.esp-idf-tools.tools.flash_project]
-approval_mode = "prompt"
+```fish
+fish -lc 'source "$HOME/.espressif/v6.0.2/esp-idf/export.fish" >/dev/null; and test "$IDF_PYTHON_ENV_PATH" = "$HOME/.espressif/python_env/idf6.0_py3.14_env"; and exec "$IDF_PYTHON_ENV_PATH/bin/python" "$IDF_PATH/tools/idf.py" -C "$HOME/esp-projects/esp32-cc1101" mcp-server'
 ```
 
-The environment guard deliberately rejects the older non-MCP Python environment.
+The environment guard deliberately rejects the older non-MCP Python environment. A protocol-level initialization test of this launcher exposed exactly `build_project`, `clean_project`, `flash_project`, and `set_target`.
 
-Project trust belongs in the uncommitted user configuration:
+Espressif Documentation uses browser-based OAuth. Codex stores its credential outside the repository. Never put bearer tokens, OAuth data, personal model settings, or project trust configuration in versioned files.
 
-```toml
-[projects."<absolute-checkout-path>"]
-trust_level = "trusted"
-```
-
-For this checkout, replace `<absolute-checkout-path>` with the expanded value of `$HOME/esp-projects/esp32-cc1101`; TOML does not expand `$HOME`.
-
-Espressif Documentation requires browser-based OAuth. Authenticate after the project configuration exists:
-
-```bash
-codex -C "$HOME/esp-projects/esp32-cc1101" mcp login espressif-docs
-```
-
-Codex should store the resulting credentials in the operating-system keyring. Never put bearer tokens or OAuth data in `.codex/config.toml`.
+`codex mcp list` reports `Auth: Unsupported` for the two local stdio servers. This is normal: they do not use Codex's OAuth mechanism. It does not mean that startup or tool discovery failed.
 
 ## Playwright for Codex
 
-The planned Codex browser workflow uses Microsoft's Playwright CLI rather than a third MCP server. This keeps MCP context limited to the two Espressif servers and avoids adding Node project metadata to the firmware repository.
+The active Codex browser workflow uses Microsoft's Playwright MCP server through `npx @playwright/mcp@latest`. In a fresh Codex session, `/mcp` should list browser navigation, interaction, console, network, viewport, snapshot, and screenshot tools under `playwright`.
 
-Install the CLI into the existing user-owned npm prefix without `sudo`:
-
-```bash
-npm install -g @playwright/cli@latest
-playwright-cli install-browser
-playwright-cli --help
-```
-
-Install Microsoft's `playwright-cli` Codex skill under the user Codex skills directory, not in this repository:
-
-```text
-$HOME/.codex/skills/playwright-cli
-```
-
-Browser validation must use isolated sessions and temporary outputs under `/tmp`. Validate against a deterministic local mock before using an authorized device. Intercept RF transmit, replay, destructive maintenance, OTA, and configuration-changing requests unless those effects are explicitly authorized.
+Validate against a deterministic local mock before using an authorized device. Intercept RF transmit, replay, destructive maintenance, OTA, and configuration-changing requests unless those effects are explicitly authorized. Do not reuse a personal authenticated browser profile.
 
 Do not commit browser profiles, storage state, screenshots, traces, npm caches, or OAuth credentials.
 
@@ -239,8 +193,8 @@ Use this checklist after environment changes:
 5. Run native host tests from a clean, non-IDF shell.
 6. Build the Unity image when component behavior changed.
 7. Run `tools/verify-production.sh` as the final compiler, size, image, and partition gate.
-8. Validate Codex configuration with `codex doctor --json` and `codex mcp list --json` after `.codex/config.toml` is added.
-9. Exercise only `build_project` during MCP setup validation.
+8. Run `codex mcp list`, start a fresh Codex session, and use `/mcp` to confirm all three servers expose their expected tools.
+9. Exercise only `build_project` during ESP-IDF MCP setup validation.
 10. Do not test clean, target changes, flash, serial monitor, or on-device Unity without the required approval.
 
 ## Recovery Boundaries
