@@ -1109,6 +1109,8 @@ esp_err_t reconcile_discovery(RuntimeContext *context, bool force_configs)
         error = publish_automation_state(context);
         if (error == ESP_OK) {
             set_discovery_state(NetworkMqttDiscoveryState::kReady);
+        } else {
+            set_discovery_state(NetworkMqttDiscoveryState::kFaulted, error);
         }
         return error;
     }

@@ -46,6 +46,8 @@ Status: completed.
 
 ## Fix 6: Reconciliation diagnostics
 
+Status: completed.
+
 - Mark equal-ledger fast-path state-publication failures as faulted with the actual error.
 - Ensure the retry worker and `mqtt status` observe the same failure.
 - Verify with host tests and an ESP-IDF firmware build, then commit.
