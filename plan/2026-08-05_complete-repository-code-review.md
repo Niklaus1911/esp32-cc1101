@@ -98,3 +98,9 @@
 - **Root cause:** OTA and Wi-Fi sink-detach functions compare the current tick against `start + timeout`. The comparison is invalid when the FreeRTOS tick counter wraps, so callbacks can be detached too early or wait indefinitely roughly every counter period.
 - **Fix:** measure elapsed ticks using unsigned subtraction from the captured start tick, matching the already-correct bridge-event implementation.
 - **Regression/verification:** inspect all sink-detach wait loops for wrap-safe arithmetic, run the host suite and production verifier, compile the Unity image, and include sink detach/rebind observation in the hardware soak.
+
+## Confirmed Defect 8: Preserve MQTT Retirement Errors
+
+- **Root cause:** retained state-topic retirement combines topic formatting and QoS publish into one condition and replaces either failure with generic `ESP_FAIL`. The status and retry path therefore lose whether retirement failed because of a bounded-buffer contract or an acknowledgement timeout/publish error.
+- **Fix:** report `ESP_ERR_INVALID_SIZE` for topic formatting failure and otherwise preserve the exact `wait_for_publish()` result.
+- **Regression/verification:** inspect every retirement stage for first-error preservation, run all MQTT and host tests, compile the Unity image, run the production verifier, and confirm retirement diagnostics during the hardware profile transition without completing a destructive retirement.

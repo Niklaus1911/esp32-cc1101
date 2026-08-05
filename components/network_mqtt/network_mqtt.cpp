@@ -1270,9 +1270,13 @@ esp_err_t retire_discovery(RuntimeContext *context)
             MqttStateTopicKind::kLastAutomation,
         };
         for (const MqttStateTopicKind kind : state_kinds) {
-            if (!format_mqtt_state_topic(context->identity, kind, nullptr, topic, sizeof(topic)) ||
-                wait_for_publish(context, topic, "", 0) != ESP_OK) {
-                error = ESP_FAIL;
+            if (!format_mqtt_state_topic(context->identity, kind, nullptr, topic,
+                                         sizeof(topic))) {
+                error = ESP_ERR_INVALID_SIZE;
+                break;
+            }
+            error = wait_for_publish(context, topic, "", 0);
+            if (error != ESP_OK) {
                 break;
             }
         }
