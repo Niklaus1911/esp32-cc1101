@@ -669,6 +669,16 @@ void schedule_retry(int32_t reason)
     set_state(NetworkWifiState::kRetryWait);
 }
 
+void converge_driver_stopped(NetworkWifiState state, esp_err_t error)
+{
+    s_start_in_progress = false;
+    s_driver_started.store(false, std::memory_order_release);
+    s_associated = false;
+    clear_ip_status();
+    notify_online_sink(false);
+    set_state(state, error);
+}
+
 void process_scan_done()
 {
     if (s_scan_cancelled) {
@@ -720,8 +730,10 @@ void process_scan_done()
         s_operator_stopped = true;
         set_state(NetworkWifiState::kStopping);
         const esp_err_t stop_error = esp_wifi_stop();
-        if (stop_error != ESP_OK) {
+        if (stop_error != ESP_OK && stop_error != ESP_ERR_WIFI_NOT_STARTED) {
             set_state(NetworkWifiState::kFault, stop_error);
+        } else if (stop_error == ESP_ERR_WIFI_NOT_STARTED) {
+            converge_driver_stopped(NetworkWifiState::kOff, ESP_OK);
         }
     } else if (network_wifi_is_online()) {
         set_state(NetworkWifiState::kOnline);
@@ -764,10 +776,11 @@ void process_message(const Message &message)
                 const esp_err_t error = esp_wifi_stop();
                 if (error != ESP_OK && error != ESP_ERR_WIFI_NOT_STARTED) {
                     set_state(NetworkWifiState::kFault, error);
+                } else if (error == ESP_ERR_WIFI_NOT_STARTED) {
+                    converge_driver_stopped(NetworkWifiState::kOff, ESP_OK);
                 }
             } else {
-                clear_ip_status();
-                set_state(NetworkWifiState::kOff);
+                converge_driver_stopped(NetworkWifiState::kOff, ESP_OK);
             }
             break;
         case MessageType::kForget: {
@@ -795,11 +808,17 @@ void process_message(const Message &message)
             if (s_driver_started.load(std::memory_order_acquire) || s_start_in_progress) {
                 set_state(NetworkWifiState::kStopping, error);
                 const esp_err_t stop_error = esp_wifi_stop();
-                if (stop_error != ESP_OK) {
+                if (stop_error != ESP_OK && stop_error != ESP_ERR_WIFI_NOT_STARTED) {
                     set_state(NetworkWifiState::kFault, stop_error);
+                } else if (stop_error == ESP_ERR_WIFI_NOT_STARTED) {
+                    converge_driver_stopped(error == ESP_OK ? NetworkWifiState::kOff
+                                                             : NetworkWifiState::kFault,
+                                             error);
                 }
             } else {
-                set_state(error == ESP_OK ? NetworkWifiState::kOff : NetworkWifiState::kFault, error);
+                converge_driver_stopped(error == ESP_OK ? NetworkWifiState::kOff
+                                                         : NetworkWifiState::kFault,
+                                         error);
             }
             break;
         }
@@ -845,8 +864,10 @@ void process_message(const Message &message)
             if (s_operator_stopped && !s_scan_pending) {
                 set_state(NetworkWifiState::kStopping);
                 const esp_err_t error = esp_wifi_stop();
-                if (error != ESP_OK) {
+                if (error != ESP_OK && error != ESP_ERR_WIFI_NOT_STARTED) {
                     set_state(NetworkWifiState::kFault, error);
+                } else if (error == ESP_ERR_WIFI_NOT_STARTED) {
+                    converge_driver_stopped(NetworkWifiState::kOff, ESP_OK);
                 }
             } else if (s_scan_pending) {
                 start_scan();
