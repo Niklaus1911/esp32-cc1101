@@ -110,3 +110,9 @@
 - **Root cause:** the `web auth status/rotate` commands remain registered, but no startup path has ever called `initialize_web_auth()`. Status therefore times out on a null mutex and rotation always rejects the unavailable component. Repeated failed initialization can also overwrite and leak the retained diagnostic mutex.
 - **Fix:** make initialization single-shot and diagnostic-safe, load existing records without automatically creating an unused trusted-LAN token, allow missing/corrupt records to be repaired only by explicit rotation, make uninitialized status readable, and trigger initialization lazily from the UART commands.
 - **Regression/verification:** review all never-initialized, valid, missing, corrupt, and hard-failure transitions; compile the Unity image; run all host tests and the production verifier; and verify status/rotation only through non-mutating status during hardware validation so persisted data is preserved.
+
+## Confirmed Defect 10: Preserve RF-Signals Failure Diagnostics After Rollback
+
+- **Root cause:** failed RF-signals initialization now correctly deletes its diagnostic mutex, but `get_rf_signals_status()` unconditionally tries to lock that deleted mutex and returns `ESP_ERR_TIMEOUT`. UART, Web, and bridge snapshots therefore lose the real initialization error precisely when diagnostics are needed.
+- **Fix:** return a bounded lock-free unavailable snapshot from atomics whenever the service is unavailable, and retain mutex-protected status copying for the running service.
+- **Regression/verification:** inspect uninitialized, failed, retrying, and available transitions; compile the Unity image; run all host tests and the production verifier; and confirm the hardware status path still reports the running catalog and queue counters.
