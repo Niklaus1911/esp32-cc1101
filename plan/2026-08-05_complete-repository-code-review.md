@@ -140,3 +140,9 @@
 - **Root cause:** the Wi-Fi task-creation failure path calls `cleanup_failed_network_initialization()` before its `StatusLock` local has been destroyed. Cleanup deletes `s_mutex`, then the lock destructor gives the deleted semaphore.
 - **Fix:** scope the status lock to end before cleanup deletes the initialization resources.
 - **Regression/verification:** inspect every Wi-Fi cleanup call for live lock ownership; compile the Unity and production images; run all host tests and sanitizers; and confirm allocation-failure recovery does not assert or corrupt the status path.
+
+## Confirmed Defect 15: Preserve OTA Diagnostics When the Status Mutex Is Unavailable
+
+- **Root cause:** if OTA status-mutex allocation fails, initialization records `ESP_ERR_NO_MEM` without a mutex, but `get_ota_update_status()` always attempts to lock and returns `ESP_ERR_TIMEOUT`, hiding the allocation failure from console, Web, and bridge diagnostics.
+- **Fix:** return a lock-free unavailable snapshot with the atomic initialization error when no status mutex exists.
+- **Regression/verification:** inspect OTA pre-init, mutex-allocation failure, partition failure, task failure, and ready status paths; compile the Unity and production images; run all host tests and sanitizers; and confirm low-memory diagnostics preserve `ESP_ERR_NO_MEM`.

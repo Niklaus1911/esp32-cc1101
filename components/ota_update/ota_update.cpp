@@ -512,6 +512,13 @@ esp_err_t get_ota_update_status(OtaUpdateStatus *status)
     if (status == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!s_available.load(std::memory_order_acquire) && s_mutex == nullptr) {
+        *status = {};
+        status->state = OtaUpdateState::kUnavailable;
+        status->initialization_error = s_initialization_error.load(std::memory_order_acquire);
+        status->upload_active = s_upload_active.load(std::memory_order_relaxed);
+        return ESP_OK;
+    }
     StatusLock lock;
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;
