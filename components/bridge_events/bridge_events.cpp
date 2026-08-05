@@ -37,7 +37,9 @@ SemaphoreHandle_t s_mutex = nullptr;
 QueueHandle_t s_event_queue = nullptr;
 TaskHandle_t s_dispatcher_task = nullptr;
 std::array<SinkSlot, kMaximumSinks> s_sinks{};
+std::atomic_flag s_initializing = ATOMIC_FLAG_INIT;
 std::atomic<bool> s_available{false};
+std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<uint64_t> s_next_sequence{0};
 std::atomic<uint64_t> s_published{0};
 std::atomic<uint32_t> s_queue_drops{0};
@@ -127,8 +129,8 @@ void dispatcher_task(void *)
 
 esp_err_t initialize_bridge_events()
 {
-    bool expected = false;
-    if (!s_available.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (s_available.load(std::memory_order_acquire) ||
+        s_initializing.test_and_set(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
     s_mutex = xSemaphoreCreateMutex();
@@ -144,10 +146,14 @@ esp_err_t initialize_bridge_events()
             vSemaphoreDelete(s_mutex);
             s_mutex = nullptr;
         }
-        s_available.store(false, std::memory_order_release);
+        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        s_initializing.clear(std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
 
+    s_initialization_error.store(ESP_OK, std::memory_order_release);
+    s_available.store(true, std::memory_order_release);
+    s_initializing.clear(std::memory_order_release);
     (void)bridge_events_bind_available_sources();
     return ESP_OK;
 }
@@ -245,6 +251,10 @@ esp_err_t bridge_events_get_status(BridgeEventBrokerStatus *status)
     result.published = s_published.load(std::memory_order_relaxed);
     result.queue_drops = s_queue_drops.load(std::memory_order_relaxed);
     result.sink_drops = s_sink_drops.load(std::memory_order_relaxed);
+    if (!result.available) {
+        *status = result;
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
     BrokerLock lock;
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;

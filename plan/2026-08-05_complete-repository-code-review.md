@@ -122,3 +122,9 @@
 - **Root cause:** every failed Wi-Fi initialization path deletes the status mutex, but `get_network_wifi_status()` unconditionally tries to lock it. The public snapshot therefore replaces the stored allocation, MAC, or task-creation failure with `ESP_ERR_TIMEOUT` after cleanup.
 - **Fix:** return a lock-free unavailable snapshot containing the atomic initialization error and counters when the manager is unavailable, while retaining the mutex-protected full snapshot for the running manager.
 - **Regression/verification:** inspect all pre-initialization and cleanup exits; compile the Unity image; run all host tests and the production verifier; and confirm normal hardware status retains saved credentials, network state, counters, and the successful initialization result.
+
+## Confirmed Defect 12: Publish Event-Broker Availability Only After Initialization
+
+- **Root cause:** the bridge-event broker uses `s_available` as both an initialization guard and the public readiness flag, setting it before the mutex, queue, and dispatcher task exist. Concurrent callers can observe a partially initialized broker, while failed cleanup deletes the mutex and makes status return a misleading timeout instead of the allocation failure.
+- **Fix:** add a dedicated retryable initialization guard, publish availability only after all resources exist, retain the exact initialization error, and return an unavailable counter snapshot plus that error without locking after failure.
+- **Regression/verification:** inspect pre-init, in-progress, allocation-failure, retry, and ready transitions; compile the Unity image; run all host tests and the production verifier; and confirm the hardware broker status shows both registered sinks with stable drop counters.
