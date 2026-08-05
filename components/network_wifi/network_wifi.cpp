@@ -1109,6 +1109,7 @@ esp_err_t initialize_network_wifi()
     if (!s_initialization_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return s_initialization_error.load(std::memory_order_acquire);
     }
+    s_status = {};
     s_mutex = xSemaphoreCreateMutex();
     s_admission_mutex = xSemaphoreCreateMutex();
     s_hostname_mutex = xSemaphoreCreateMutex();
@@ -1161,6 +1162,19 @@ esp_err_t initialize_network_wifi()
 
     WifiCredentials saved{};
     const esp_err_t saved_error = load_saved_wifi_credentials(&saved);
+    if (saved_error == ESP_OK) {
+        s_saved_credentials = saved;
+    }
+    if (xTaskCreate(network_task, "wifi_mgr", kTaskStackSize, nullptr, kTaskPriority, &s_task) != pdPASS) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status = {};
+            s_status.initialization_error = ESP_ERR_NO_MEM;
+        }
+        cleanup_failed_network_initialization();
+        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        return ESP_ERR_NO_MEM;
+    }
     {
         StatusLock lock;
         if (lock.locked()) {
@@ -1171,15 +1185,9 @@ esp_err_t initialize_network_wifi()
             s_status.saved = saved_error == ESP_OK;
             s_status.persistence_error = saved_error == ESP_ERR_NOT_FOUND ? ESP_OK : saved_error;
             if (saved_error == ESP_OK) {
-                s_saved_credentials = saved;
                 copy_text(s_status.saved_ssid, sizeof(s_status.saved_ssid), saved.ssid);
             }
         }
-    }
-    if (xTaskCreate(network_task, "wifi_mgr", kTaskStackSize, nullptr, kTaskPriority, &s_task) != pdPASS) {
-        cleanup_failed_network_initialization();
-        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
-        return ESP_ERR_NO_MEM;
     }
     s_available.store(true, std::memory_order_release);
     s_initialization_error.store(ESP_OK, std::memory_order_release);
