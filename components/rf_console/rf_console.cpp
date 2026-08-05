@@ -1846,6 +1846,11 @@ int web_command(int argc, char **argv)
 {
     if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
         std::strcmp(argv[2], "status") == 0) {
+        const esp_err_t initialization_error = initialize_web_auth();
+        if (initialization_error != ESP_OK && initialization_error != ESP_ERR_NOT_FOUND &&
+            initialization_error != ESP_ERR_INVALID_RESPONSE) {
+            return print_result("web auth status", initialization_error);
+        }
         WebAuthStatus status{};
         const esp_err_t error = get_web_auth_status(&status);
         if (error != ESP_OK) {
@@ -1867,9 +1872,6 @@ int web_command(int argc, char **argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
         std::strcmp(argv[2], "rotate") == 0) {
-        WebAuthStatus previous{};
-        const bool recovering =
-            get_web_auth_status(&previous) == ESP_OK && !previous.available;
         char token[kWebAuthTokenLength + 1U]{};
         const esp_err_t error = rotate_web_auth_token(token, sizeof(token));
         if (error != ESP_OK) {
@@ -1880,8 +1882,8 @@ int web_command(int argc, char **argv)
             std::memset(token, 0, sizeof(token));
             return 1;
         }
-        std::printf("\nWEB AUTH TOKEN %s\nStore this token; it will not be shown again.%s\n",
-                    token, recovering ? " Reboot to restart Web and OTA services." : "");
+        std::printf("\nLEGACY WEB AUTH TOKEN %s\nStore this token; it will not be shown again.\n",
+                    token);
         std::fflush(stdout);
         std::memset(token, 0, sizeof(token));
         return 0;
@@ -2374,7 +2376,8 @@ constexpr CommandDefinition kCommands[] = {
     {"mqtt", "Configure native Home Assistant MQTT buttons", "<status|configure <ipv4> <username> [port]|forget>", mqtt_command},
     {"hostname", "Configure shared DHCP and mDNS identity", "<status|set <label>|reset>", hostname_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
-    {"web", "Inspect or rotate Web UI authentication", "auth <status|rotate>", web_command},
+    {"web", "Inspect or rotate the legacy Web authentication record",
+     "auth <status|rotate>", web_command},
     {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},

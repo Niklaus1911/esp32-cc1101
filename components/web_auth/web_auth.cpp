@@ -33,6 +33,7 @@ struct AuthRecord {
 
 SemaphoreHandle_t s_mutex = nullptr;
 std::array<uint8_t, 32> s_verifier{};
+std::atomic<bool> s_initialization_started{false};
 std::atomic<bool> s_available{false};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<uint32_t> s_generation{0};
@@ -154,8 +155,10 @@ esp_err_t load_verifier(bool *found)
 
 esp_err_t initialize_web_auth()
 {
-    if (s_available.load(std::memory_order_acquire)) {
-        return ESP_ERR_INVALID_STATE;
+    bool expected = false;
+    if (!s_initialization_started.compare_exchange_strong(expected, true,
+                                                           std::memory_order_acq_rel)) {
+        return s_initialization_error.load(std::memory_order_acquire);
     }
     if (psa_crypto_init() != PSA_SUCCESS) {
         s_initialization_error.store(ESP_FAIL, std::memory_order_release);
@@ -169,15 +172,7 @@ esp_err_t initialize_web_auth()
     bool found = false;
     esp_err_t error = load_verifier(&found);
     if (error == ESP_OK && !found) {
-        char token[kWebAuthTokenLength + 1U]{};
-        generate_token(token);
-        error = hash_token(token, s_verifier.data()) ? save_verifier(s_verifier.data())
-                                                       : ESP_FAIL;
-        if (error == ESP_OK) {
-            std::printf("\nWEB AUTH TOKEN %s\nStore this token; it will not be shown again.\n", token);
-            std::fflush(stdout);
-        }
-        std::memset(token, 0, sizeof(token));
+        error = ESP_ERR_NOT_FOUND;
     }
     if (error != ESP_OK) {
         s_initialization_error.store(error, std::memory_order_release);
@@ -232,11 +227,18 @@ esp_err_t rotate_web_auth_token(char *token, std::size_t capacity)
     if (token == nullptr || capacity < kWebAuthTokenLength + 1U) {
         return ESP_ERR_INVALID_ARG;
     }
-    const bool recovering_invalid_record =
+    esp_err_t initialization_error =
+        s_initialization_error.load(std::memory_order_acquire);
+    if (!s_available.load(std::memory_order_acquire) &&
+        initialization_error == ESP_ERR_INVALID_STATE) {
+        initialization_error = initialize_web_auth();
+    }
+    const bool recovering_record =
         !s_available.load(std::memory_order_acquire) &&
-        s_initialization_error.load(std::memory_order_acquire) == ESP_ERR_INVALID_RESPONSE;
-    if (!s_available.load(std::memory_order_acquire) && !recovering_invalid_record) {
-        return ESP_ERR_INVALID_STATE;
+        (initialization_error == ESP_ERR_NOT_FOUND ||
+         initialization_error == ESP_ERR_INVALID_RESPONSE);
+    if (!s_available.load(std::memory_order_acquire) && !recovering_record) {
+        return initialization_error;
     }
     AuthLock lock;
     if (!lock.locked()) {
@@ -250,7 +252,7 @@ esp_err_t rotate_web_auth_token(char *token, std::size_t capacity)
         s_verifier = verifier;
         s_failed_attempts = 0;
         s_blocked_until_us = 0;
-        if (recovering_invalid_record) {
+        if (recovering_record) {
             s_generation.store(1, std::memory_order_release);
             s_initialization_error.store(ESP_OK, std::memory_order_release);
             s_available.store(true, std::memory_order_release);
@@ -273,6 +275,10 @@ esp_err_t get_web_auth_status(WebAuthStatus *status)
     result.provisioned = result.available;
     result.generation = s_generation.load(std::memory_order_relaxed);
     result.initialization_error = s_initialization_error.load(std::memory_order_relaxed);
+    if (s_mutex == nullptr) {
+        *status = result;
+        return ESP_OK;
+    }
     AuthLock lock;
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;

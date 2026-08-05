@@ -104,3 +104,9 @@
 - **Root cause:** retained state-topic retirement combines topic formatting and QoS publish into one condition and replaces either failure with generic `ESP_FAIL`. The status and retry path therefore lose whether retirement failed because of a bounded-buffer contract or an acknowledgement timeout/publish error.
 - **Fix:** report `ESP_ERR_INVALID_SIZE` for topic formatting failure and otherwise preserve the exact `wait_for_publish()` result.
 - **Regression/verification:** inspect every retirement stage for first-error preservation, run all MQTT and host tests, compile the Unity image, run the production verifier, and confirm retirement diagnostics during the hardware profile transition without completing a destructive retirement.
+
+## Confirmed Defect 9: Restore Lazy UART Web-Auth Administration
+
+- **Root cause:** the `web auth status/rotate` commands remain registered, but no startup path has ever called `initialize_web_auth()`. Status therefore times out on a null mutex and rotation always rejects the unavailable component. Repeated failed initialization can also overwrite and leak the retained diagnostic mutex.
+- **Fix:** make initialization single-shot and diagnostic-safe, load existing records without automatically creating an unused trusted-LAN token, allow missing/corrupt records to be repaired only by explicit rotation, make uninitialized status readable, and trigger initialization lazily from the UART commands.
+- **Regression/verification:** review all never-initialized, valid, missing, corrupt, and hard-failure transitions; compile the Unity image; run all host tests and the production verifier; and verify status/rotation only through non-mutating status during hardware validation so persisted data is preserved.
