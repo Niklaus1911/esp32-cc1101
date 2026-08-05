@@ -1187,10 +1187,12 @@ esp_err_t initialize_network_wifi()
         s_saved_credentials = saved;
     }
     if (xTaskCreate(network_task, "wifi_mgr", kTaskStackSize, nullptr, kTaskPriority, &s_task) != pdPASS) {
-        StatusLock lock;
-        if (lock.locked()) {
-            s_status = {};
-            s_status.initialization_error = ESP_ERR_NO_MEM;
+        {
+            StatusLock lock;
+            if (lock.locked()) {
+                s_status = {};
+                s_status.initialization_error = ESP_ERR_NO_MEM;
+            }
         }
         cleanup_failed_network_initialization();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);

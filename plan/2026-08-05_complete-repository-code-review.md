@@ -134,3 +134,9 @@
 - **Root cause:** RF signals also uses `s_available` as its retry guard, setting public readiness before its mutexes and queue exist. A concurrent learning request can pass the availability check and send to a null queue, while frame and status callers can observe a partially initialized service.
 - **Fix:** use a dedicated retryable initialization guard, keep the service unavailable until the catalog, task, queues, and mutexes are ready, and clear the guard on every success or rollback exit.
 - **Regression/verification:** inspect learning, frame, status, failure, retry, and successful startup interleavings; compile the Unity image; run all host tests and the production verifier; and confirm hardware startup reports the persisted catalog before accepting receive events.
+
+## Confirmed Defect 14: Do Not Destroy Wi-Fi Status Mutex While Locked
+
+- **Root cause:** the Wi-Fi task-creation failure path calls `cleanup_failed_network_initialization()` before its `StatusLock` local has been destroyed. Cleanup deletes `s_mutex`, then the lock destructor gives the deleted semaphore.
+- **Fix:** scope the status lock to end before cleanup deletes the initialization resources.
+- **Regression/verification:** inspect every Wi-Fi cleanup call for live lock ownership; compile the Unity and production images; run all host tests and sanitizers; and confirm allocation-failure recovery does not assert or corrupt the status path.
