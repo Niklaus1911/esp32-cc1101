@@ -46,7 +46,7 @@
 - Use QoS 0 for commands to avoid legal QoS 1 redelivery causing duplicate RF transmissions. Reject retained, duplicate, fragmented, oversized, malformed, wrong-topic, and non-`PRESS` messages.
 - Queue only a validated signal name in a fixed depth-8 command queue. The worker calls `bridge_control_replay_named(name, CONFIG_RF_DEFAULT_TX_REPEATS, kMqtt)`; the current default remains eight repeats.
 - Subscribe in one request to `rfbridge/<12hex>/signal/+/press` and `homeassistant/status`, both QoS 0. After SUBACK, publish retained QoS 1 `online`, wait for PUBACK, then reconcile discovery.
-- Configure retained QoS 1 LWT `offline`, clean sessions, automatic reconnect, 10-second reconnect delay, 5-second network timeout, 1,024-byte input/output buffers, 2,048-byte outbox, a 6,144-byte MQTT task, and a 4,096-byte worker.
+- Configure retained QoS 1 LWT `offline`, clean sessions, automatic reconnect, 10-second reconnect delay, 5-second network timeout, 1,024-byte input/output buffers, 2,048-byte outbox, a 6,144-byte MQTT task, and a 5,632-byte worker sized to retain at least 1 KiB through the synchronous named-replay path.
 - Keep callbacks short: copy validated commands, update atomics/counters, sample stack margin, and notify the worker. Only the worker may publish, access NVS, enumerate signals, or replay RF.
 - Permit one retained QoS 1 publish in flight. Match PUBACK and `MQTT_EVENT_DELETED` message IDs; pause on disconnect and retry safely without growing the outbox.
 - Reconcile crash-safely:
