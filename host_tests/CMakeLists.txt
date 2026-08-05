@@ -44,6 +44,7 @@ add_test(NAME rf_host_tests COMMAND rf_host_tests)
 
 add_executable(mqtt_host_tests
     test_network_mqtt.cpp
+    ../components/network_mqtt/network_mqtt_policy.cpp
     ../components/network_mqtt/mqtt_config_format.cpp
     ../components/network_mqtt/mqtt_discovery.cpp
     ../components/network_mqtt/mqtt_telemetry.cpp

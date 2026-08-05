@@ -8,6 +8,7 @@
 
 #include "mqtt_config_format.hpp"
 #include "mqtt_discovery.hpp"
+#include "network_mqtt_policy.hpp"
 #include "mqtt_telemetry.hpp"
 
 namespace {
@@ -87,6 +88,24 @@ void test_ipv4_contract()
                                                 sizeof(short_buffer)) &&
                 !rfbridge::format_mqtt_broker_ipv4(0, formatted, sizeof(formatted)),
             "broker formatter rejects invalid addresses and short buffers");
+}
+
+void test_network_availability_policy()
+{
+    using rfbridge::MqttNetworkAvailability;
+    using rfbridge::MqttNetworkEventKind;
+    require(rfbridge::mqtt_network_availability(MqttNetworkEventKind::kConnected, true) ==
+                MqttNetworkAvailability::kOnline,
+            "connected online event marks MQTT network ready");
+    require(rfbridge::mqtt_network_availability(MqttNetworkEventKind::kStateChanged, false) ==
+                MqttNetworkAvailability::kOffline,
+            "non-online state change marks MQTT network offline");
+    require(rfbridge::mqtt_network_availability(MqttNetworkEventKind::kDisconnected, true) ==
+                MqttNetworkAvailability::kOffline,
+            "disconnect event is offline even before Wi-Fi state settles");
+    require(rfbridge::mqtt_network_availability(MqttNetworkEventKind::kOther, true) ==
+                MqttNetworkAvailability::kUnchanged,
+            "scan-only events do not change MQTT network readiness");
 }
 
 void test_service_record()
@@ -510,6 +529,7 @@ int main()
     test_discovery_contract();
     test_incoming_messages();
     test_automation_discovery_and_telemetry();
+    test_network_availability_policy();
     std::puts("All MQTT host tests passed");
     return 0;
 }

@@ -21,6 +21,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mqtt_discovery.hpp"
+#include "network_mqtt_policy.hpp"
 #include "mqtt_telemetry.hpp"
 #include "network_mqtt_storage.hpp"
 #include "nvs.h"
@@ -1484,17 +1485,32 @@ bool mqtt_bridge_sink(const BridgeEvent &event, void *context_pointer)
         remember_last_automation(context, message.automation);
         (void)enqueue_telemetry(context, message);
     } else if (event.type == BridgeEventType::kNetwork) {
-        const bool online = event.payload.network.type == NetworkWifiEventType::kConnected &&
-                            event.payload.network.state == NetworkWifiState::kOnline;
-        const bool offline = event.payload.network.type == NetworkWifiEventType::kDisconnected;
-        if (online) {
+        MqttNetworkEventKind event_kind = MqttNetworkEventKind::kOther;
+        switch (event.payload.network.type) {
+            case NetworkWifiEventType::kStateChanged:
+            case NetworkWifiEventType::kError:
+                event_kind = MqttNetworkEventKind::kStateChanged;
+                break;
+            case NetworkWifiEventType::kConnected:
+                event_kind = MqttNetworkEventKind::kConnected;
+                break;
+            case NetworkWifiEventType::kDisconnected:
+                event_kind = MqttNetworkEventKind::kDisconnected;
+                break;
+            case NetworkWifiEventType::kScanResult:
+            case NetworkWifiEventType::kScanCompleted:
+                break;
+        }
+        const MqttNetworkAvailability availability = mqtt_network_availability(
+            event_kind, event.payload.network.state == NetworkWifiState::kOnline);
+        if (availability == MqttNetworkAvailability::kOnline) {
             context->network_online.store(true, std::memory_order_release);
             taskENTER_CRITICAL(&s_status_lock);
             s_status.network_ready = true;
             s_status.client_start_pending = !context->client_started.load(std::memory_order_relaxed);
             taskEXIT_CRITICAL(&s_status_lock);
             notify_worker(context, kWakeNetwork);
-        } else if (offline) {
+        } else if (availability == MqttNetworkAvailability::kOffline) {
             context->network_online.store(false, std::memory_order_release);
             taskENTER_CRITICAL(&s_status_lock);
             s_status.network_ready = false;

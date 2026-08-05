@@ -62,3 +62,9 @@
 - **Root cause:** `publish_pending_states()` removes both the last-RX and last-automation snapshots before it attempts either publish. If the RX topic/payload cannot be formatted or its QoS 1 publish fails, only the RX snapshot is restored and the unattempted automation snapshot is lost.
 - **Fix:** take the RX snapshot first, publish it, and only then take the automation snapshot. Keep the existing restore-if-unset behavior so a failed older publish cannot overwrite a newer producer snapshot.
 - **Regression/verification:** inspect all early-return paths for ownership symmetry, run the MQTT host suite and full host suite, compile the production image, and exercise reconnect/failure recovery during the MQTT hardware pass.
+
+## Confirmed Defect 2: Reconcile MQTT Readiness on Every Wi-Fi Loss State
+
+- **Root cause:** the MQTT bridge sink treats only `kDisconnected` as offline. DHCP/IP loss and operator stop are delivered as `kStateChanged` events with a non-online state, so MQTT can retain `network_online=true` and `network_ready=true` after the interface has lost usable connectivity.
+- **Fix:** centralize the event-to-availability mapping in a pure MQTT policy helper. Connected/state/error events report online only when their state is `kOnline`; explicit disconnects always report offline; scan-only events leave availability unchanged.
+- **Regression/verification:** add host coverage for online, offline, disconnect, and scan-only mappings; run all host tests and the production verifier; observe readiness transitions during the three Wi-Fi reconnect cycles in both hardware profiles.
