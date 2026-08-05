@@ -46,6 +46,7 @@ add_executable(mqtt_host_tests
     test_network_mqtt.cpp
     ../components/network_mqtt/mqtt_config_format.cpp
     ../components/network_mqtt/mqtt_discovery.cpp
+    ../components/network_mqtt/mqtt_telemetry.cpp
     ../components/rf_codec/rf_codec.cpp
     ../components/rf_storage/rf_storage_format.cpp
 )

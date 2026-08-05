@@ -12,8 +12,9 @@ constexpr std::size_t kMqttUsernameCapacity = 64;
 constexpr std::size_t kMqttPasswordCapacity = 128;
 constexpr std::size_t kMqttServiceMaxRecordSize = 214;
 constexpr std::size_t kMqttMaximumAdvertisedSignals = 64;
+constexpr uint8_t kMqttAdvertisedFormatVersion = 2;
 constexpr std::size_t kMqttAdvertisedMaxRecordSize =
-    16U + kMqttMaximumAdvertisedSignals * kRfStorageNameCapacity;
+    20U + kMqttMaximumAdvertisedSignals * kRfStorageNameCapacity;
 
 enum class MqttServiceState : uint8_t {
     kWeb = 0,
@@ -35,8 +36,15 @@ struct MqttAdvertisedLedger {
     uint32_t broker_ipv4 = 0;
     uint16_t port = 0;
     uint8_t count = 0;
+    uint8_t rule_count = 0;
+    uint8_t format_version = kMqttAdvertisedFormatVersion;
     std::array<RfStorageName, kMqttMaximumAdvertisedSignals> names{};
 };
+
+constexpr std::size_t mqtt_advertised_ledger_total_count(const MqttAdvertisedLedger &ledger)
+{
+    return static_cast<std::size_t>(ledger.count) + ledger.rule_count;
+}
 
 enum class MqttConfigFormatResult : uint8_t {
     kOk,

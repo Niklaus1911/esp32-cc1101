@@ -103,6 +103,79 @@ bool format_text(char *output, std::size_t capacity, const char *format, ...)
     return written > 0 && static_cast<std::size_t>(written) < capacity;
 }
 
+const char *event_suffix(MqttEventTopicKind kind)
+{
+    return kind == MqttEventTopicKind::kAutomation ? "automation" : "rx";
+}
+
+const char *state_suffix(MqttStateTopicKind kind)
+{
+    switch (kind) {
+        case MqttStateTopicKind::kLastRx: return "last_rx";
+        case MqttStateTopicKind::kLastAutomation: return "last_automation";
+        case MqttStateTopicKind::kRule: return "rule";
+        case MqttStateTopicKind::kAutomation: default: return "automation";
+    }
+}
+
+const char *command_suffix(MqttAutomationCommandKind kind)
+{
+    return kind == MqttAutomationCommandKind::kLogMode ? "log_mode" : "enabled";
+}
+
+bool entity_parts(MqttDiscoveryEntityKind kind, const char **component, const char **object,
+                  bool *requires_rule)
+{
+    if (component == nullptr || object == nullptr || requires_rule == nullptr) {
+        return false;
+    }
+    *requires_rule = false;
+    switch (kind) {
+        case MqttDiscoveryEntityKind::kRxEvent:
+            *component = "event";
+            *object = "rf_activity";
+            return true;
+        case MqttDiscoveryEntityKind::kAutomationEvent:
+            *component = "event";
+            *object = "automation_activity";
+            return true;
+        case MqttDiscoveryEntityKind::kAutomationSwitch:
+            *component = "switch";
+            *object = "automation";
+            return true;
+        case MqttDiscoveryEntityKind::kAutomationLogSelect:
+            *component = "select";
+            *object = "automation_log";
+            return true;
+        case MqttDiscoveryEntityKind::kRuleCountSensor:
+            *component = "sensor";
+            *object = "rule_count";
+            return true;
+        case MqttDiscoveryEntityKind::kEventDropsSensor:
+            *component = "sensor";
+            *object = "event_drops";
+            return true;
+        case MqttDiscoveryEntityKind::kRuleSensor:
+            *component = "sensor";
+            *object = "rule";
+            *requires_rule = true;
+            return true;
+    }
+    return false;
+}
+
+bool append_device(BoundedWriter *writer, const MqttDeviceIdentity &identity,
+                   const char *firmware_version)
+{
+    return writer->append(",\"device\":{\"identifiers\":[") &&
+           writer->append_json_string(identity.device_id) &&
+           writer->append("],\"name\":") &&
+           writer->append_json_string(identity.device_name) &&
+           writer->append(",\"manufacturer\":\"RF Bridge\",\"model\":\"ESP32 + CC1101\","
+                          "\"sw_version\":") &&
+           writer->append_json_string(firmware_version) && writer->append("}");
+}
+
 }  // namespace
 
 bool derive_mqtt_device_identity(const uint8_t station_mac[6], MqttDeviceIdentity *identity)
@@ -158,6 +231,54 @@ bool format_mqtt_command_topic(const MqttDeviceIdentity &identity, const char *s
                        signal_name);
 }
 
+bool format_mqtt_event_topic(const MqttDeviceIdentity &identity, MqttEventTopicKind kind,
+                             char *output, std::size_t capacity)
+{
+    return format_text(output, capacity, "rfbridge/%s/event/%s", identity.mac_hex,
+                       event_suffix(kind));
+}
+
+bool format_mqtt_state_topic(const MqttDeviceIdentity &identity, MqttStateTopicKind kind,
+                             const char *rule_name, char *output, std::size_t capacity)
+{
+    if (kind == MqttStateTopicKind::kRule && !rf_storage_name_is_valid(rule_name)) {
+        return false;
+    }
+    if (kind == MqttStateTopicKind::kRule) {
+        return format_text(output, capacity, "rfbridge/%s/state/rule/%s", identity.mac_hex,
+                           rule_name);
+    }
+    return format_text(output, capacity, "rfbridge/%s/state/%s", identity.mac_hex,
+                       state_suffix(kind));
+}
+
+bool format_mqtt_automation_command_topic(const MqttDeviceIdentity &identity,
+                                           MqttAutomationCommandKind kind, char *output,
+                                           std::size_t capacity)
+{
+    return format_text(output, capacity, "rfbridge/%s/automation/%s/set", identity.mac_hex,
+                       command_suffix(kind));
+}
+
+bool format_mqtt_entity_discovery_topic(const MqttDeviceIdentity &identity,
+                                        MqttDiscoveryEntityKind kind, const char *rule_name,
+                                        char *output, std::size_t capacity)
+{
+    const char *component = nullptr;
+    const char *object = nullptr;
+    bool requires_rule = false;
+    if (!entity_parts(kind, &component, &object, &requires_rule) ||
+        (requires_rule && !rf_storage_name_is_valid(rule_name))) {
+        return false;
+    }
+    if (requires_rule) {
+        return format_text(output, capacity, "homeassistant/%s/%s/rule_%s/config", component,
+                           identity.device_id, rule_name);
+    }
+    return format_text(output, capacity, "homeassistant/%s/%s/%s/config", component,
+                       identity.device_id, object == nullptr ? "" : object);
+}
+
 bool format_mqtt_discovery_payload(const MqttDeviceIdentity &identity, const char *signal_name,
                                    const char *firmware_version, char *output,
                                    std::size_t capacity)
@@ -195,6 +316,143 @@ bool format_mqtt_discovery_payload(const MqttDeviceIdentity &identity, const cha
     return writer.valid();
 }
 
+bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
+                                          MqttDiscoveryEntityKind kind, const char *rule_name,
+                                          const char *firmware_version, char *output,
+                                          std::size_t capacity)
+{
+    if (firmware_version == nullptr || output == nullptr) {
+        return false;
+    }
+    const char *component = nullptr;
+    const char *object = nullptr;
+    bool requires_rule = false;
+    if (!entity_parts(kind, &component, &object, &requires_rule) ||
+        (requires_rule && !rf_storage_name_is_valid(rule_name))) {
+        return false;
+    }
+    char state_topic[kMqttTopicCapacity]{};
+    char availability_topic[kMqttTopicCapacity]{};
+    char command_topic[kMqttTopicCapacity]{};
+    char unique_id[64]{};
+    if (!format_mqtt_availability_topic(identity, availability_topic, sizeof(availability_topic))) {
+        return false;
+    }
+    if (requires_rule) {
+        if (!format_mqtt_state_topic(identity, MqttStateTopicKind::kRule, rule_name, state_topic,
+                                     sizeof(state_topic)) ||
+            !format_text(unique_id, sizeof(unique_id), "%s_rule_%s", identity.device_id,
+                         rule_name)) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kRxEvent ||
+               kind == MqttDiscoveryEntityKind::kAutomationEvent) {
+        const MqttEventTopicKind event_kind = kind == MqttDiscoveryEntityKind::kRxEvent
+                                                   ? MqttEventTopicKind::kRx
+                                                   : MqttEventTopicKind::kAutomation;
+        if (!format_mqtt_event_topic(identity, event_kind, state_topic, sizeof(state_topic)) ||
+            !format_text(unique_id, sizeof(unique_id), "%s_%s", identity.device_id, object)) {
+            return false;
+        }
+    } else if (!format_mqtt_state_topic(identity, MqttStateTopicKind::kAutomation, nullptr,
+                                        state_topic, sizeof(state_topic)) ||
+               !format_text(unique_id, sizeof(unique_id), "%s_%s", identity.device_id, object)) {
+        return false;
+    }
+    if (kind == MqttDiscoveryEntityKind::kAutomationSwitch &&
+        !format_mqtt_automation_command_topic(identity, MqttAutomationCommandKind::kEnabled,
+                                               command_topic, sizeof(command_topic))) {
+        return false;
+    }
+    if (kind == MqttDiscoveryEntityKind::kAutomationLogSelect &&
+        !format_mqtt_automation_command_topic(identity, MqttAutomationCommandKind::kLogMode,
+                                               command_topic, sizeof(command_topic))) {
+        return false;
+    }
+    BoundedWriter writer(output, capacity);
+    if (requires_rule) {
+        return writer.append("{\"name\":\"Rule ") && writer.append(rule_name) &&
+               writer.append("\",\"unique_id\":") && writer.append_json_string(unique_id) &&
+               writer.append(",\"state_topic\":") && writer.append_json_string(state_topic) &&
+               writer.append(",\"value_template\":\"{{ value_json.state }}\","
+                             "\"json_attributes_topic\":") &&
+               writer.append_json_string(state_topic) &&
+               writer.append(",\"entity_category\":\"diagnostic\",\"availability_topic\":") &&
+               writer.append_json_string(availability_topic) &&
+               writer.append(",\"payload_available\":\"online\","
+                             "\"payload_not_available\":\"offline\"") &&
+               append_device(&writer, identity, firmware_version) && writer.append("}") &&
+               writer.valid();
+    }
+    const char *name = object;
+    if (kind == MqttDiscoveryEntityKind::kRxEvent) {
+        name = "RF activity";
+    } else if (kind == MqttDiscoveryEntityKind::kAutomationEvent) {
+        name = "Automation activity";
+    } else if (kind == MqttDiscoveryEntityKind::kAutomationSwitch) {
+        name = "Automation enabled";
+    } else if (kind == MqttDiscoveryEntityKind::kAutomationLogSelect) {
+        name = "Automation log mode";
+    } else if (kind == MqttDiscoveryEntityKind::kRuleCountSensor) {
+        name = "Automation rule count";
+    } else if (kind == MqttDiscoveryEntityKind::kEventDropsSensor) {
+        name = "MQTT event drops";
+    }
+    if (!writer.append("{\"name\":") || !writer.append_json_string(name) ||
+        !writer.append(",\"unique_id\":") || !writer.append_json_string(unique_id)) {
+        return false;
+    }
+    if (kind == MqttDiscoveryEntityKind::kRxEvent ||
+        kind == MqttDiscoveryEntityKind::kAutomationEvent) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"event_types\":[")) {
+            return false;
+        }
+        if (kind == MqttDiscoveryEntityKind::kRxEvent) {
+            if (!writer.append("\"received\"]")) return false;
+        } else if (!writer.append("\"triggered\",\"action_completed\",\"cooldown_suppressed\","
+                                 "\"ambiguous_frame\",\"stale_frame\",\"queue_drop\"]")) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kAutomationSwitch) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"value_template\":\"{{ value_json.enabled }}\","
+                           "\"command_topic\":") ||
+            !writer.append_json_string(command_topic) ||
+            !writer.append(",\"payload_on\":\"ON\",\"payload_off\":\"OFF\"")) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kAutomationLogSelect) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"value_template\":\"{{ value_json.log_mode }}\","
+                           "\"command_topic\":") ||
+            !writer.append_json_string(command_topic) ||
+            !writer.append(",\"options\":[\"off\",\"actions\",\"verbose\"]")) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kRuleCountSensor) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"value_template\":\"{{ value_json.rules }}\","
+                           "\"entity_category\":\"diagnostic\"")) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kEventDropsSensor) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"value_template\":\"{{ value_json.event_drops }}\","
+                           "\"entity_category\":\"diagnostic\"")) {
+            return false;
+        }
+    }
+    if (!writer.append(",\"availability_topic\":") ||
+        !writer.append_json_string(availability_topic) ||
+        !writer.append(",\"payload_available\":\"online\","
+                       "\"payload_not_available\":\"offline\"")) {
+        return false;
+    }
+    return append_device(&writer, identity, firmware_version) && writer.append("}") &&
+           writer.valid();
+}
+
 bool parse_mqtt_button_command(const MqttDeviceIdentity &identity,
                                const MqttIncomingMessage &message,
                                char output_name[kRfStorageNameCapacity])
@@ -229,6 +487,56 @@ bool parse_mqtt_button_command(const MqttDeviceIdentity &identity,
     }
     std::memcpy(output_name, name, sizeof(name));
     return true;
+}
+
+bool parse_mqtt_automation_command(const MqttDeviceIdentity &identity,
+                                   const MqttIncomingMessage &message,
+                                   MqttAutomationCommandKind *kind, bool *enabled,
+                                   uint8_t *log_mode)
+{
+    if (kind == nullptr || enabled == nullptr || log_mode == nullptr || message.topic == nullptr ||
+        message.data == nullptr || message.qos != 0 || message.retain || message.duplicate ||
+        message.current_data_offset != 0 || message.total_data_length != message.data_length ||
+        message.topic_length == 0 || message.data_length == 0) {
+        return false;
+    }
+    char enabled_topic[kMqttTopicCapacity]{};
+    char log_topic[kMqttTopicCapacity]{};
+    if (!format_mqtt_automation_command_topic(identity, MqttAutomationCommandKind::kEnabled,
+                                               enabled_topic, sizeof(enabled_topic)) ||
+        !format_mqtt_automation_command_topic(identity, MqttAutomationCommandKind::kLogMode,
+                                               log_topic, sizeof(log_topic))) {
+        return false;
+    }
+    const bool is_enabled = message.topic_length == std::strlen(enabled_topic) &&
+                            std::memcmp(message.topic, enabled_topic, message.topic_length) == 0;
+    const bool is_log = message.topic_length == std::strlen(log_topic) &&
+                        std::memcmp(message.topic, log_topic, message.topic_length) == 0;
+    if (!is_enabled && !is_log) {
+        return false;
+    }
+    if (is_enabled) {
+        if (message.data_length == 2 && std::memcmp(message.data, "ON", 2) == 0) {
+            *kind = MqttAutomationCommandKind::kEnabled;
+            *enabled = true;
+            return true;
+        }
+        if (message.data_length == 3 && std::memcmp(message.data, "OFF", 3) == 0) {
+            *kind = MqttAutomationCommandKind::kEnabled;
+            *enabled = false;
+            return true;
+        }
+        return false;
+    }
+    if ((message.data_length == 3 && std::memcmp(message.data, "off", 3) == 0) ||
+        (message.data_length == 7 && std::memcmp(message.data, "actions", 7) == 0) ||
+        (message.data_length == 7 && std::memcmp(message.data, "verbose", 7) == 0)) {
+        *kind = MqttAutomationCommandKind::kLogMode;
+        *enabled = false;
+        *log_mode = message.data_length == 3 ? 0 : (message.data[0] == 'a' ? 1 : 2);
+        return true;
+    }
+    return false;
 }
 
 bool mqtt_message_is_home_assistant_birth(const MqttIncomingMessage &message)

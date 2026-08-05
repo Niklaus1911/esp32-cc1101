@@ -87,6 +87,7 @@ void *s_event_sink_context = nullptr;
 uint32_t s_last_reported_queue_drops = 0;
 uint32_t s_next_action_id = 0;
 RfAutomationStatus s_status{};
+uint32_t s_configuration_revision = 0;
 
 class AutomationLock {
 public:
@@ -446,6 +447,8 @@ esp_err_t initialize_rf_automation()
         s_status.log_mode_known = true;
         s_status.rule_count_known = true;
         s_status.rule_count = static_cast<uint16_t>(s_rule_count);
+        s_configuration_revision = 1;
+        s_status.configuration_revision = s_configuration_revision;
         s_status.initialization_error = ESP_OK;
         s_queue_drops.store(0, std::memory_order_relaxed);
         s_last_reported_queue_drops = 0;
@@ -512,6 +515,7 @@ esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_na
     runtime.trigger_signal = trigger_signal;
     runtime.target_signal = target_signal;
     s_status.rule_count = static_cast<uint16_t>(s_rule_count);
+    s_status.configuration_revision = ++s_configuration_revision;
     advance_generation();
     return ESP_OK;
 }
@@ -548,6 +552,7 @@ esp_err_t rf_automation_remove_rule(const char *trigger_name)
     --s_rule_count;
     std::memset(&s_rules[s_rule_count], 0, sizeof(RuntimeRule));
     s_status.rule_count = static_cast<uint16_t>(s_rule_count);
+    s_status.configuration_revision = ++s_configuration_revision;
     advance_generation();
     return ESP_OK;
 }
@@ -729,6 +734,7 @@ esp_err_t rf_automation_set_enabled(bool enabled)
     s_enabled.store(enabled, std::memory_order_release);
     s_status.enabled = enabled;
     if (changed) {
+        s_status.configuration_revision = ++s_configuration_revision;
         advance_generation();
     }
     return ESP_OK;
@@ -757,6 +763,7 @@ esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode)
     s_status.log_mode = mode;
     s_status.log_mode_known = true;
     if (changed) {
+        s_status.configuration_revision = ++s_configuration_revision;
         s_last_reported_queue_drops = s_queue_drops.load(std::memory_order_relaxed);
     }
     return ESP_OK;

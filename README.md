@@ -10,7 +10,7 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with a reboot-selected Web profile or native Home Assistant MQTT Discovery profile. The Web profile provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; the MQTT profile exposes learned signals as Home Assistant buttons without starting the Web stack.
+- Optional runtime Wi-Fi station mode with a reboot-selected Web profile or native Home Assistant MQTT Discovery profile. The Web profile provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; the MQTT profile exposes learned-signal buttons, RF/automation activity, retained snapshots, and automation controls without starting the Web stack.
 
 ## Hardware
 
@@ -201,13 +201,37 @@ For a dedicated Mosquitto user, replace `<12hex>` with the bridge's full lowerca
 user rfbridge_<12hex>
 topic read homeassistant/status
 topic read rfbridge/<12hex>/signal/+/press
+topic read rfbridge/<12hex>/automation/+/set
 topic write rfbridge/<12hex>/availability
+topic write rfbridge/<12hex>/event/#
+topic write rfbridge/<12hex>/state/#
 topic write homeassistant/button/rfbridge_<12hex>/#
 ```
 
 Home Assistant needs its own normal broker permissions to read discovery/availability and publish commands. Ensure MQTT Discovery is enabled with the `homeassistant` prefix.
 
+The MQTT profile also mirrors the shared RF and automation event stream. The physical UART remains the same console used by the Web profile: `rule list`, `rule add`, `rule remove`, `rule enable`, `rule disable`, and `rule log` operate on the same NVS records and use the same asynchronous RX and automation log path. At console startup, the `[STORE]` line reports learned-signal count, rule count, enabled state, log mode, and the NVS initialization result. Use `mqtt status` to inspect Wi-Fi startup gating, signal/rule discovery counts, retained-state failures, event publication/drop counters, heap margins, and both task stack margins.
+
+The following bounded topics are published for Home Assistant and other LAN consumers:
+
+```text
+rfbridge/<12hex>/event/rx
+rfbridge/<12hex>/event/automation
+rfbridge/<12hex>/state/automation
+rfbridge/<12hex>/state/last_rx
+rfbridge/<12hex>/state/last_automation
+rfbridge/<12hex>/state/rule/<trigger>
+rfbridge/<12hex>/automation/enabled/set
+rfbridge/<12hex>/automation/log_mode/set
+```
+
+`event/rx` and `event/automation` are non-retained QoS 0 JSON event messages. They contain sequence numbers, bounded decoded metadata or raw pulse counts, matching information, rule/action names, and result counters; complete raw pulse arrays are never sent. Home Assistant Event entities expose these messages for automations, and Home Assistant Recorder is the durable event history. `state/automation`, `state/last_rx`, `state/last_automation`, and each `state/rule/<trigger>` snapshot are retained QoS 1 so the latest configuration, counters, and result are available after a bridge or broker restart. Broker persistence must be enabled if retained snapshots must survive a broker restart.
+
+Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so both profiles share one bounded administrative interface.
+
 `mqtt forget` removes the broker configuration. If retained discovery entities exist, run it while the configured MQTT profile is active and connected. The firmware durably records retirement, tombstones every discovery and availability topic with acknowledgements, clears the ledger and credentials, and selects Web; reset once after retirement completes. If Web is already active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
+
+The retained ledger keeps the broker endpoint even when the signal and rule lists are empty. This marker covers the fixed activity/control entities, so they can still be tombstoned during `mqtt forget` and an endpoint change cannot strand stale retained discovery.
 
 ### Web UI
 

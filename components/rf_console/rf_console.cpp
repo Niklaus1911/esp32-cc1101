@@ -386,6 +386,47 @@ void print_dashboard_value(const char *label, const char *value, ConsoleTone ton
     }
 }
 
+void print_persistent_configuration_summary()
+{
+    RfSignalsStatus signals{};
+    RfAutomationStatus automation{};
+    const esp_err_t signals_error = get_rf_signals_status(&signals);
+    const esp_err_t automation_error = rf_automation_get_status(&automation);
+    const esp_err_t storage_error = rf_storage_initialization_error();
+    const bool healthy = signals_error == ESP_OK && automation_error == ESP_OK &&
+                         storage_error == ESP_OK && signals.available &&
+                         automation.available && automation.enabled_known &&
+                         automation.rule_count_known && automation.log_mode_known;
+    char plain[256]{};
+    char pretty[256]{};
+    char learned_count[16]{"unknown"};
+    char rule_count[16]{"unknown"};
+    if (signals_error == ESP_OK && signals.available) {
+        std::snprintf(learned_count, sizeof(learned_count), "%u",
+                      static_cast<unsigned>(signals.learned_count));
+    }
+    if (automation_error == ESP_OK && automation.rule_count_known) {
+        std::snprintf(rule_count, sizeof(rule_count), "%u",
+                      static_cast<unsigned>(automation.rule_count));
+    }
+    const char *enabled_state = !automation.enabled_known
+                                    ? "unknown"
+                                    : (automation.enabled ? "enabled" : "disabled");
+    const char *log_mode = automation.log_mode_known
+                               ? rf_automation_log_mode_name(automation.log_mode)
+                               : "unknown";
+    std::snprintf(plain, sizeof(plain),
+                  "STORAGE learned=%s rules=%s automation=%s log_mode=%s nvs=%s signals=%s rules_error=%s",
+                  learned_count, rule_count, enabled_state, log_mode,
+                  esp_err_to_name(storage_error), esp_err_to_name(signals_error),
+                  esp_err_to_name(automation_error));
+    std::snprintf(pretty, sizeof(pretty),
+                  "Persistent RF configuration: %s learned / %s rules / automation %s / log %s",
+                  learned_count, rule_count, enabled_state, log_mode);
+    print_tagged_line(healthy ? ConsoleTone::kSuccess : ConsoleTone::kWarning, "STORE", plain,
+                      pretty, false);
+}
+
 void print_frame(const char *prefix, const RfFrame &frame, const LearnedMatch *learned = nullptr)
 {
     OutputGuard guard;
@@ -1302,17 +1343,21 @@ int render_service_status()
             status.current_boot_fallback, status.retirement_pending,
             esp_err_to_name(status.profile_error), esp_err_to_name(status.runtime_error));
         std::printf(
-            "MQTT configured=%u broker=%s port=%u username=%s connected=%u subscribed=%u state=%s advertised=%u current=%u connections=%lu disconnects=%lu reconciliations=%lu accepted=%lu rejected=%lu queue_drops=%lu publish_failures=%lu outbox_deleted=%lu outbox_bytes=%lu heap_free=%lu heap_minimum=%lu heap_largest=%lu mqtt_stack=%lu worker_stack=%lu error=%s\n",
+            "MQTT configured=%u broker=%s port=%u username=%s network_ready=%u client_start_pending=%u connected=%u subscribed=%u state=%s advertised=%u advertised_rules=%u current=%u current_rules=%u connections=%lu disconnects=%lu reconciliations=%lu accepted=%lu rejected=%lu queue_drops=%lu telemetry_published=%lu telemetry_drops=%lu state_publish_failures=%lu publish_failures=%lu outbox_deleted=%lu outbox_bytes=%lu heap_free=%lu heap_minimum=%lu heap_largest=%lu mqtt_stack=%lu worker_stack=%lu error=%s\n",
             status.configured, broker_known ? broker : "-", status.port,
-            status.username[0] == '\0' ? "-" : status.username, status.connected,
-            status.subscribed, network_mqtt_discovery_state_name(status.discovery_state),
-            status.advertised_count, status.current_count,
+            status.username[0] == '\0' ? "-" : status.username, status.network_ready,
+            status.client_start_pending, status.connected, status.subscribed,
+            network_mqtt_discovery_state_name(status.discovery_state), status.advertised_count,
+            status.advertised_rule_count, status.current_count, status.current_rule_count,
             static_cast<unsigned long>(status.connections),
             static_cast<unsigned long>(status.disconnects),
             static_cast<unsigned long>(status.reconciliations),
             static_cast<unsigned long>(status.commands_accepted),
             static_cast<unsigned long>(status.commands_rejected),
             static_cast<unsigned long>(status.command_queue_drops),
+            static_cast<unsigned long>(status.telemetry_published),
+            static_cast<unsigned long>(status.telemetry_drops),
+            static_cast<unsigned long>(status.state_publish_failures),
             static_cast<unsigned long>(status.publish_failures),
             static_cast<unsigned long>(status.outbox_deleted),
             static_cast<unsigned long>(status.outbox_bytes),
@@ -1351,6 +1396,21 @@ int render_service_status()
     std::snprintf(right, sizeof(right), "%u", status.current_count);
     print_dashboard_row("Advertised", left, ConsoleTone::kInfo, "Current", right,
                         ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%u", status.advertised_rule_count);
+    std::snprintf(right, sizeof(right), "%u", status.current_rule_count);
+    print_dashboard_row("Adv rules", left, ConsoleTone::kInfo, "Cur rules", right,
+                        ConsoleTone::kInfo);
+    const char *mqtt_start = !status.runtime_available
+                                 ? "inactive"
+                                 : (status.client_start_pending ? "pending" : "started");
+    print_dashboard_row("Wi-Fi ready", status.network_ready ? "yes" : "no",
+                        status.network_ready ? ConsoleTone::kSuccess : ConsoleTone::kMuted,
+                        "MQTT start", mqtt_start,
+                        status.client_start_pending ? ConsoleTone::kWarning : ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%lu", static_cast<unsigned long>(status.telemetry_published));
+    std::snprintf(right, sizeof(right), "%lu", static_cast<unsigned long>(status.telemetry_drops));
+    print_dashboard_row("Events pub.", left, ConsoleTone::kInfo, "Event drops", right,
+                        status.telemetry_drops == 0 ? ConsoleTone::kMuted : ConsoleTone::kWarning);
     std::snprintf(right, sizeof(right), "%lu / %lu / %lu",
                   static_cast<unsigned long>(status.heap_free),
                   static_cast<unsigned long>(status.heap_minimum),
@@ -2675,6 +2735,7 @@ esp_err_t start_rf_console()
             std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
         }
     }
+    print_persistent_configuration_summary();
     error = start_uart_console_task();
     if (error != ESP_OK) {
         ESP_LOGE(kTag, "Could not start UART REPL: %s", esp_err_to_name(error));

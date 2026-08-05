@@ -34,6 +34,8 @@ struct NetworkMqttStatus {
     bool current_boot_fallback = false;
     bool retirement_pending = false;
     bool ledger_known = false;
+    bool network_ready = false;
+    bool client_start_pending = false;
     NetworkServiceProfile requested_profile = NetworkServiceProfile::kWeb;
     NetworkServiceProfile effective_profile = NetworkServiceProfile::kWeb;
     NetworkMqttDiscoveryState discovery_state = NetworkMqttDiscoveryState::kStopped;
@@ -49,6 +51,9 @@ struct NetworkMqttStatus {
     uint32_t publish_failures = 0;
     uint32_t outbox_deleted = 0;
     uint32_t outbox_bytes = 0;
+    uint32_t telemetry_published = 0;
+    uint32_t telemetry_drops = 0;
+    uint32_t state_publish_failures = 0;
     uint32_t mqtt_stack_minimum_free = 0;
     uint32_t worker_stack_minimum_free = 0;
     uint32_t heap_free = 0;
@@ -56,7 +61,9 @@ struct NetworkMqttStatus {
     uint32_t heap_largest = 0;
     uint16_t port = 0;
     uint8_t advertised_count = 0;
+    uint8_t advertised_rule_count = 0;
     uint8_t current_count = 0;
+    uint8_t current_rule_count = 0;
     char username[kMqttUsernameCapacity]{};
     esp_err_t profile_error = ESP_OK;
     esp_err_t runtime_error = ESP_ERR_INVALID_STATE;

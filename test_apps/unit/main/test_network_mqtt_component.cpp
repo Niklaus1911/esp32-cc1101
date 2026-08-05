@@ -93,8 +93,10 @@ TEST_CASE("MQTT advertised ledger remains sorted endpoint-bound and independentl
     source.broker_ipv4 = 0xc0a8010aU;
     source.port = 1883;
     source.count = 2;
+    source.rule_count = 1;
     std::strcpy(source.names[0].value, "gate");
     std::strcpy(source.names[1].value, "porch");
+    std::strcpy(source.names[2].value, "gate_rule");
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::save_mqtt_advertised_ledger(source));
 
     rfbridge::MqttAdvertisedLedger loaded{};
@@ -102,8 +104,11 @@ TEST_CASE("MQTT advertised ledger remains sorted endpoint-bound and independentl
     TEST_ASSERT_EQUAL_HEX32(source.broker_ipv4, loaded.broker_ipv4);
     TEST_ASSERT_EQUAL_UINT16(source.port, loaded.port);
     TEST_ASSERT_EQUAL_UINT8(source.count, loaded.count);
+    TEST_ASSERT_EQUAL_UINT8(source.rule_count, loaded.rule_count);
+    TEST_ASSERT_EQUAL_UINT8(rfbridge::kMqttAdvertisedFormatVersion, loaded.format_version);
     TEST_ASSERT_EQUAL_STRING(source.names[0].value, loaded.names[0].value);
     TEST_ASSERT_EQUAL_STRING(source.names[1].value, loaded.names[1].value);
+    TEST_ASSERT_EQUAL_STRING(source.names[2].value, loaded.names[2].value);
 
     nvs_handle_t handle = 0;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_open(kNamespace, NVS_READWRITE, &handle));

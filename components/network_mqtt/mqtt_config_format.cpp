@@ -8,9 +8,10 @@ namespace {
 
 constexpr uint8_t kServiceMagic[] = {'M', 'Q', 'S', 'C'};
 constexpr uint8_t kAdvertisedMagic[] = {'M', 'Q', 'A', 'D'};
-constexpr uint8_t kFormatVersion = 1;
+constexpr uint8_t kServiceFormatVersion = 1;
 constexpr std::size_t kServiceHeaderSize = 20;
 constexpr std::size_t kAdvertisedHeaderSize = 12;
+constexpr std::size_t kAdvertisedV2HeaderSize = 16;
 constexpr std::size_t kCrcSize = 4;
 
 std::size_t bounded_length(const char *text, std::size_t capacity)
@@ -78,6 +79,31 @@ bool service_state_is_valid(MqttServiceState state)
 {
     return state == MqttServiceState::kWeb || state == MqttServiceState::kMqtt ||
            state == MqttServiceState::kRetiring || state == MqttServiceState::kRetired;
+}
+
+bool valid_name_range(const MqttAdvertisedLedger &ledger, std::size_t offset, std::size_t count)
+{
+    if (offset + count > ledger.names.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::size_t current = offset + index;
+        if (!rf_storage_name_is_valid(ledger.names[current].value)) {
+            return false;
+        }
+        const std::size_t name_length = bounded_length(ledger.names[current].value,
+                                                       kRfStorageNameCapacity);
+        for (std::size_t byte = name_length + 1U; byte < kRfStorageNameCapacity; ++byte) {
+            if (ledger.names[current].value[byte] != '\0') {
+                return false;
+            }
+        }
+        if (index > 0 && std::strcmp(ledger.names[current - 1U].value,
+                                     ledger.names[current].value) >= 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -166,40 +192,62 @@ bool mqtt_service_config_is_valid(const MqttServiceConfig &config)
 
 bool mqtt_advertised_ledger_is_valid(const MqttAdvertisedLedger &ledger)
 {
-    if (ledger.count > ledger.names.size()) {
+    if ((ledger.format_version != 1 &&
+         ledger.format_version != kMqttAdvertisedFormatVersion) ||
+        (ledger.format_version == 1 && ledger.rule_count != 0) ||
+        mqtt_advertised_ledger_total_count(ledger) > ledger.names.size()) {
         return false;
     }
-    if (ledger.count == 0) {
+    if (mqtt_advertised_ledger_total_count(ledger) == 0) {
         return (ledger.broker_ipv4 == 0 && ledger.port == 0) ||
                (mqtt_broker_ipv4_is_valid(ledger.broker_ipv4) && ledger.port != 0);
     }
     if (!mqtt_broker_ipv4_is_valid(ledger.broker_ipv4) || ledger.port == 0) {
         return false;
     }
-    for (std::size_t index = 0; index < ledger.count; ++index) {
-        if (!rf_storage_name_is_valid(ledger.names[index].value)) {
-            return false;
-        }
-        const std::size_t name_length = bounded_length(ledger.names[index].value,
-                                                       kRfStorageNameCapacity);
-        for (std::size_t byte = name_length + 1U; byte < kRfStorageNameCapacity; ++byte) {
-            if (ledger.names[index].value[byte] != '\0') {
-                return false;
-            }
-        }
-        if (index > 0 && std::strcmp(ledger.names[index - 1U].value,
-                                     ledger.names[index].value) >= 0) {
-            return false;
-        }
-    }
-    return true;
+    return valid_name_range(ledger, 0, ledger.count) &&
+           valid_name_range(ledger, ledger.count, ledger.rule_count);
 }
 
 bool mqtt_advertised_ledger_matches_endpoint(const MqttAdvertisedLedger &ledger,
                                              uint32_t broker_ipv4, uint16_t port)
 {
-    return ledger.count == 0 ||
+    return (ledger.broker_ipv4 == 0 && ledger.port == 0) ||
            (ledger.broker_ipv4 == broker_ipv4 && ledger.port == port);
+}
+
+MqttConfigFormatResult merge_name_ranges(const MqttAdvertisedLedger &left,
+                                         std::size_t left_offset, std::size_t left_count,
+                                         const MqttAdvertisedLedger &right,
+                                         std::size_t right_offset, std::size_t right_count,
+                                         RfStorageName *output, std::size_t capacity,
+                                         uint8_t *count)
+{
+    std::size_t left_index = 0;
+    std::size_t right_index = 0;
+    std::size_t result_count = 0;
+    while (left_index < left_count || right_index < right_count) {
+        const char *selected = nullptr;
+        if (right_index >= right_count ||
+            (left_index < left_count &&
+             std::strcmp(left.names[left_offset + left_index].value,
+                         right.names[right_offset + right_index].value) < 0)) {
+            selected = left.names[left_offset + left_index++].value;
+        } else if (left_index >= left_count ||
+                   std::strcmp(right.names[right_offset + right_index].value,
+                               left.names[left_offset + left_index].value) < 0) {
+            selected = right.names[right_offset + right_index++].value;
+        } else {
+            selected = left.names[left_offset + left_index++].value;
+            ++right_index;
+        }
+        if (result_count >= capacity) {
+            return MqttConfigFormatResult::kBufferTooSmall;
+        }
+        std::memcpy(output[result_count++].value, selected, kRfStorageNameCapacity);
+    }
+    *count = static_cast<uint8_t>(result_count);
+    return MqttConfigFormatResult::kOk;
 }
 
 MqttConfigFormatResult merge_mqtt_advertised_ledgers(
@@ -210,39 +258,30 @@ MqttConfigFormatResult merge_mqtt_advertised_ledgers(
         !mqtt_advertised_ledger_is_valid(right)) {
         return MqttConfigFormatResult::kInvalidArgument;
     }
-    const MqttAdvertisedLedger *endpoint = left.count > 0 ? &left : &right;
-    if ((left.count > 0 && !mqtt_advertised_ledger_matches_endpoint(
-                               left, endpoint->broker_ipv4, endpoint->port)) ||
-        (right.count > 0 && !mqtt_advertised_ledger_matches_endpoint(
-                                right, endpoint->broker_ipv4, endpoint->port))) {
+    const bool left_has_endpoint = left.broker_ipv4 != 0 || left.port != 0;
+    const bool right_has_endpoint = right.broker_ipv4 != 0 || right.port != 0;
+    const MqttAdvertisedLedger *endpoint = left_has_endpoint ? &left : &right;
+    if ((left_has_endpoint && !mqtt_advertised_ledger_matches_endpoint(
+                                  left, endpoint->broker_ipv4, endpoint->port)) ||
+        (right_has_endpoint && !mqtt_advertised_ledger_matches_endpoint(
+                                   right, endpoint->broker_ipv4, endpoint->port))) {
         return MqttConfigFormatResult::kInvalidRecord;
     }
 
     MqttAdvertisedLedger result{};
     result.broker_ipv4 = endpoint->broker_ipv4;
     result.port = endpoint->port;
-    std::size_t left_index = 0;
-    std::size_t right_index = 0;
-    while (left_index < left.count || right_index < right.count) {
-        const char *selected = nullptr;
-        if (right_index >= right.count ||
-            (left_index < left.count &&
-             std::strcmp(left.names[left_index].value,
-                         right.names[right_index].value) < 0)) {
-            selected = left.names[left_index++].value;
-        } else if (left_index >= left.count ||
-                   std::strcmp(right.names[right_index].value,
-                               left.names[left_index].value) < 0) {
-            selected = right.names[right_index++].value;
-        } else {
-            selected = left.names[left_index++].value;
-            ++right_index;
-        }
-        if (result.count >= result.names.size()) {
-            return MqttConfigFormatResult::kBufferTooSmall;
-        }
-        std::memcpy(result.names[result.count].value, selected, kRfStorageNameCapacity);
-        ++result.count;
+    MqttConfigFormatResult merge_result = merge_name_ranges(
+        left, 0, left.count, right, 0, right.count, result.names.data(), result.names.size(),
+        &result.count);
+    if (merge_result != MqttConfigFormatResult::kOk) {
+        return merge_result;
+    }
+    merge_result = merge_name_ranges(
+        left, left.count, left.rule_count, right, right.count, right.rule_count,
+        result.names.data() + result.count, result.names.size() - result.count, &result.rule_count);
+    if (merge_result != MqttConfigFormatResult::kOk) {
+        return merge_result;
     }
     if (!mqtt_advertised_ledger_is_valid(result)) {
         return MqttConfigFormatResult::kInvalidRecord;
@@ -266,7 +305,7 @@ MqttConfigFormatResult encode_mqtt_service_record(const MqttServiceConfig &confi
         return MqttConfigFormatResult::kBufferTooSmall;
     }
     std::memcpy(output, kServiceMagic, sizeof(kServiceMagic));
-    output[4] = kFormatVersion;
+    output[4] = kServiceFormatVersion;
     output[5] = static_cast<uint8_t>(config.state);
     output[6] = static_cast<uint8_t>(username_length);
     output[7] = static_cast<uint8_t>(password_length);
@@ -293,7 +332,7 @@ MqttConfigFormatResult decode_mqtt_service_record(const uint8_t *record, std::si
         record[15] != 0) {
         return MqttConfigFormatResult::kInvalidRecord;
     }
-    if (record[4] != kFormatVersion) {
+    if (record[4] != kServiceFormatVersion) {
         return MqttConfigFormatResult::kInvalidVersion;
     }
     const std::size_t username_length = record[6];
@@ -326,20 +365,24 @@ MqttConfigFormatResult encode_mqtt_advertised_record(const MqttAdvertisedLedger 
     if (output == nullptr || encoded_size == nullptr || !mqtt_advertised_ledger_is_valid(ledger)) {
         return MqttConfigFormatResult::kInvalidArgument;
     }
-    const std::size_t record_size = kAdvertisedHeaderSize +
-                                    static_cast<std::size_t>(ledger.count) *
+    const std::size_t record_size = kAdvertisedV2HeaderSize +
+                                    mqtt_advertised_ledger_total_count(ledger) *
                                         kRfStorageNameCapacity +
                                     kCrcSize;
     if (record_size > capacity) {
         return MqttConfigFormatResult::kBufferTooSmall;
     }
     std::memcpy(output, kAdvertisedMagic, sizeof(kAdvertisedMagic));
-    output[4] = kFormatVersion;
+    output[4] = kMqttAdvertisedFormatVersion;
     output[5] = ledger.count;
-    write_u16(output + 6, ledger.port);
-    write_u32(output + 8, ledger.broker_ipv4);
-    for (std::size_t index = 0; index < ledger.count; ++index) {
-        std::memcpy(output + kAdvertisedHeaderSize + index * kRfStorageNameCapacity,
+    output[6] = ledger.rule_count;
+    output[7] = 0;
+    write_u16(output + 8, ledger.port);
+    write_u32(output + 10, ledger.broker_ipv4);
+    output[14] = 0;
+    output[15] = 0;
+    for (std::size_t index = 0; index < mqtt_advertised_ledger_total_count(ledger); ++index) {
+        std::memcpy(output + kAdvertisedV2HeaderSize + index * kRfStorageNameCapacity,
                     ledger.names[index].value, kRfStorageNameCapacity);
     }
     write_u32(output + record_size - kCrcSize, crc32(output, record_size - kCrcSize));
@@ -357,12 +400,16 @@ MqttConfigFormatResult decode_mqtt_advertised_record(const uint8_t *record, std:
         std::memcmp(record, kAdvertisedMagic, sizeof(kAdvertisedMagic)) != 0) {
         return MqttConfigFormatResult::kInvalidRecord;
     }
-    if (record[4] != kFormatVersion) {
+    if (record[4] != 1 && record[4] != kMqttAdvertisedFormatVersion) {
         return MqttConfigFormatResult::kInvalidVersion;
     }
     const std::size_t count = record[5];
-    if (count > kMqttMaximumAdvertisedSignals ||
-        size != kAdvertisedHeaderSize + count * kRfStorageNameCapacity + kCrcSize) {
+    const std::size_t rule_count = record[4] == 1 ? 0 : record[6];
+    const std::size_t header_size = record[4] == 1 ? kAdvertisedHeaderSize : kAdvertisedV2HeaderSize;
+    if (count + rule_count > kMqttMaximumAdvertisedSignals ||
+        size != header_size + (count + rule_count) * kRfStorageNameCapacity + kCrcSize ||
+        (record[4] == kMqttAdvertisedFormatVersion &&
+         (record[7] != 0 || record[14] != 0 || record[15] != 0))) {
         return MqttConfigFormatResult::kInvalidRecord;
     }
     if (read_u32(record + size - kCrcSize) != crc32(record, size - kCrcSize)) {
@@ -370,11 +417,13 @@ MqttConfigFormatResult decode_mqtt_advertised_record(const uint8_t *record, std:
     }
     MqttAdvertisedLedger decoded{};
     decoded.count = static_cast<uint8_t>(count);
-    decoded.port = read_u16(record + 6);
-    decoded.broker_ipv4 = read_u32(record + 8);
-    for (std::size_t index = 0; index < count; ++index) {
+    decoded.rule_count = static_cast<uint8_t>(rule_count);
+    decoded.format_version = record[4];
+    decoded.port = read_u16(record + (record[4] == 1 ? 6 : 8));
+    decoded.broker_ipv4 = read_u32(record + (record[4] == 1 ? 8 : 10));
+    for (std::size_t index = 0; index < count + rule_count; ++index) {
         std::memcpy(decoded.names[index].value,
-                    record + kAdvertisedHeaderSize + index * kRfStorageNameCapacity,
+                    record + header_size + index * kRfStorageNameCapacity,
                     kRfStorageNameCapacity);
     }
     if (!mqtt_advertised_ledger_is_valid(decoded)) {

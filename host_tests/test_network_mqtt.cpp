@@ -8,6 +8,7 @@
 
 #include "mqtt_config_format.hpp"
 #include "mqtt_discovery.hpp"
+#include "mqtt_telemetry.hpp"
 
 namespace {
 
@@ -158,13 +159,15 @@ void test_service_record()
 void test_advertised_record()
 {
     rfbridge::MqttAdvertisedLedger source = advertised_ledger();
+    source.rule_count = 1;
+    std::strcpy(source.names[2].value, "rule_gate");
     require(rfbridge::mqtt_advertised_ledger_is_valid(source),
             "sorted unique advertised ledger is valid");
     std::array<uint8_t, rfbridge::kMqttAdvertisedMaxRecordSize> record{};
     std::size_t size = 0;
     require(rfbridge::encode_mqtt_advertised_record(source, record.data(), record.size(), &size) ==
                 rfbridge::MqttConfigFormatResult::kOk &&
-                size == 48,
+                size == 68,
             "advertised ledger encodes to its exact length");
     rfbridge::MqttAdvertisedLedger decoded{};
     require(rfbridge::decode_mqtt_advertised_record(record.data(), size, &decoded) ==
@@ -174,19 +177,42 @@ void test_advertised_record()
                 std::strcmp(decoded.names[0].value, "gate") == 0 &&
                 std::strcmp(decoded.names[1].value, "porch") == 0,
             "advertised ledger round trips endpoint and names");
-    record[12] ^= 1U;
+    std::array<uint8_t, 64> legacy{};
+    legacy[0] = 'M';
+    legacy[1] = 'Q';
+    legacy[2] = 'A';
+    legacy[3] = 'D';
+    legacy[4] = 1;
+    legacy[5] = 2;
+    legacy[6] = static_cast<uint8_t>(source.port);
+    legacy[7] = static_cast<uint8_t>(source.port >> 8U);
+    for (std::size_t index = 0; index < 4; ++index) {
+        legacy[8 + index] = static_cast<uint8_t>(source.broker_ipv4 >> (index * 8U));
+    }
+    std::memcpy(legacy.data() + 12, source.names[0].value, rfbridge::kRfStorageNameCapacity);
+    std::memcpy(legacy.data() + 12 + rfbridge::kRfStorageNameCapacity,
+                source.names[1].value, rfbridge::kRfStorageNameCapacity);
+    const std::size_t legacy_size = 12 + 2 * rfbridge::kRfStorageNameCapacity + 4;
+    rewrite_crc(legacy.data(), legacy_size);
+    require(rfbridge::decode_mqtt_advertised_record(legacy.data(), legacy_size, &decoded) ==
+                rfbridge::MqttConfigFormatResult::kOk && decoded.format_version == 1 &&
+                decoded.rule_count == 0 &&
+                decoded.count == source.count &&
+                std::strcmp(decoded.names[1].value, "porch") == 0,
+            "legacy v1 advertised ledger decodes with an empty rule range");
+    record[16] ^= 1U;
     require(rfbridge::decode_mqtt_advertised_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kInvalidCrc,
             "advertised ledger rejects CRC corruption");
-    record[12] ^= 1U;
-    record[4] = 2;
+    record[16] ^= 1U;
+    record[4] = 3;
     rewrite_crc(record.data(), size);
     require(rfbridge::decode_mqtt_advertised_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kInvalidVersion,
             "advertised ledger rejects unknown versions");
-    record[4] = 1;
-    std::memcpy(record.data() + 12U + rfbridge::kRfStorageNameCapacity,
-                record.data() + 12U, rfbridge::kRfStorageNameCapacity);
+    record[4] = 2;
+    std::memcpy(record.data() + 16U + rfbridge::kRfStorageNameCapacity,
+                record.data() + 16U, rfbridge::kRfStorageNameCapacity);
     rewrite_crc(record.data(), size);
     require(rfbridge::decode_mqtt_advertised_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kInvalidRecord,
@@ -221,6 +247,18 @@ void test_advertised_record()
     require(rfbridge::merge_mqtt_advertised_ledgers(left, right, &merged) ==
                 rfbridge::MqttConfigFormatResult::kInvalidRecord,
             "precommit merge rejects endpoint changes");
+
+    rfbridge::MqttAdvertisedLedger empty_left{};
+    rfbridge::MqttAdvertisedLedger empty_right{};
+    empty_left.broker_ipv4 = left.broker_ipv4;
+    empty_left.port = left.port;
+    empty_right.broker_ipv4 = left.broker_ipv4 + 1U;
+    empty_right.port = left.port;
+    require(!rfbridge::mqtt_advertised_ledger_matches_endpoint(
+                empty_left, empty_right.broker_ipv4, empty_right.port) &&
+                rfbridge::merge_mqtt_advertised_ledgers(empty_left, empty_right, &merged) ==
+                    rfbridge::MqttConfigFormatResult::kInvalidRecord,
+            "empty fixed-entity ledgers remain endpoint-bound");
 
     rfbridge::MqttAdvertisedLedger even{};
     rfbridge::MqttAdvertisedLedger odd{};
@@ -371,6 +409,97 @@ void test_incoming_messages()
             "fragmented Home Assistant birth is rejected");
 }
 
+void test_automation_discovery_and_telemetry()
+{
+    const rfbridge::MqttDeviceIdentity identity = test_identity();
+    char text[rfbridge::kMqttDiscoveryPayloadCapacity]{};
+    require(rfbridge::format_mqtt_event_topic(identity, rfbridge::MqttEventTopicKind::kRx, text,
+                                              sizeof(text)) &&
+                std::strcmp(text, "rfbridge/102030a1b2c3/event/rx") == 0,
+            "RX event topic is stable");
+    require(rfbridge::format_mqtt_state_topic(identity, rfbridge::MqttStateTopicKind::kRule,
+                                              "gate", text, sizeof(text)) &&
+                std::strcmp(text, "rfbridge/102030a1b2c3/state/rule/gate") == 0,
+            "rule state topic is stable");
+    require(rfbridge::format_mqtt_automation_command_topic(
+                identity, rfbridge::MqttAutomationCommandKind::kEnabled, text, sizeof(text)) &&
+                std::strcmp(text, "rfbridge/102030a1b2c3/automation/enabled/set") == 0,
+            "automation enable topic is stable");
+    require(rfbridge::format_mqtt_entity_discovery_topic(
+                identity, rfbridge::MqttDiscoveryEntityKind::kRuleSensor, "gate", text,
+                sizeof(text)) &&
+                std::strcmp(text, "homeassistant/sensor/rfbridge_102030a1b2c3/rule_gate/config") == 0,
+            "rule discovery topic is stable");
+    require(rfbridge::format_mqtt_entity_discovery_payload(
+                identity, rfbridge::MqttDiscoveryEntityKind::kAutomationSwitch, nullptr, "1.2.3",
+                text, sizeof(text)) &&
+                std::strstr(text, "\"command_topic\":\"rfbridge/102030a1b2c3/automation/enabled/set\"") !=
+                    nullptr &&
+                std::strstr(text, "\"value_template\":\"{{ value_json.enabled }}\"") != nullptr,
+            "automation switch discovery contains state and command contracts");
+    require(rfbridge::format_mqtt_entity_discovery_payload(
+                identity, rfbridge::MqttDiscoveryEntityKind::kRuleSensor, "gate", "1.2.3",
+                text, sizeof(text)) &&
+                std::strstr(text, "\"json_attributes_topic\":\"rfbridge/102030a1b2c3/state/rule/gate\"") !=
+                    nullptr,
+            "rule discovery exposes retained attributes");
+
+    constexpr char enabled_topic[] = "rfbridge/102030a1b2c3/automation/enabled/set";
+    constexpr char enabled_payload[] = "ON";
+    rfbridge::MqttIncomingMessage message{};
+    message.topic = enabled_topic;
+    message.topic_length = sizeof(enabled_topic) - 1U;
+    message.data = enabled_payload;
+    message.data_length = sizeof(enabled_payload) - 1U;
+    message.total_data_length = message.data_length;
+    rfbridge::MqttAutomationCommandKind command{};
+    bool enabled = false;
+    uint8_t log_mode = 0;
+    require(rfbridge::parse_mqtt_automation_command(identity, message, &command, &enabled,
+                                                    &log_mode) &&
+                command == rfbridge::MqttAutomationCommandKind::kEnabled && enabled,
+            "exact ON automation command is accepted");
+    message.data = "verbose";
+    message.data_length = 7;
+    message.total_data_length = 7;
+    message.topic = "rfbridge/102030a1b2c3/automation/log_mode/set";
+    message.topic_length = std::strlen(message.topic);
+    require(rfbridge::parse_mqtt_automation_command(identity, message, &command, &enabled,
+                                                    &log_mode) &&
+                command == rfbridge::MqttAutomationCommandKind::kLogMode && log_mode == 2,
+            "exact verbose log-mode command is accepted");
+    message.retain = true;
+    require(!rfbridge::parse_mqtt_automation_command(identity, message, &command, &enabled,
+                                                     &log_mode),
+            "retained automation commands are rejected");
+
+    rfbridge::MqttRxTelemetry rx{};
+    rx.sequence = 42;
+    rx.encoding = rfbridge::MqttTelemetryEncoding::kDecoded;
+    rx.match = rfbridge::MqttTelemetryMatch::kUnique;
+    rx.fingerprint = 0x1234;
+    rx.observed_repeats = 3;
+    std::strcpy(rx.learned_name, "gate");
+    rx.code = 123;
+    rx.bits = 24;
+    rx.protocol = 1;
+    rx.pulse_us = 350;
+    require(rfbridge::format_mqtt_rx_event_payload(rx, text, sizeof(text)) &&
+                std::strstr(text, "\"event_type\":\"received\"") != nullptr &&
+                std::strstr(text, "\"name\":\"gate\"") != nullptr,
+            "decoded RX telemetry is bounded JSON");
+    rfbridge::MqttAutomationStateTelemetry state{};
+    state.enabled = true;
+    state.enabled_known = true;
+    state.log_mode_known = true;
+    state.log_mode = 1;
+    state.rules = 2;
+    require(rfbridge::format_mqtt_automation_state_payload(state, text, sizeof(text)) &&
+                std::strstr(text, "\"enabled\":\"ON\"") != nullptr &&
+                std::strstr(text, "\"rules\":2") != nullptr,
+            "retained automation state contains persistent controls");
+}
+
 }  // namespace
 
 int main()
@@ -380,6 +509,7 @@ int main()
     test_advertised_record();
     test_discovery_contract();
     test_incoming_messages();
+    test_automation_discovery_and_telemetry();
     std::puts("All MQTT host tests passed");
     return 0;
 }

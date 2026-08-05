@@ -29,6 +29,7 @@ struct RfAutomationStatus {
     uint32_t tx_errors = 0;
     uint32_t log_events = 0;
     uint32_t log_drops = 0;
+    uint32_t configuration_revision = 0;
     esp_err_t initialization_error = ESP_ERR_INVALID_STATE;
     esp_err_t last_error = ESP_OK;
     char last_trigger[kRfStorageNameCapacity]{};
