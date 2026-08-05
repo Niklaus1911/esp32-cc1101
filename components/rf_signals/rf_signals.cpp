@@ -303,6 +303,26 @@ void service_task(void *)
     }
 }
 
+void destroy_initialization_resources()
+{
+    if (s_queue != nullptr) {
+        vQueueDelete(s_queue);
+        s_queue = nullptr;
+    }
+    if (s_catalog_mutex != nullptr) {
+        vSemaphoreDelete(s_catalog_mutex);
+        s_catalog_mutex = nullptr;
+    }
+    if (s_mutex != nullptr) {
+        vSemaphoreDelete(s_mutex);
+        s_mutex = nullptr;
+    }
+    s_task = nullptr;
+    s_catalog = {};
+    s_catalog_count = 0;
+    s_catalog_available = false;
+}
+
 }  // namespace
 
 esp_err_t initialize_rf_signals()
@@ -315,6 +335,7 @@ esp_err_t initialize_rf_signals()
     s_catalog_mutex = xSemaphoreCreateMutex();
     s_queue = xQueueCreate(kQueueDepth, sizeof(Message));
     if (s_mutex == nullptr || s_catalog_mutex == nullptr || s_queue == nullptr) {
+        destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_available.store(false, std::memory_order_release);
         return ESP_ERR_NO_MEM;
@@ -322,6 +343,7 @@ esp_err_t initialize_rf_signals()
     (void)rf_signals_refresh_catalog();
     if (xTaskCreate(service_task, "rf_signals", kTaskStackSize, nullptr, kTaskPriority, &s_task) !=
         pdPASS) {
+        destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_available.store(false, std::memory_order_release);
         return ESP_ERR_NO_MEM;

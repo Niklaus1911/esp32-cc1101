@@ -68,3 +68,9 @@
 - **Root cause:** the MQTT bridge sink treats only `kDisconnected` as offline. DHCP/IP loss and operator stop are delivered as `kStateChanged` events with a non-online state, so MQTT can retain `network_online=true` and `network_ready=true` after the interface has lost usable connectivity.
 - **Fix:** centralize the event-to-availability mapping in a pure MQTT policy helper. Connected/state/error events report online only when their state is `kOnline`; explicit disconnects always report offline; scan-only events leave availability unchanged.
 - **Regression/verification:** add host coverage for online, offline, disconnect, and scan-only mappings; run all host tests and the production verifier; observe readiness transitions during the three Wi-Fi reconnect cycles in both hardware profiles.
+
+## Confirmed Defect 3: Roll Back Partial RF-Signals Initialization
+
+- **Root cause:** `initialize_rf_signals()` returns after allocation or task-creation failure without deleting mutexes and queues already created. Because initialization is retryable, later attempts overwrite the handles and leak additional internal RAM.
+- **Fix:** add one initialization-only cleanup routine and invoke it on every failure after resource allocation. Reset catalog ownership with the resources so a retry starts from a coherent empty state.
+- **Regression/verification:** inspect every initialization exit for complete ownership transfer or rollback, compile the Unity image containing the RF-signals component tests, run all host tests, and run the production verifier with the final low-memory size audit.
