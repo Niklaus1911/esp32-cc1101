@@ -116,7 +116,6 @@ struct RuntimeContext {
     std::atomic<bool> catalog_pending{false};
     std::atomic<bool> telemetry_pending{false};
     std::atomic<bool> state_pending{false};
-    std::atomic<uint32_t> state_generation{0};
     std::atomic<uint32_t> automation_revision{0};
     std::atomic<int> last_published_id{0};
     std::atomic<int> last_deleted_id{0};
@@ -410,7 +409,6 @@ void note_telemetry_drop(RuntimeContext *context)
     taskENTER_CRITICAL(&s_status_lock);
     ++s_status.telemetry_drops;
     taskEXIT_CRITICAL(&s_status_lock);
-    context->state_generation.fetch_add(1, std::memory_order_acq_rel);
     context->state_pending.store(true, std::memory_order_release);
 }
 
@@ -420,7 +418,6 @@ void remember_last_rx(RuntimeContext *context, const MqttRxTelemetry &telemetry)
     context->pending_last_rx = telemetry;
     context->has_pending_last_rx = true;
     taskEXIT_CRITICAL(&context->telemetry_lock);
-    context->state_generation.fetch_add(1, std::memory_order_acq_rel);
     context->state_pending.store(true, std::memory_order_release);
 }
 
@@ -431,7 +428,29 @@ void remember_last_automation(RuntimeContext *context,
     context->pending_last_automation = telemetry;
     context->has_pending_last_automation = true;
     taskEXIT_CRITICAL(&context->telemetry_lock);
-    context->state_generation.fetch_add(1, std::memory_order_acq_rel);
+    context->state_pending.store(true, std::memory_order_release);
+}
+
+void restore_last_rx_if_unset(RuntimeContext *context, const MqttRxTelemetry &telemetry)
+{
+    taskENTER_CRITICAL(&context->telemetry_lock);
+    if (!context->has_pending_last_rx) {
+        context->pending_last_rx = telemetry;
+        context->has_pending_last_rx = true;
+    }
+    taskEXIT_CRITICAL(&context->telemetry_lock);
+    context->state_pending.store(true, std::memory_order_release);
+}
+
+void restore_last_automation_if_unset(RuntimeContext *context,
+                                      const MqttAutomationTelemetry &telemetry)
+{
+    taskENTER_CRITICAL(&context->telemetry_lock);
+    if (!context->has_pending_last_automation) {
+        context->pending_last_automation = telemetry;
+        context->has_pending_last_automation = true;
+    }
+    taskEXIT_CRITICAL(&context->telemetry_lock);
     context->state_pending.store(true, std::memory_order_release);
 }
 
@@ -644,7 +663,6 @@ void service_commands(RuntimeContext *context)
         if (error != ESP_OK) {
             ESP_LOGE(kTag, "MQTT command failed: %s", esp_err_to_name(error));
         } else if (command.type != MqttCommandType::kReplay) {
-            context->state_generation.fetch_add(1, std::memory_order_acq_rel);
             context->state_pending.store(true, std::memory_order_release);
             notify_worker(context, kWakePublish);
         }
@@ -744,15 +762,13 @@ esp_err_t publish_pending_states(RuntimeContext *context)
         if (!format_mqtt_state_topic(context->identity, MqttStateTopicKind::kLastRx, nullptr,
                                      topic, sizeof(topic)) ||
             !format_mqtt_rx_event_payload(rx, context->payload, sizeof(context->payload))) {
+            restore_last_rx_if_unset(context, rx);
             return ESP_ERR_INVALID_SIZE;
         }
         esp_err_t error = wait_for_publish(context, topic, context->payload,
                                            static_cast<int>(std::strlen(context->payload)));
         if (error != ESP_OK) {
-            taskENTER_CRITICAL(&context->telemetry_lock);
-            context->pending_last_rx = rx;
-            context->has_pending_last_rx = true;
-            taskEXIT_CRITICAL(&context->telemetry_lock);
+            restore_last_rx_if_unset(context, rx);
             return error;
         }
     }
@@ -761,25 +777,26 @@ esp_err_t publish_pending_states(RuntimeContext *context)
                                      nullptr, topic, sizeof(topic)) ||
             !format_mqtt_automation_event_payload(automation, context->payload,
                                                   sizeof(context->payload))) {
+            restore_last_automation_if_unset(context, automation);
             return ESP_ERR_INVALID_SIZE;
         }
         esp_err_t error = wait_for_publish(context, topic, context->payload,
                                            static_cast<int>(std::strlen(context->payload)));
         if (error != ESP_OK) {
-            taskENTER_CRITICAL(&context->telemetry_lock);
-            context->pending_last_automation = automation;
-            context->has_pending_last_automation = true;
-            taskEXIT_CRITICAL(&context->telemetry_lock);
+            restore_last_automation_if_unset(context, automation);
             return error;
         }
     }
-    if (publish_automation_state(context) != ESP_OK) {
-        taskENTER_CRITICAL(&context->telemetry_lock);
-        context->has_pending_last_rx = context->has_pending_last_rx || has_rx;
-        context->has_pending_last_automation =
-            context->has_pending_last_automation || has_automation;
-        taskEXIT_CRITICAL(&context->telemetry_lock);
-        return ESP_ERR_TIMEOUT;
+    const esp_err_t state_error = publish_automation_state(context);
+    if (state_error != ESP_OK) {
+        if (has_rx) {
+            restore_last_rx_if_unset(context, rx);
+        }
+        if (has_automation) {
+            restore_last_automation_if_unset(context, automation);
+        }
+        context->state_pending.store(true, std::memory_order_release);
+        return state_error;
     }
     return ESP_OK;
 }
