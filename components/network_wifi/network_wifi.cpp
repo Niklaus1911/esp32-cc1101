@@ -1277,6 +1277,13 @@ esp_err_t get_network_wifi_status(NetworkWifiStatus *status)
     if (status == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!s_available.load(std::memory_order_acquire)) {
+        *status = {};
+        status->event_drops = s_event_drops.load(std::memory_order_relaxed);
+        status->ota_locked = s_ota_locked.load(std::memory_order_relaxed);
+        status->initialization_error = s_initialization_error.load(std::memory_order_acquire);
+        return ESP_OK;
+    }
     StatusLock lock;
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;

@@ -116,3 +116,9 @@
 - **Root cause:** failed RF-signals initialization now correctly deletes its diagnostic mutex, but `get_rf_signals_status()` unconditionally tries to lock that deleted mutex and returns `ESP_ERR_TIMEOUT`. UART, Web, and bridge snapshots therefore lose the real initialization error precisely when diagnostics are needed.
 - **Fix:** return a bounded lock-free unavailable snapshot from atomics whenever the service is unavailable, and retain mutex-protected status copying for the running service.
 - **Regression/verification:** inspect uninitialized, failed, retrying, and available transitions; compile the Unity image; run all host tests and the production verifier; and confirm the hardware status path still reports the running catalog and queue counters.
+
+## Confirmed Defect 11: Preserve Wi-Fi Failure Diagnostics After Rollback
+
+- **Root cause:** every failed Wi-Fi initialization path deletes the status mutex, but `get_network_wifi_status()` unconditionally tries to lock it. The public snapshot therefore replaces the stored allocation, MAC, or task-creation failure with `ESP_ERR_TIMEOUT` after cleanup.
+- **Fix:** return a lock-free unavailable snapshot containing the atomic initialization error and counters when the manager is unavailable, while retaining the mutex-protected full snapshot for the running manager.
+- **Regression/verification:** inspect all pre-initialization and cleanup exits; compile the Unity image; run all host tests and the production verifier; and confirm normal hardware status retains saved credentials, network state, counters, and the successful initialization result.
