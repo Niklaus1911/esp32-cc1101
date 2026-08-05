@@ -87,6 +87,7 @@ enum class MqttTelemetryType : uint8_t {
 
 struct MqttTelemetryMessage {
     MqttTelemetryType type = MqttTelemetryType::kRx;
+    uint32_t connection_epoch = 0;
     MqttRxTelemetry rx{};
     MqttAutomationTelemetry automation{};
 };
@@ -111,10 +112,10 @@ struct RuntimeContext {
     std::atomic<bool> activated{false};
     std::atomic<bool> connected{false};
     std::atomic<bool> subscribed{false};
+    std::atomic<uint32_t> connection_epoch{0};
     std::atomic<bool> retirement_requested{false};
     std::atomic<bool> birth_pending{false};
     std::atomic<bool> catalog_pending{false};
-    std::atomic<bool> telemetry_pending{false};
     std::atomic<bool> state_pending{false};
     std::atomic<uint32_t> automation_revision{0};
     std::atomic<int> last_published_id{0};
@@ -456,12 +457,24 @@ void restore_last_automation_if_unset(RuntimeContext *context,
 
 bool enqueue_telemetry(RuntimeContext *context, const MqttTelemetryMessage &message)
 {
-    if (context->telemetry_queue == nullptr ||
-        xQueueSend(context->telemetry_queue, &message, 0) != pdTRUE) {
+    if (!context->connected.load(std::memory_order_acquire) ||
+        !context->subscribed.load(std::memory_order_acquire)) {
         note_telemetry_drop(context);
         return false;
     }
-    context->telemetry_pending.store(true, std::memory_order_release);
+    MqttTelemetryMessage queued = message;
+    queued.connection_epoch = context->connection_epoch.load(std::memory_order_acquire);
+    if (!context->connected.load(std::memory_order_acquire) ||
+        !context->subscribed.load(std::memory_order_acquire) ||
+        queued.connection_epoch != context->connection_epoch.load(std::memory_order_acquire)) {
+        note_telemetry_drop(context);
+        return false;
+    }
+    if (context->telemetry_queue == nullptr ||
+        xQueueSend(context->telemetry_queue, &queued, 0) != pdTRUE) {
+        note_telemetry_drop(context);
+        return false;
+    }
     notify_worker(context, kWakeTelemetry);
     return true;
 }
@@ -530,6 +543,7 @@ void mqtt_event_handler(void *handler_context, esp_event_base_t, int32_t event_i
     sample_mqtt_stack(context);
     switch (event_id) {
         case MQTT_EVENT_CONNECTED:
+            context->connection_epoch.fetch_add(1, std::memory_order_acq_rel);
             context->connected.store(true, std::memory_order_release);
             context->subscribed.store(false, std::memory_order_release);
             taskENTER_CRITICAL(&s_status_lock);
@@ -543,6 +557,7 @@ void mqtt_event_handler(void *handler_context, esp_event_base_t, int32_t event_i
         case MQTT_EVENT_DISCONNECTED:
             context->connected.store(false, std::memory_order_release);
             context->subscribed.store(false, std::memory_order_release);
+            context->connection_epoch.fetch_add(1, std::memory_order_acq_rel);
             taskENTER_CRITICAL(&s_status_lock);
             s_status.connected = false;
             s_status.subscribed = false;
@@ -822,6 +837,11 @@ void service_telemetry(RuntimeContext *context)
     MqttTelemetryMessage message{};
     while (context->telemetry_queue != nullptr &&
            xQueueReceive(context->telemetry_queue, &message, 0) == pdTRUE) {
+        if (message.connection_epoch !=
+            context->connection_epoch.load(std::memory_order_acquire)) {
+            note_telemetry_drop(context);
+            continue;
+        }
         char topic[kMqttTopicCapacity]{};
         bool formatted = false;
         if (message.type == MqttTelemetryType::kRx) {
@@ -836,11 +856,12 @@ void service_telemetry(RuntimeContext *context)
                         format_mqtt_automation_event_payload(message.automation, context->payload,
                                                               sizeof(context->payload));
         }
-        if (!formatted || publish_ephemeral(context, topic, context->payload) != ESP_OK) {
+        if (!context->connected.load(std::memory_order_acquire) ||
+            !context->subscribed.load(std::memory_order_acquire) || !formatted ||
+            publish_ephemeral(context, topic, context->payload) != ESP_OK) {
             note_telemetry_drop(context);
         }
     }
-    context->telemetry_pending.store(false, std::memory_order_release);
 }
 
 esp_err_t wait_for_clean_disconnect(RuntimeContext *context)
@@ -1357,6 +1378,7 @@ void worker_task(void *argument)
             connection_ready = false;
             reconciliation_retry_pending = false;
             set_discovery_state(NetworkMqttDiscoveryState::kDisconnected);
+            discard_telemetry(context);
             wait_for_worker(context, pdMS_TO_TICKS(1000));
             continue;
         }
