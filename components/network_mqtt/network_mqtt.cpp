@@ -721,8 +721,7 @@ uint32_t telemetry_drop_count()
 
 esp_err_t publish_pending_states(RuntimeContext *context)
 {
-    const uint32_t published_generation =
-        context->state_generation.load(std::memory_order_acquire);
+    context->state_pending.store(false, std::memory_order_release);
     MqttRxTelemetry rx{};
     MqttAutomationTelemetry automation{};
     bool has_rx = false;
@@ -781,9 +780,6 @@ esp_err_t publish_pending_states(RuntimeContext *context)
             context->has_pending_last_automation || has_automation;
         taskEXIT_CRITICAL(&context->telemetry_lock);
         return ESP_ERR_TIMEOUT;
-    }
-    if (context->state_generation.load(std::memory_order_acquire) == published_generation) {
-        context->state_pending.store(false, std::memory_order_release);
     }
     return ESP_OK;
 }
