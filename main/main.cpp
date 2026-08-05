@@ -74,6 +74,15 @@ extern "C" void app_main(void)
         rfbridge::mark_network_service_web_fallback(network_error);
     }
     if (mqtt_profile) {
+        const esp_err_t stack_error = rfbridge::prepare_network_wifi_stack();
+        if (stack_error != ESP_OK) {
+            ESP_LOGE(kTag, "TCP/IP stack initialization failed: %s; using Web for this boot",
+                     esp_err_to_name(stack_error));
+            rfbridge::mark_network_service_web_fallback(stack_error);
+            mqtt_profile = false;
+        }
+    }
+    if (mqtt_profile) {
         const esp_err_t mqtt_error = rfbridge::prepare_network_mqtt();
         if (mqtt_error != ESP_OK) {
             ESP_LOGE(kTag, "MQTT profile allocation failed: %s; using Web for this boot",

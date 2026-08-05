@@ -74,6 +74,8 @@ using NetworkWifiEventSink = bool (*)(const NetworkWifiEvent &event, void *conte
 using NetworkWifiOnlineSink = void (*)(bool online, void *context);
 
 esp_err_t initialize_network_wifi();
+// Initializes only the TCP/IP core so socket clients can be started before the Wi-Fi driver.
+esp_err_t prepare_network_wifi_stack();
 esp_err_t start_saved_network_wifi();
 esp_err_t connect_network_wifi(const WifiCredentials &credentials);
 esp_err_t stop_network_wifi();

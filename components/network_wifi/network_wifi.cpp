@@ -133,6 +133,7 @@ std::atomic<bool> s_driver_started{false};
 bool s_start_in_progress = false;
 bool s_operator_stopped = false;
 bool s_active_candidate = false;
+bool s_network_stack_initialized = false;
 bool s_had_ip = false;
 bool s_associated = false;
 bool s_connection_pending = false;
@@ -449,13 +450,29 @@ void cleanup_failed_driver_initialization()
     }
 }
 
+esp_err_t ensure_network_stack_initialized()
+{
+    if (xSemaphoreTake(s_admission_mutex, kMutexWait) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t error = ESP_OK;
+    if (!s_network_stack_initialized) {
+        error = esp_netif_init();
+        if (error == ESP_OK) {
+            s_network_stack_initialized = true;
+        }
+    }
+    xSemaphoreGive(s_admission_mutex);
+    return error;
+}
+
 esp_err_t ensure_driver_initialized()
 {
     if (s_driver_initialized) {
         return ESP_OK;
     }
-    esp_err_t error = esp_netif_init();
-    if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
+    esp_err_t error = ensure_network_stack_initialized();
+    if (error != ESP_OK) {
         return error;
     }
     error = esp_event_loop_create_default();
@@ -1167,6 +1184,14 @@ esp_err_t initialize_network_wifi()
     s_available.store(true, std::memory_order_release);
     s_initialization_error.store(ESP_OK, std::memory_order_release);
     return ESP_OK;
+}
+
+esp_err_t prepare_network_wifi_stack()
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
+    return ensure_network_stack_initialized();
 }
 
 esp_err_t start_saved_network_wifi()

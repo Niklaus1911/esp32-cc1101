@@ -61,8 +61,8 @@
 
 ## Startup, Memory, And Documentation
 
-- Initialize NVS, RF storage, Wi-Fi ownership without starting Wi-Fi, automation, and profile configuration first.
-- Preallocate/start the MQTT client and worker before Wi-Fi when MQTT is requested, proving their stacks and queues are available. Fully roll back partial MQTT ownership before selecting current-boot Web recovery.
+- Initialize NVS, RF storage, Wi-Fi ownership without starting Wi-Fi, automation, and profile configuration first. When MQTT is selected, initialize the lwIP core before starting its socket task; keep Web mode's TCP/IP initialization lazy.
+- Preallocate/start the MQTT client and worker before creating the Wi-Fi interface and driver when MQTT is requested, proving their stacks and queues are available. Fully roll back partial MQTT ownership before selecting current-boot Web recovery.
 - Initialize bridge events and learned signals before activating MQTT command/catalog delivery. In Web mode initialize mDNS, OTA, Web UI, and the Wi-Fi online sink exactly as today; provide an idempotent bridge-source rebinding path for late MQTT-to-Web fallback.
 - Start UART and RF, confirm a pending OTA image unconditionally, then start saved Wi-Fi. Broker unreachability or bad credentials remains MQTT mode with automatic reconnect; it does not consume Web memory.
 - Update README documentation for profiles, commands, native HA discovery, plaintext/NVS credential exposure, DHCP reservation, default `homeassistant` prefix, Web-only OTA workflow, reboot behavior, and a dedicated Mosquitto ACL:
