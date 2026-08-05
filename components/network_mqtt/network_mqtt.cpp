@@ -765,11 +765,6 @@ esp_err_t publish_pending_states(RuntimeContext *context)
         context->has_pending_last_rx = false;
         has_rx = true;
     }
-    if (context->has_pending_last_automation) {
-        automation = context->pending_last_automation;
-        context->has_pending_last_automation = false;
-        has_automation = true;
-    }
     taskEXIT_CRITICAL(&context->telemetry_lock);
 
     char topic[kMqttTopicCapacity]{};
@@ -787,6 +782,14 @@ esp_err_t publish_pending_states(RuntimeContext *context)
             return error;
         }
     }
+
+    taskENTER_CRITICAL(&context->telemetry_lock);
+    if (context->has_pending_last_automation) {
+        automation = context->pending_last_automation;
+        context->has_pending_last_automation = false;
+        has_automation = true;
+    }
+    taskEXIT_CRITICAL(&context->telemetry_lock);
     if (has_automation) {
         if (!format_mqtt_state_topic(context->identity, MqttStateTopicKind::kLastAutomation,
                                      nullptr, topic, sizeof(topic)) ||

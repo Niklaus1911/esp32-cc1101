@@ -1,0 +1,64 @@
+# Complete Repository Code Review and Remediation
+
+## Summary
+
+- Review current `HEAD` (`4edf507`) across all tracked firmware, tests, Web assets, build configuration, scripts, and documentation.
+- Audit managed mDNS/MQTT dependencies only at their integration boundaries and against ESP-IDF 6.0.2 documentation and applicable upstream issues.
+- Record severity-ranked findings with evidence, impact, reproduction path, and remediation.
+- Automatically fix every confirmed correctness, safety, security, persistence, or reliability defect. Exclude cosmetic churn and speculative refactors.
+- Give each independently testable root cause its own regression, verification cycle, and commit.
+
+## Review Passes
+
+1. **Architecture and concurrency**
+   - Trace startup, fallback, shutdown, reconnect, and maintenance ordering across NVS, RF, console, event delivery, Wi-Fi, Web, MQTT, mDNS, and OTA.
+   - Audit ISR/callback/task ownership, queues, atomics, locks, acknowledgement waits, stale generations, disconnect epochs, cleanup, and failure propagation.
+   - Check for races, deadlocks, use-after-free, lost notifications, stale replay, double initialization, and blocking work in time-sensitive contexts.
+
+2. **RF, automation, and persistence**
+   - Review CC1101 SPI and RMT timing, half-duplex transitions, timeout recovery, RX restoration, protocol/raw bounds, consensus, duplicate handling, and queue overflow.
+   - Validate automation matching, cooldowns, generation invalidation, single-action behavior, log delivery, and replay ownership.
+   - Audit every NVS schema for bounds, versions, CRCs, malformed records, atomic commits, power-loss behavior, iterator cleanup, credential handling, and the no-automatic-erase invariant.
+
+3. **Network and input surfaces**
+   - Audit console parsing and secret prompts; HTTP body limits, Host/Origin policy, CSP, JSON escaping, handler lifecycle, and OTA validation.
+   - Review MQTT QoS/retain rules, fragmented inputs, exact command matching, outbox handling, discovery ledgers, tombstones, retries, retained snapshots, reconnect semantics, and Home Assistant contracts.
+   - Check Wi-Fi candidate persistence, DHCP transitions, mDNS conflict handling, profile exclusivity, browser polling, reconnect behavior, and failure diagnostics.
+
+4. **Resources, tests, and release configuration**
+   - Inspect all allocation and cleanup paths, queue sizes, task stacks, internal-heap fragmentation, static DRAM/IRAM use, and low-memory fallbacks.
+   - Review existing tests for false positives, missing boundary cases, cleanup failures, and gaps between host policy tests and ESP-IDF lifecycle code.
+   - Validate CMake dependencies, Kconfig defaults, OTA partitions, scripts, shell safety, dependency locks, documentation accuracy, generated-file hygiene, and accidental secret/local-path exposure.
+
+## Remediation Protocol
+
+- Confirm each suspected issue against source and tests before editing; append a short fix plan to this review plan.
+- Apply the smallest root-cause fix, preserving public console commands, HTTP/MQTT contracts, NVS formats, and RF behavior unless that contract is itself defective.
+- Add a focused host or Unity regression. For concurrency-only defects, add an extractable policy test where practical and verify the real ESP-IDF path by build and hardware observation.
+- Run focused tests, all host tests, the applicable firmware build, and `git diff --check` before each `fix: ...` commit.
+- Repeat the affected subsystem review after every fix, then perform a complete second pass until no confirmed defect remains.
+- Do not amend, rebase, push, alter unrelated files, or touch the pre-existing `.playwright-mcp/` directory.
+
+## Verification and Hardware
+
+- Establish pre-fix baselines with normal host tests, ASan/UBSan host builds, JavaScript and shell syntax checks, Unity-image compilation, and `tools/verify-production.sh`.
+- After all commits, repeat every automated gate and inspect image metadata, partitions, dependency versions, compiler output, final diff, commit ordering, and flash/DRAM/IRAM changes.
+- Validate the Web UI first against a deterministic mock and then read-only on the device at desktop and mobile viewports, including screenshots, overflow, console/network errors, polling, reconnects, numeric-IP and `.local` access, and DNS-SD.
+- Before hardware work, confirm the classic ESP32 and CP2102 by-id port, back up the `0x9000/0x6000` NVS partition, and flash the exact final production image without erasing NVS.
+- Test Web and MQTT profiles for three Wi-Fi stop/start cycles and a five-minute settled soak each. Verify boot ordering, profile exclusivity, service recovery, persisted 5-signal/3-rule state, MQTT reconciliation, retained-state counters, mDNS/HTTP lifecycle, and error/drop counters.
+- Require at least 20 KiB settled free internal heap, a 16 KiB largest block, 768-byte task-stack margins, cumulative minimum heap above 2 KiB, and no more than 1 KiB settled degradation across reconnect cycles.
+- Treat any reset, assertion, watchdog, allocation failure, monotonic memory loss, stuck service state, unexpected outbox growth, or unexplained event drop as blocking and return it to remediation.
+- RF reception is observational only. Do not transmit, replay, learn, delete signals, mutate rules, upload OTA, erase flash, or run Unity tests on-device.
+- Restore MQTT mode at the end and confirm `ready`, Wi-Fi at the expected address, persisted catalog counts, stable memory, and `ESP_OK` status fields.
+
+## Assumptions
+
+- The trusted-LAN unauthenticated Web UI and plaintext MQTT 3.1.1 are documented product choices; the review checks containment and implementation correctness rather than redesigning them.
+- No public API or persisted-format change is planned. Any unavoidable compatibility correction must include migration/compatibility handling, tests, and documentation in the same defect commit.
+- Completion requires a clean second review pass, all automated gates passing, both hardware profiles meeting acceptance thresholds, and a final report listing findings, commits, verification evidence, and residual hardware limitations.
+
+## Confirmed Defect 1: Preserve Unattempted MQTT Retained Snapshots
+
+- **Root cause:** `publish_pending_states()` removes both the last-RX and last-automation snapshots before it attempts either publish. If the RX topic/payload cannot be formatted or its QoS 1 publish fails, only the RX snapshot is restored and the unattempted automation snapshot is lost.
+- **Fix:** take the RX snapshot first, publish it, and only then take the automation snapshot. Keep the existing restore-if-unset behavior so a failed older publish cannot overwrite a newer producer snapshot.
+- **Regression/verification:** inspect all early-return paths for ownership symmetry, run the MQTT host suite and full host suite, compile the production image, and exercise reconnect/failure recovery during the MQTT hardware pass.
