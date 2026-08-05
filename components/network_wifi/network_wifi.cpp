@@ -1404,9 +1404,9 @@ esp_err_t set_network_wifi_event_sink(NetworkWifiEventSink sink, void *context)
         s_event_sink = sink;
     }
     if (sink == nullptr) {
-        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        const TickType_t started = xTaskGetTickCount();
         while (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0 &&
-               xTaskGetTickCount() < deadline) {
+               xTaskGetTickCount() - started < pdMS_TO_TICKS(1000)) {
             vTaskDelay(1);
         }
         if (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
@@ -1427,9 +1427,9 @@ esp_err_t set_network_wifi_online_sink(NetworkWifiOnlineSink sink, void *context
         s_online_sink = sink;
     }
     if (sink == nullptr) {
-        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        const TickType_t started = xTaskGetTickCount();
         while (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0 &&
-               xTaskGetTickCount() < deadline) {
+               xTaskGetTickCount() - started < pdMS_TO_TICKS(1000)) {
             vTaskDelay(1);
         }
         if (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0) {

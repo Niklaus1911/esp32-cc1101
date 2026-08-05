@@ -532,9 +532,9 @@ esp_err_t set_ota_update_event_sink(OtaUpdateEventSink sink, void *context)
         s_event_sink = sink;
     }
     if (sink == nullptr) {
-        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        const TickType_t started = xTaskGetTickCount();
         while (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0 &&
-               xTaskGetTickCount() < deadline) {
+               xTaskGetTickCount() - started < pdMS_TO_TICKS(1000)) {
             vTaskDelay(1);
         }
         if (s_sink_callbacks_in_flight.load(std::memory_order_acquire) != 0) {
