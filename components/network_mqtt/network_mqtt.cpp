@@ -1336,6 +1336,7 @@ void worker_task(void *argument)
     auto *context = static_cast<RuntimeContext *>(argument);
     TickType_t last_audit = xTaskGetTickCount();
     bool connection_ready = false;
+    bool reconciliation_retry_pending = false;
     while (true) {
         service_commands(context);
         if (context->network_online.load(std::memory_order_acquire) &&
@@ -1354,6 +1355,7 @@ void worker_task(void *argument)
         }
         if (!context->connected.load(std::memory_order_acquire)) {
             connection_ready = false;
+            reconciliation_retry_pending = false;
             set_discovery_state(NetworkMqttDiscoveryState::kDisconnected);
             wait_for_worker(context, pdMS_TO_TICKS(1000));
             continue;
@@ -1388,14 +1390,14 @@ void worker_task(void *argument)
                 continue;
             }
             connection_ready = true;
+            reconciliation_retry_pending = false;
             last_audit = xTaskGetTickCount();
         }
 
-        bool force = false;
         const bool catalog_changed =
             context->catalog_pending.exchange(false, std::memory_order_acq_rel);
-        bool reconcile = catalog_changed;
-        force = catalog_changed;
+        bool reconcile = catalog_changed || reconciliation_retry_pending;
+        bool force = catalog_changed || reconciliation_retry_pending;
         if (context->birth_pending.exchange(false, std::memory_order_acq_rel)) {
             const TickType_t jitter = pdMS_TO_TICKS(esp_random() % 2001U);
             const TickType_t started = xTaskGetTickCount();
@@ -1420,7 +1422,7 @@ void worker_task(void *argument)
             last_audit = now;
         }
         if (reconcile && context->connected.load(std::memory_order_acquire)) {
-            (void)reconcile_discovery(context, force);
+            reconciliation_retry_pending = reconcile_discovery(context, force) != ESP_OK;
         }
         service_telemetry(context);
         if (context->state_pending.load(std::memory_order_acquire)) {
