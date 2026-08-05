@@ -74,3 +74,27 @@
 - **Root cause:** `initialize_rf_signals()` returns after allocation or task-creation failure without deleting mutexes and queues already created. Because initialization is retryable, later attempts overwrite the handles and leak additional internal RAM.
 - **Fix:** add one initialization-only cleanup routine and invoke it on every failure after resource allocation. Reset catalog ownership with the resources so a retry starts from a coherent empty state.
 - **Regression/verification:** inspect every initialization exit for complete ownership transfer or rollback, compile the Unity image containing the RF-signals component tests, run all host tests, and run the production verifier with the final low-memory size audit.
+
+## Confirmed Defect 4: Keep OTA Initialization Status Consistent
+
+- **Root cause:** `initialize_ota_update()` fills `s_status` as available before creating the reboot task. If task creation fails, the atomic availability flag and return value report failure while `get_ota_update_status()` can still report an available idle service with `initialization_error == ESP_OK`.
+- **Fix:** publish the available/idle status only after all required resources, including the reboot task, exist. Record every initialization failure in the status snapshot while preserving the mutex for diagnostics.
+- **Regression/verification:** inspect all OTA initialization exits for consistent atomic and status state, build the production image and Unity image, run all host tests, and verify the runtime status remains unavailable on any failed initialization path.
+
+## Confirmed Defect 5: Keep Wi-Fi Initialization Status Consistent
+
+- **Root cause:** `initialize_network_wifi()` marks `s_status.available` before creating the network task. A task allocation failure cleans up the queues and mutexes but leaves a stale success-looking status snapshot.
+- **Fix:** defer status publication and the saved-credential snapshot publication until after task creation succeeds; record the initialization error before cleanup on failure.
+- **Regression/verification:** inspect the Wi-Fi allocation failure path, compile the Unity image and production image, run all host tests, and verify no public status reports an available manager without its owner task.
+
+## Confirmed Defect 6: Converge Wi-Fi Stop Races
+
+- **Root cause:** operator stop and scan-then-stop paths ignore `ESP_ERR_WIFI_NOT_STARTED` after setting `kStopping`. If the driver has already stopped or its stop event was lost, the manager can remain stuck in `kStopping` and fail to notify network consumers that the interface is offline.
+- **Fix:** treat `ESP_ERR_WIFI_NOT_STARTED` as an already-completed stop, clear driver/IP/association state, emit the offline notification, and converge to `kOff` in every operator-owned stop path.
+- **Regression/verification:** add focused stop-result policy coverage, run the host suite, compile the Unity and production images, and observe repeated Wi-Fi stop/start cycles for a stable `off`/`online` transition.
+
+## Confirmed Defect 7: Make Sink Quiesce Waits Tick-Wrap Safe
+
+- **Root cause:** OTA and Wi-Fi sink-detach functions compare the current tick against `start + timeout`. The comparison is invalid when the FreeRTOS tick counter wraps, so callbacks can be detached too early or wait indefinitely roughly every counter period.
+- **Fix:** measure elapsed ticks using unsigned subtraction from the captured start tick, matching the already-correct bridge-event implementation.
+- **Regression/verification:** inspect all sink-detach wait loops for wrap-safe arithmetic, run the host suite and production verifier, compile the Unity image, and include sink detach/rebind observation in the hardware soak.

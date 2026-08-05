@@ -390,6 +390,9 @@ esp_err_t initialize_ota_update()
     }
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == nullptr) {
+        s_status = {};
+        s_status.state = OtaUpdateState::kUnavailable;
+        s_status.initialization_error = ESP_ERR_NO_MEM;
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
@@ -398,12 +401,30 @@ esp_err_t initialize_ota_update()
     const esp_partition_t *otadata =
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
     if (running == nullptr || update == nullptr || otadata == nullptr) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status = {};
+            s_status.state = OtaUpdateState::kUnavailable;
+            s_status.initialization_error = ESP_ERR_NOT_FOUND;
+        }
         s_initialization_error.store(ESP_ERR_NOT_FOUND, std::memory_order_release);
         return ESP_ERR_NOT_FOUND;
     }
     esp_ota_img_states_t image_state{};
     const bool pending = esp_ota_get_state_partition(running, &image_state) == ESP_OK &&
                          image_state == ESP_OTA_IMG_PENDING_VERIFY;
+    if (xTaskCreate(reboot_task, "ota_reboot", kRebootTaskStackSize, nullptr, kRebootTaskPriority,
+                    &s_reboot_task) != pdPASS) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status = {};
+            s_status.state = OtaUpdateState::kUnavailable;
+            s_status.initialization_error = ESP_ERR_NO_MEM;
+            s_status.last_error = ESP_ERR_NO_MEM;
+        }
+        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        return ESP_ERR_NO_MEM;
+    }
     {
         StatusLock lock;
         if (lock.locked()) {
@@ -419,11 +440,6 @@ esp_err_t initialize_ota_update()
             copy_text(s_status.running_version, sizeof(s_status.running_version),
                       esp_app_get_description()->version);
         }
-    }
-    if (xTaskCreate(reboot_task, "ota_reboot", kRebootTaskStackSize, nullptr, kRebootTaskPriority,
-                    &s_reboot_task) != pdPASS) {
-        s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
-        return ESP_ERR_NO_MEM;
     }
     s_available.store(true, std::memory_order_release);
     s_initialization_error.store(ESP_OK, std::memory_order_release);
