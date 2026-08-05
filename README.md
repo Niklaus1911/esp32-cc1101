@@ -205,7 +205,7 @@ topic read rfbridge/<12hex>/automation/+/set
 topic write rfbridge/<12hex>/availability
 topic write rfbridge/<12hex>/event/#
 topic write rfbridge/<12hex>/state/#
-topic write homeassistant/button/rfbridge_<12hex>/#
+topic write homeassistant/+/rfbridge_<12hex>/#
 ```
 
 Home Assistant needs its own normal broker permissions to read discovery/availability and publish commands. Ensure MQTT Discovery is enabled with the `homeassistant` prefix.
