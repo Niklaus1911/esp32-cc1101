@@ -128,3 +128,9 @@
 - **Root cause:** the bridge-event broker uses `s_available` as both an initialization guard and the public readiness flag, setting it before the mutex, queue, and dispatcher task exist. Concurrent callers can observe a partially initialized broker, while failed cleanup deletes the mutex and makes status return a misleading timeout instead of the allocation failure.
 - **Fix:** add a dedicated retryable initialization guard, publish availability only after all resources exist, retain the exact initialization error, and return an unavailable counter snapshot plus that error without locking after failure.
 - **Regression/verification:** inspect pre-init, in-progress, allocation-failure, retry, and ready transitions; compile the Unity image; run all host tests and the production verifier; and confirm the hardware broker status shows both registered sinks with stable drop counters.
+
+## Confirmed Defect 13: Publish RF-Signals Availability Only After Initialization
+
+- **Root cause:** RF signals also uses `s_available` as its retry guard, setting public readiness before its mutexes and queue exist. A concurrent learning request can pass the availability check and send to a null queue, while frame and status callers can observe a partially initialized service.
+- **Fix:** use a dedicated retryable initialization guard, keep the service unavailable until the catalog, task, queues, and mutexes are ready, and clear the guard on every success or rollback exit.
+- **Regression/verification:** inspect learning, frame, status, failure, retry, and successful startup interleavings; compile the Unity image; run all host tests and the production verifier; and confirm hardware startup reports the persisted catalog before accepting receive events.

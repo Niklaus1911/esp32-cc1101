@@ -55,6 +55,7 @@ SemaphoreHandle_t s_mutex = nullptr;
 SemaphoreHandle_t s_catalog_mutex = nullptr;
 QueueHandle_t s_queue = nullptr;
 TaskHandle_t s_task = nullptr;
+std::atomic_flag s_initializing = ATOMIC_FLAG_INIT;
 std::array<LearnedSignalEntry, CONFIG_RF_MAX_LEARNED_SIGNALS> s_catalog{};
 std::size_t s_catalog_count = 0;
 bool s_catalog_available = false;
@@ -327,8 +328,8 @@ void destroy_initialization_resources()
 
 esp_err_t initialize_rf_signals()
 {
-    bool expected = false;
-    if (!s_available.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (s_available.load(std::memory_order_acquire) ||
+        s_initializing.test_and_set(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
     s_mutex = xSemaphoreCreateMutex();
@@ -337,7 +338,7 @@ esp_err_t initialize_rf_signals()
     if (s_mutex == nullptr || s_catalog_mutex == nullptr || s_queue == nullptr) {
         destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
-        s_available.store(false, std::memory_order_release);
+        s_initializing.clear(std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
     (void)rf_signals_refresh_catalog();
@@ -345,7 +346,7 @@ esp_err_t initialize_rf_signals()
         pdPASS) {
         destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
-        s_available.store(false, std::memory_order_release);
+        s_initializing.clear(std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
     {
@@ -356,6 +357,8 @@ esp_err_t initialize_rf_signals()
         }
     }
     s_initialization_error.store(ESP_OK, std::memory_order_release);
+    s_available.store(true, std::memory_order_release);
+    s_initializing.clear(std::memory_order_release);
     return ESP_OK;
 }
 
