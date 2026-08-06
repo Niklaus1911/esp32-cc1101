@@ -12,6 +12,7 @@ menu "OOK service configuration"
 
     config RF_ACTIVITY_LED_ENABLE
         bool "Enable the startup and RF activity LED"
+        default n if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default y
         help
             Blinks a GPIO three times during application startup, with fixed 150 ms dark
@@ -23,7 +24,9 @@ menu "OOK service configuration"
 
         config RF_ACTIVITY_LED_GPIO
             int "RF activity LED GPIO"
-            range 0 33
+            range 0 33 if IDF_TARGET_ESP32
+            range 0 48 if IDF_TARGET_ESP32S3
+            default 21 if PLATFORM_BOARD_XIAO_ESP32S3
             default 2
             help
                 GPIO2 drives the active-high blue LED on many DOIT/clone DevKit V1 boards.
@@ -33,6 +36,7 @@ menu "OOK service configuration"
 
         config RF_ACTIVITY_LED_ACTIVE_HIGH
             bool "RF activity LED is active-high"
+            default n if PLATFORM_BOARD_XIAO_ESP32S3
             default y
 
         config RF_ACTIVITY_LED_PULSE_MS

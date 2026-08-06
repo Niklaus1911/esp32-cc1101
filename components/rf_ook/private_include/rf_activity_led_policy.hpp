@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "platform_board_policy.hpp"
+
 namespace rfbridge {
 
 constexpr uint32_t kRfActivityLedMinimumPulseMs = 5;
@@ -31,6 +33,10 @@ struct RfActivityLedStartupStep {
 };
 
 bool rf_activity_led_config_is_valid(const RfActivityLedConfig &config,
+                                     const int *unavailable_gpios,
+                                     std::size_t unavailable_gpio_count);
+bool rf_activity_led_config_is_valid(BoardProfile profile,
+                                     const RfActivityLedConfig &config,
                                      const int *unavailable_gpios,
                                      std::size_t unavailable_gpio_count);
 uint8_t rf_activity_led_active_level(const RfActivityLedConfig &config);

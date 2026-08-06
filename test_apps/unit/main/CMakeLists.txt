@@ -6,6 +6,7 @@ idf_component_register(
         "test_network_wifi_component.cpp"
         "test_network_mqtt_component.cpp"
         "test_ota_update_component.cpp"
+        "test_platform_board_component.cpp"
         "test_rf_automation_component.cpp"
         "test_rf_console_component.cpp"
         "test_rf_ook_component.cpp"
@@ -13,6 +14,6 @@ idf_component_register(
         "test_rf_storage_component.cpp"
         "test_web_form_component.cpp"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES platform_nvs network_wifi network_mdns network_mqtt app_maintenance ota_update cc1101 bridge_control bridge_events rf_automation rf_console rf_ook rf_signals rf_storage web_auth web_ui esp_hw_support nvs_flash unity
+    PRIV_REQUIRES platform_board platform_nvs network_wifi network_mdns network_mqtt app_maintenance ota_update cc1101 bridge_control bridge_events rf_automation rf_console rf_ook rf_signals rf_storage web_auth web_ui esp_hw_support nvs_flash unity
     WHOLE_ARCHIVE
 )

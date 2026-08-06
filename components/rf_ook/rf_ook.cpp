@@ -11,6 +11,7 @@
 #include "driver/rmt_rx.h"
 #include "driver/rmt_tx.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -95,7 +96,12 @@ struct RadioReply {
 rmt_channel_handle_t s_rx_channel = nullptr;
 rmt_channel_handle_t s_tx_channel = nullptr;
 rmt_encoder_handle_t s_copy_encoder = nullptr;
-rmt_symbol_word_t s_rx_symbols[2][kRxSymbolCapacity]{};
+#if CONFIG_IDF_TARGET_ESP32S3
+rmt_symbol_word_t *s_rx_symbols[2]{};
+#else
+rmt_symbol_word_t s_rx_symbol_storage[2][kRxSymbolCapacity]{};
+rmt_symbol_word_t *s_rx_symbols[2] = {s_rx_symbol_storage[0], s_rx_symbol_storage[1]};
+#endif
 rmt_symbol_word_t s_symbol_snapshot[kRxSymbolCapacity]{};
 rmt_symbol_word_t s_tx_symbols[(kMaxRawPulses / 2U) * 20U]{};
 PulseBuffer s_pulse_buffer{};
@@ -692,7 +698,8 @@ esp_err_t arm_receiver_owned()
     s_rx_buffer_armed_low[buffer_index].store(static_cast<uint32_t>(armed_us), std::memory_order_relaxed);
     s_rx_buffer_armed_high[buffer_index].store(static_cast<uint32_t>(armed_us >> 32U),
                                                std::memory_order_release);
-    const esp_err_t error = rmt_receive(s_rx_channel, s_rx_symbols[buffer_index], sizeof(s_rx_symbols[buffer_index]),
+    const esp_err_t error = rmt_receive(s_rx_channel, s_rx_symbols[buffer_index],
+                                        kRxSymbolCapacity * sizeof(rmt_symbol_word_t),
                                         &s_receive_config);
     if (error == ESP_OK) {
         s_next_rx_buffer = (buffer_index + 1U) % std::size(s_rx_symbols);
@@ -1168,7 +1175,12 @@ esp_err_t initialize_rmt()
     rx_config.gpio_num = static_cast<gpio_num_t>(CONFIG_CC1101_GDO2_GPIO);
     rx_config.clk_src = RMT_CLK_SRC_DEFAULT;
     rx_config.resolution_hz = kResolutionHz;
+#if CONFIG_IDF_TARGET_ESP32S3
+    rx_config.mem_block_symbols = 48;
+    rx_config.flags.with_dma = true;
+#else
     rx_config.mem_block_symbols = kRxSymbolCapacity;
+#endif
 #ifdef CONFIG_CC1101_RX_INVERT
     rx_config.flags.invert_in = true;
 #endif
@@ -1178,7 +1190,12 @@ esp_err_t initialize_rmt()
     tx_config.gpio_num = static_cast<gpio_num_t>(CONFIG_CC1101_GDO0_GPIO);
     tx_config.clk_src = RMT_CLK_SRC_DEFAULT;
     tx_config.resolution_hz = kResolutionHz;
+#if CONFIG_IDF_TARGET_ESP32S3
+    tx_config.mem_block_symbols = 48;
+    tx_config.flags.with_dma = true;
+#else
     tx_config.mem_block_symbols = 64;
+#endif
     tx_config.trans_queue_depth = 1;
     ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_config, &s_tx_channel), kTag, "create RMT TX");
 
@@ -1192,6 +1209,29 @@ esp_err_t initialize_rmt()
 
     s_receive_config.signal_range_min_ns = 2500;
     s_receive_config.signal_range_max_ns = static_cast<uint32_t>(kRmtStopDurationUs) * 1000U;
+    return ESP_OK;
+}
+
+esp_err_t allocate_rx_symbol_buffers()
+{
+#if CONFIG_IDF_TARGET_ESP32S3
+    constexpr uint32_t kCapabilities = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
+    constexpr std::size_t kBufferSize = kRxSymbolCapacity * sizeof(rmt_symbol_word_t);
+    for (rmt_symbol_word_t *&buffer : s_rx_symbols) {
+        if (buffer == nullptr) {
+            buffer = static_cast<rmt_symbol_word_t *>(
+                heap_caps_aligned_alloc(64, kBufferSize, kCapabilities));
+            if (buffer == nullptr) {
+                for (rmt_symbol_word_t *&allocated : s_rx_symbols) {
+                    heap_caps_free(allocated);
+                    allocated = nullptr;
+                }
+                return ESP_ERR_NO_MEM;
+            }
+            std::memset(buffer, 0, kBufferSize);
+        }
+    }
+#endif
     return ESP_OK;
 }
 
@@ -1252,6 +1292,13 @@ esp_err_t cleanup_resources()
         s_service_state.store(ServiceState::kStopping, std::memory_order_release);
         return cleanup_error == ESP_OK ? ESP_FAIL : cleanup_error;
     }
+
+#if CONFIG_IDF_TARGET_ESP32S3
+    for (rmt_symbol_word_t *&buffer : s_rx_symbols) {
+        heap_caps_free(buffer);
+        buffer = nullptr;
+    }
+#endif
 
     const esp_err_t radio_cleanup_error = s_radio.deinitialize();
     if (radio_cleanup_error != ESP_OK) {
@@ -1516,7 +1563,10 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
         .frequency_hz = CONFIG_CC1101_FREQUENCY_HZ,
         .tx_power_dbm = CONFIG_CC1101_TX_POWER_DBM,
     };
-    esp_err_t error = s_radio.initialize(radio_config);
+    esp_err_t error = allocate_rx_symbol_buffers();
+    if (error == ESP_OK) {
+        error = s_radio.initialize(radio_config);
+    }
     if (error == ESP_OK) {
         error = initialize_rmt();
     }

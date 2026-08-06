@@ -8,11 +8,12 @@
 #include <new>
 
 #include "bridge_control.hpp"
-#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "network_wifi.hpp"
 #include "network_mdns.hpp"
+#include "network_mqtt.hpp"
+#include "network_wifi.hpp"
+#include "platform_board.hpp"
 #include "rf_automation.hpp"
 #include "rf_automation_event.hpp"
 #include "rf_ook.hpp"
@@ -319,6 +320,7 @@ esp_err_t live_handler(httpd_req_t *request)
     RfAutomationStatus automation{};
     NetworkWifiStatus wifi{};
     NetworkMdnsStatus mdns{};
+    NetworkMqttStatus mqtt{};
     RfFrame frame{};
     LearnedMatch match{};
     const esp_err_t radio_error = get_rf_radio_status(&radio);
@@ -326,7 +328,10 @@ esp_err_t live_handler(httpd_req_t *request)
     const esp_err_t automation_error = rf_automation_get_status(&automation);
     const esp_err_t wifi_error = get_network_wifi_status(&wifi);
     const esp_err_t mdns_error = get_network_mdns_status(&mdns);
+    const esp_err_t mqtt_error = get_network_mqtt_status(&mqtt);
     const esp_err_t frame_error = get_last_rf_frame_with_match(&frame, &match);
+    const BoardInfo &board = current_board_info();
+    const BoardMemorySnapshot memory = board_memory_snapshot();
 
     char escaped_ssid[kWifiSsidCapacity * 6U]{};
     char escaped_saved_ssid[kWifiSsidCapacity * 6U]{};
@@ -540,26 +545,72 @@ esp_err_t live_handler(httpd_req_t *request)
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK) {
-        constexpr uint32_t kHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"board\":{\"profile\":\"%s\",\"target\":\"%s\",\"flash_mib\":%u,"
+            "\"psram_mib\":%u,\"console\":\"%s\",\"combined_services\":%s,"
+            "\"activity_led_enabled\":%s,\"activity_led_gpio\":%d,"
+            "\"activity_led_active_high\":%s,\"cc1101\":{\"sclk\":%d,\"miso\":%d,"
+            "\"mosi\":%d,\"cs\":%d,\"gdo0_tx\":%d,\"gdo2_rx\":%d}},",
+            board.profile_name, board.target_name, board.flash_mib, board.psram_mib,
+            console_transport_name(board.console),
+            board.combined_services ? "true" : "false",
+            board.activity_led_enabled ? "true" : "false", board.activity_led_gpio,
+            board.activity_led_active_high ? "true" : "false", board.cc1101.sclk,
+            board.cc1101.miso, board.cc1101.mosi, board.cc1101.cs, board.cc1101.gdo0,
+            board.cc1101.gdo2);
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"services\":{\"requested\":\"%s\",\"boot\":\"%s\","
+            "\"effective\":\"%s\",\"configured\":%s,\"reboot_required\":%s,"
+            "\"fallback\":%s,\"retirement\":\"%s\",\"maintenance\":%s,"
+            "\"config_error\":\"%s\",\"web_error\":\"%s\",\"mqtt_error\":\"%s\","
+            "\"status_error\":\"%s\"},",
+            network_service_mask_name(mqtt.requested_services),
+            network_service_mask_name(mqtt.boot_services),
+            network_service_mask_name(mqtt.effective_services),
+            mqtt.configured ? "true" : "false", mqtt.reboot_required ? "true" : "false",
+            mqtt.current_boot_fallback ? "true" : "false",
+            mqtt_retirement_state_name(mqtt.retirement_state),
+            mqtt.maintenance_active ? "true" : "false", esp_err_to_name(mqtt.config_error),
+            esp_err_to_name(mqtt.web_error), esp_err_to_name(mqtt.mqtt_error),
+            esp_err_to_name(mqtt_error));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
             "\"system\":{\"uptime_ms\":%llu,\"reset_reason\":\"%s\",\"heap_free\":%u,"
-            "\"heap_minimum\":%u,\"heap_largest\":%u},",
+            "\"heap_minimum\":%u,\"heap_largest\":%u,"
+            "\"internal\":{\"total\":%lu,\"free\":%lu,\"minimum\":%lu,\"largest\":%lu},"
+            "\"psram\":{\"total\":%lu,\"free\":%lu,\"minimum\":%lu,\"largest\":%lu}},",
             static_cast<unsigned long long>(esp_timer_get_time() / 1000),
             reset_reason_name(esp_reset_reason()),
-            static_cast<unsigned>(heap_caps_get_free_size(kHeapCaps)),
-            static_cast<unsigned>(heap_caps_get_minimum_free_size(kHeapCaps)),
-            static_cast<unsigned>(heap_caps_get_largest_free_block(kHeapCaps)));
+            static_cast<unsigned>(memory.internal.free),
+            static_cast<unsigned>(memory.internal.minimum_free),
+            static_cast<unsigned>(memory.internal.largest_free_block),
+            static_cast<unsigned long>(memory.internal.total),
+            static_cast<unsigned long>(memory.internal.free),
+            static_cast<unsigned long>(memory.internal.minimum_free),
+            static_cast<unsigned long>(memory.internal.largest_free_block),
+            static_cast<unsigned long>(memory.psram.total),
+            static_cast<unsigned long>(memory.psram.free),
+            static_cast<unsigned long>(memory.psram.minimum_free),
+            static_cast<unsigned long>(memory.psram.largest_free_block));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
             "\"errors\":{\"radio\":\"%s\",\"signals\":\"%s\","
-            "\"automation\":\"%s\",\"wifi\":\"%s\",\"mdns\":\"%s\"}}",
+            "\"automation\":\"%s\",\"wifi\":\"%s\",\"mdns\":\"%s\","
+            "\"services\":\"%s\"}}",
             esp_err_to_name(radio_error), esp_err_to_name(signals_error),
             esp_err_to_name(automation_error), esp_err_to_name(wifi_error),
-            esp_err_to_name(mdns_error));
+            esp_err_to_name(mdns_error), esp_err_to_name(mqtt_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error != ESP_OK) {

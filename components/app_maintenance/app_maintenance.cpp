@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include "network_wifi.hpp"
+#include "network_mqtt.hpp"
 #include "rf_automation.hpp"
 #include "rf_ook.hpp"
 
@@ -11,6 +12,7 @@ namespace {
 
 std::atomic<bool> s_active{false};
 std::atomic<bool> s_network_acquired{false};
+std::atomic<bool> s_mqtt_acquired{false};
 std::atomic<bool> s_automation_acquired{false};
 std::atomic<bool> s_rf_acquired{false};
 
@@ -23,7 +25,11 @@ esp_err_t begin_ota_maintenance()
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t error = set_network_wifi_ota_lock(true);
+    esp_err_t error = begin_network_mqtt_maintenance();
+    s_mqtt_acquired.store(error == ESP_OK, std::memory_order_release);
+    if (error == ESP_OK) {
+        error = set_network_wifi_ota_lock(true);
+    }
     s_network_acquired.store(error == ESP_OK, std::memory_order_release);
     if (error == ESP_OK) {
         error = rf_automation_set_runtime_paused(true);
@@ -62,6 +68,14 @@ esp_err_t end_ota_maintenance()
             first_error = error;
         }
     }
+    if (s_mqtt_acquired.load(std::memory_order_acquire)) {
+        const esp_err_t error = end_network_mqtt_maintenance();
+        if (error == ESP_OK) {
+            s_mqtt_acquired.store(false, std::memory_order_release);
+        } else if (first_error == ESP_OK) {
+            first_error = error;
+        }
+    }
     if (s_network_acquired.load(std::memory_order_acquire)) {
         const esp_err_t error = set_network_wifi_ota_lock(false);
         if (error == ESP_OK) {
@@ -72,6 +86,7 @@ esp_err_t end_ota_maintenance()
     }
     if (!s_rf_acquired.load(std::memory_order_acquire) &&
         !s_automation_acquired.load(std::memory_order_acquire) &&
+        !s_mqtt_acquired.load(std::memory_order_acquire) &&
         !s_network_acquired.load(std::memory_order_acquire)) {
         s_active.store(false, std::memory_order_release);
     }

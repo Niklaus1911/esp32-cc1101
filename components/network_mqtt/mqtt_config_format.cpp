@@ -8,7 +8,7 @@ namespace {
 
 constexpr uint8_t kServiceMagic[] = {'M', 'Q', 'S', 'C'};
 constexpr uint8_t kAdvertisedMagic[] = {'M', 'Q', 'A', 'D'};
-constexpr uint8_t kServiceFormatVersion = 1;
+constexpr uint8_t kServiceFormatVersion = 2;
 constexpr std::size_t kServiceHeaderSize = 20;
 constexpr std::size_t kAdvertisedHeaderSize = 12;
 constexpr std::size_t kAdvertisedV2HeaderSize = 16;
@@ -75,10 +75,17 @@ uint32_t read_u32(const uint8_t *input)
     return value;
 }
 
-bool service_state_is_valid(MqttServiceState state)
+bool service_mask_is_valid(NetworkServiceMask mask)
 {
-    return state == MqttServiceState::kWeb || state == MqttServiceState::kMqtt ||
-           state == MqttServiceState::kRetiring || state == MqttServiceState::kRetired;
+    return mask == NetworkServiceMask::kWeb || mask == NetworkServiceMask::kMqtt ||
+           mask == NetworkServiceMask::kBoth;
+}
+
+bool retirement_state_is_valid(MqttRetirementState state)
+{
+    return state == MqttRetirementState::kActive ||
+           state == MqttRetirementState::kRetiring ||
+           state == MqttRetirementState::kRetired;
 }
 
 bool valid_name_range(const MqttAdvertisedLedger &ledger, std::size_t offset, std::size_t count)
@@ -179,12 +186,22 @@ bool mqtt_service_has_credentials(const MqttServiceConfig &config)
 
 bool mqtt_service_config_is_valid(const MqttServiceConfig &config)
 {
-    if (!service_state_is_valid(config.state) || config.generation == 0) {
+    if (!service_mask_is_valid(config.requested_services) ||
+        !retirement_state_is_valid(config.retirement_state) || config.generation == 0) {
         return false;
     }
     const bool empty = config.broker_ipv4 == 0 && config.port == 0 && config.username[0] == '\0' &&
                        config.password[0] == '\0';
-    if (config.state == MqttServiceState::kWeb) {
+    const bool mqtt_requested =
+        network_service_mask_has(config.requested_services, NetworkServiceMask::kMqtt);
+    if (config.retirement_state == MqttRetirementState::kRetiring) {
+        return mqtt_requested && mqtt_service_has_credentials(config);
+    }
+    if (config.retirement_state == MqttRetirementState::kRetired) {
+        return config.requested_services == NetworkServiceMask::kWeb &&
+               (empty || mqtt_service_has_credentials(config));
+    }
+    if (!mqtt_requested) {
         return empty || mqtt_service_has_credentials(config);
     }
     return mqtt_service_has_credentials(config);
@@ -268,25 +285,31 @@ MqttConfigFormatResult merge_mqtt_advertised_ledgers(
         return MqttConfigFormatResult::kInvalidRecord;
     }
 
-    MqttAdvertisedLedger result{};
-    result.broker_ipv4 = endpoint->broker_ipv4;
-    result.port = endpoint->port;
+    if (merged == &left || merged == &right) {
+        return MqttConfigFormatResult::kInvalidArgument;
+    }
+    *merged = {};
+    merged->broker_ipv4 = endpoint->broker_ipv4;
+    merged->port = endpoint->port;
     MqttConfigFormatResult merge_result = merge_name_ranges(
-        left, 0, left.count, right, 0, right.count, result.names.data(), result.names.size(),
-        &result.count);
+        left, 0, left.count, right, 0, right.count, merged->names.data(),
+        merged->names.size(), &merged->count);
     if (merge_result != MqttConfigFormatResult::kOk) {
+        *merged = {};
         return merge_result;
     }
     merge_result = merge_name_ranges(
         left, left.count, left.rule_count, right, right.count, right.rule_count,
-        result.names.data() + result.count, result.names.size() - result.count, &result.rule_count);
+        merged->names.data() + merged->count, merged->names.size() - merged->count,
+        &merged->rule_count);
     if (merge_result != MqttConfigFormatResult::kOk) {
+        *merged = {};
         return merge_result;
     }
-    if (!mqtt_advertised_ledger_is_valid(result)) {
+    if (!mqtt_advertised_ledger_is_valid(*merged)) {
+        *merged = {};
         return MqttConfigFormatResult::kInvalidRecord;
     }
-    *merged = result;
     return MqttConfigFormatResult::kOk;
 }
 
@@ -306,12 +329,12 @@ MqttConfigFormatResult encode_mqtt_service_record(const MqttServiceConfig &confi
     }
     std::memcpy(output, kServiceMagic, sizeof(kServiceMagic));
     output[4] = kServiceFormatVersion;
-    output[5] = static_cast<uint8_t>(config.state);
+    output[5] = static_cast<uint8_t>(config.requested_services);
     output[6] = static_cast<uint8_t>(username_length);
     output[7] = static_cast<uint8_t>(password_length);
     write_u32(output + 8, config.broker_ipv4);
     write_u16(output + 12, config.port);
-    output[14] = 0;
+    output[14] = static_cast<uint8_t>(config.retirement_state);
     output[15] = 0;
     write_u32(output + 16, config.generation);
     std::memcpy(output + kServiceHeaderSize, config.username, username_length);
@@ -328,11 +351,10 @@ MqttConfigFormatResult decode_mqtt_service_record(const uint8_t *record, std::si
         return MqttConfigFormatResult::kInvalidArgument;
     }
     if (size < kServiceHeaderSize + kCrcSize || size > kMqttServiceMaxRecordSize ||
-        std::memcmp(record, kServiceMagic, sizeof(kServiceMagic)) != 0 || record[14] != 0 ||
-        record[15] != 0) {
+        std::memcmp(record, kServiceMagic, sizeof(kServiceMagic)) != 0 || record[15] != 0) {
         return MqttConfigFormatResult::kInvalidRecord;
     }
-    if (record[4] != kServiceFormatVersion) {
+    if (record[4] != 1 && record[4] != kServiceFormatVersion) {
         return MqttConfigFormatResult::kInvalidVersion;
     }
     const std::size_t username_length = record[6];
@@ -345,7 +367,33 @@ MqttConfigFormatResult decode_mqtt_service_record(const uint8_t *record, std::si
         return MqttConfigFormatResult::kInvalidCrc;
     }
     MqttServiceConfig decoded{};
-    decoded.state = static_cast<MqttServiceState>(record[5]);
+    if (record[4] == 1) {
+        switch (record[5]) {
+            case 0:
+                decoded.requested_services = NetworkServiceMask::kWeb;
+                decoded.retirement_state = MqttRetirementState::kActive;
+                break;
+            case 1:
+                decoded.requested_services = NetworkServiceMask::kMqtt;
+                decoded.retirement_state = MqttRetirementState::kActive;
+                break;
+            case 2:
+                decoded.requested_services = NetworkServiceMask::kMqtt;
+                decoded.retirement_state = MqttRetirementState::kRetiring;
+                break;
+            case 3:
+                decoded.requested_services = NetworkServiceMask::kWeb;
+                decoded.retirement_state = MqttRetirementState::kRetired;
+                break;
+            default: return MqttConfigFormatResult::kInvalidRecord;
+        }
+        if (record[14] != 0) {
+            return MqttConfigFormatResult::kInvalidRecord;
+        }
+    } else {
+        decoded.requested_services = static_cast<NetworkServiceMask>(record[5]);
+        decoded.retirement_state = static_cast<MqttRetirementState>(record[14]);
+    }
     decoded.broker_ipv4 = read_u32(record + 8);
     decoded.port = read_u16(record + 12);
     decoded.generation = read_u32(record + 16);
@@ -415,21 +463,21 @@ MqttConfigFormatResult decode_mqtt_advertised_record(const uint8_t *record, std:
     if (read_u32(record + size - kCrcSize) != crc32(record, size - kCrcSize)) {
         return MqttConfigFormatResult::kInvalidCrc;
     }
-    MqttAdvertisedLedger decoded{};
-    decoded.count = static_cast<uint8_t>(count);
-    decoded.rule_count = static_cast<uint8_t>(rule_count);
-    decoded.format_version = record[4];
-    decoded.port = read_u16(record + (record[4] == 1 ? 6 : 8));
-    decoded.broker_ipv4 = read_u32(record + (record[4] == 1 ? 8 : 10));
+    *ledger = {};
+    ledger->count = static_cast<uint8_t>(count);
+    ledger->rule_count = static_cast<uint8_t>(rule_count);
+    ledger->format_version = record[4];
+    ledger->port = read_u16(record + (record[4] == 1 ? 6 : 8));
+    ledger->broker_ipv4 = read_u32(record + (record[4] == 1 ? 8 : 10));
     for (std::size_t index = 0; index < count + rule_count; ++index) {
-        std::memcpy(decoded.names[index].value,
+        std::memcpy(ledger->names[index].value,
                     record + header_size + index * kRfStorageNameCapacity,
                     kRfStorageNameCapacity);
     }
-    if (!mqtt_advertised_ledger_is_valid(decoded)) {
+    if (!mqtt_advertised_ledger_is_valid(*ledger)) {
+        *ledger = {};
         return MqttConfigFormatResult::kInvalidRecord;
     }
-    *ledger = decoded;
     return MqttConfigFormatResult::kOk;
 }
 

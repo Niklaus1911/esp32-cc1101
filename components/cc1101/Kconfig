@@ -1,35 +1,53 @@
 menu "CC1101 radio configuration"
 
-    comment "GPIO0/1/2/3/5/6-12/15-17 are rejected at runtime"
+    comment "Pins are validated against the selected board profile at runtime"
 
     config CC1101_SPI_SCLK_GPIO
         int "CC1101 SCK GPIO"
-        range 0 33
+        range 0 33 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 12 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 7 if PLATFORM_BOARD_XIAO_ESP32S3
         default 18
 
     config CC1101_SPI_MISO_GPIO
         int "CC1101 MISO/GDO1 GPIO"
-        range 0 39
+        range 0 39 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 13 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 8 if PLATFORM_BOARD_XIAO_ESP32S3
         default 19
 
     config CC1101_SPI_MOSI_GPIO
         int "CC1101 MOSI GPIO"
-        range 0 33
+        range 0 33 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 11 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 9 if PLATFORM_BOARD_XIAO_ESP32S3
         default 23
 
     config CC1101_SPI_CS_GPIO
         int "CC1101 CSN GPIO"
-        range 0 33
+        range 0 33 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 10 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 4 if PLATFORM_BOARD_XIAO_ESP32S3
         default 27
 
     config CC1101_GDO0_GPIO
         int "CC1101 GDO0 asynchronous TX GPIO"
-        range 0 33
+        range 0 33 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 4 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 2 if PLATFORM_BOARD_XIAO_ESP32S3
         default 26
 
     config CC1101_GDO2_GPIO
         int "CC1101 GDO2 asynchronous RX GPIO"
-        range 0 39
+        range 0 39 if IDF_TARGET_ESP32
+        range 0 48 if IDF_TARGET_ESP32S3
+        default 5 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default 1 if PLATFORM_BOARD_XIAO_ESP32S3
         default 25
 
     config CC1101_XTAL_HZ

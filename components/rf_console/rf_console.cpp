@@ -15,8 +15,13 @@
 
 #include "bridge_control.hpp"
 #include "bridge_events.hpp"
+#if CONFIG_ESP_CONSOLE_UART_DEFAULT
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
+#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_log_color.h"
@@ -29,6 +34,7 @@
 #include "network_mqtt.hpp"
 #include "network_wifi.hpp"
 #include "ota_update.hpp"
+#include "platform_board.hpp"
 #include "rf_automation.hpp"
 #include "rf_console_format.hpp"
 #include "rf_console_linenoise.h"
@@ -38,8 +44,8 @@
 #include "sdkconfig.h"
 #include "web_auth.hpp"
 
-#ifndef CONFIG_ESP_CONSOLE_UART_DEFAULT
-#error "rf_console requires CONFIG_ESP_CONSOLE_UART_DEFAULT"
+#if !CONFIG_ESP_CONSOLE_UART_DEFAULT && !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#error "rf_console requires the UART0 or USB Serial/JTAG primary console"
 #endif
 
 namespace rfbridge {
@@ -90,7 +96,7 @@ QueueHandle_t s_bridge_event_queue = nullptr;
 SemaphoreHandle_t s_output_mutex = nullptr;
 TaskHandle_t s_event_worker_task = nullptr;
 TaskHandle_t s_repl_task = nullptr;
-bool s_uart_driver_installed = false;
+bool s_transport_driver_installed = false;
 bool s_console_initialized = false;
 bool s_help_registered = false;
 bool s_log_hook_installed = false;
@@ -1331,22 +1337,32 @@ int render_service_status()
     char broker[16]{};
     const bool broker_known =
         format_mqtt_broker_ipv4(status.broker_ipv4, broker, sizeof(broker));
-    const bool healthy = status.profile_error == ESP_OK && status.runtime_error == ESP_OK &&
+    const bool web_failed =
+        network_service_mask_has(status.boot_services, NetworkServiceMask::kWeb) &&
+        status.web_error != ESP_OK;
+    const bool mqtt_failed =
+        network_service_mask_has(status.boot_services, NetworkServiceMask::kMqtt) &&
+        status.mqtt_error != ESP_OK;
+    const bool healthy = status.config_error == ESP_OK && !web_failed && !mqtt_failed &&
                          status.reconciliation_error == ESP_OK;
     if (current_console_style() == ConsoleStyle::kPlain) {
         std::printf(
-            "SERVICE requested=%s effective=%s configured=%u generation=%lu boot_generation=%lu reboot_required=%u fallback=%u retirement=%u profile_error=%s runtime_error=%s\n",
-            network_service_profile_name(status.requested_profile),
-            network_service_profile_name(status.effective_profile), status.configured,
+            "SERVICE requested=%s boot=%s effective=%s configured=%u generation=%lu boot_generation=%lu reboot_required=%u fallback=%u retirement=%s config_error=%s web_error=%s mqtt_error=%s\n",
+            network_service_mask_name(status.requested_services),
+            network_service_mask_name(status.boot_services),
+            network_service_mask_name(status.effective_services), status.configured,
             static_cast<unsigned long>(status.persisted_generation),
             static_cast<unsigned long>(status.boot_generation), status.reboot_required,
-            status.current_boot_fallback, status.retirement_pending,
-            esp_err_to_name(status.profile_error), esp_err_to_name(status.runtime_error));
+            status.current_boot_fallback,
+            mqtt_retirement_state_name(status.retirement_state),
+            esp_err_to_name(status.config_error), esp_err_to_name(status.web_error),
+            esp_err_to_name(status.mqtt_error));
         std::printf(
-            "MQTT configured=%u broker=%s port=%u username=%s network_ready=%u client_start_pending=%u connected=%u subscribed=%u state=%s advertised=%u advertised_rules=%u current=%u current_rules=%u connections=%lu disconnects=%lu reconciliations=%lu accepted=%lu rejected=%lu queue_drops=%lu telemetry_published=%lu telemetry_drops=%lu state_publish_failures=%lu publish_failures=%lu outbox_deleted=%lu outbox_bytes=%lu heap_free=%lu heap_minimum=%lu heap_largest=%lu mqtt_stack=%lu worker_stack=%lu error=%s\n",
+            "MQTT configured=%u broker=%s port=%u username=%s network_ready=%u client_start_pending=%u connected=%u subscribed=%u maintenance=%u state=%s advertised=%u advertised_rules=%u current=%u current_rules=%u connections=%lu disconnects=%lu reconciliations=%lu accepted=%lu rejected=%lu queue_drops=%lu telemetry_published=%lu telemetry_drops=%lu state_publish_failures=%lu publish_failures=%lu outbox_deleted=%lu outbox_bytes=%lu heap_free=%lu heap_minimum=%lu heap_largest=%lu psram_free=%lu psram_minimum=%lu psram_largest=%lu mqtt_stack=%lu worker_stack=%lu error=%s\n",
             status.configured, broker_known ? broker : "-", status.port,
             status.username[0] == '\0' ? "-" : status.username, status.network_ready,
             status.client_start_pending, status.connected, status.subscribed,
+            status.maintenance_active,
             network_mqtt_discovery_state_name(status.discovery_state), status.advertised_count,
             status.advertised_rule_count, status.current_count, status.current_rule_count,
             static_cast<unsigned long>(status.connections),
@@ -1364,6 +1380,9 @@ int render_service_status()
             static_cast<unsigned long>(status.heap_free),
             static_cast<unsigned long>(status.heap_minimum),
             static_cast<unsigned long>(status.heap_largest),
+            static_cast<unsigned long>(status.psram_free),
+            static_cast<unsigned long>(status.psram_minimum),
+            static_cast<unsigned long>(status.psram_largest),
             static_cast<unsigned long>(status.mqtt_stack_minimum_free),
             static_cast<unsigned long>(status.worker_stack_minimum_free),
             esp_err_to_name(status.reconciliation_error));
@@ -1371,9 +1390,9 @@ int render_service_status()
     }
 
     print_dashboard_header("Network service");
-    print_dashboard_row("Requested", network_service_profile_name(status.requested_profile),
+    print_dashboard_row("Requested", network_service_mask_name(status.requested_services),
                         ConsoleTone::kInfo, "Effective",
-                        network_service_profile_name(status.effective_profile),
+                        network_service_mask_name(status.effective_services),
                         status.current_boot_fallback ? ConsoleTone::kWarning
                                                      : ConsoleTone::kSuccess);
     print_dashboard_row("Configured", status.configured ? "yes" : "no",
@@ -1424,17 +1443,102 @@ int render_service_status()
                         status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted,
                         "Worker stack", right,
                         status.runtime_available ? ConsoleTone::kInfo : ConsoleTone::kMuted);
-    print_dashboard_row("Profile error", esp_err_to_name(status.profile_error),
-                        status.profile_error == ESP_OK ? ConsoleTone::kSuccess
-                                                       : ConsoleTone::kError,
-                        "Runtime error", esp_err_to_name(status.runtime_error),
-                        status.runtime_error == ESP_OK ? ConsoleTone::kSuccess
-                                                       : ConsoleTone::kError);
+    print_dashboard_row("Config error", esp_err_to_name(status.config_error),
+                        status.config_error == ESP_OK ? ConsoleTone::kSuccess
+                                                      : ConsoleTone::kError,
+                        "Web error", esp_err_to_name(status.web_error),
+                        status.web_error == ESP_OK ? ConsoleTone::kSuccess
+                                                   : ConsoleTone::kMuted);
+    print_dashboard_value("MQTT error", esp_err_to_name(status.mqtt_error),
+                          status.mqtt_error == ESP_OK ? ConsoleTone::kSuccess
+                                                      : ConsoleTone::kMuted);
     print_dashboard_value("Last error", esp_err_to_name(status.reconciliation_error),
                           status.reconciliation_error == ESP_OK ? ConsoleTone::kSuccess
                                                                  : ConsoleTone::kError);
     print_dashboard_footer();
     return healthy ? 0 : 1;
+}
+
+int render_board_status()
+{
+    const BoardInfo &board = current_board_info();
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf(
+            "BOARD profile=%s target=%s flash_mib=%u psram_mib=%u console=%s both=%u led=%s led_gpio=%d led_active_high=%u\n",
+            board.profile_name, board.target_name, board.flash_mib, board.psram_mib,
+            console_transport_name(board.console), board.combined_services,
+            board.activity_led_enabled ? "enabled" : "disabled", board.activity_led_gpio,
+            board.activity_led_active_high);
+        std::printf("BOARD_CC1101 sclk=%d miso=%d mosi=%d cs=%d gdo0_tx=%d gdo2_rx=%d\n",
+                    board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi,
+                    board.cc1101.cs, board.cc1101.gdo0, board.cc1101.gdo2);
+        return 0;
+    }
+    print_dashboard_header("Board profile");
+    print_dashboard_row("Profile", board.profile_name, ConsoleTone::kInfo,
+                        "Target", board.target_name, ConsoleTone::kInfo);
+    char left[64]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%u MiB", board.flash_mib);
+    std::snprintf(right, sizeof(right), "%u MiB", board.psram_mib);
+    print_dashboard_row("Flash", left, ConsoleTone::kInfo, "PSRAM", right,
+                        board.psram_mib == 0 ? ConsoleTone::kMuted : ConsoleTone::kSuccess);
+    print_dashboard_row("Console", console_transport_name(board.console), ConsoleTone::kInfo,
+                        "Web + MQTT", board.combined_services ? "supported" : "unsupported",
+                        board.combined_services ? ConsoleTone::kSuccess : ConsoleTone::kMuted);
+    std::snprintf(left, sizeof(left), "SCK %d / MISO %d / MOSI %d / CS %d",
+                  board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi, board.cc1101.cs);
+    print_dashboard_value("CC1101 SPI", left, ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "TX GDO0 %d / RX GDO2 %d", board.cc1101.gdo0,
+                  board.cc1101.gdo2);
+    print_dashboard_value("CC1101 RMT", left, ConsoleTone::kInfo);
+    print_dashboard_footer();
+    return 0;
+}
+
+int render_memory_status()
+{
+    const BoardMemorySnapshot memory = board_memory_snapshot();
+    NetworkMqttStatus mqtt{};
+    (void)get_network_mqtt_status(&mqtt);
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf(
+            "MEMORY internal_total=%lu internal_free=%lu internal_minimum=%lu internal_largest=%lu psram_total=%lu psram_free=%lu psram_minimum=%lu psram_largest=%lu mqtt_stack=%lu worker_stack=%lu\n",
+            static_cast<unsigned long>(memory.internal.total),
+            static_cast<unsigned long>(memory.internal.free),
+            static_cast<unsigned long>(memory.internal.minimum_free),
+            static_cast<unsigned long>(memory.internal.largest_free_block),
+            static_cast<unsigned long>(memory.psram.total),
+            static_cast<unsigned long>(memory.psram.free),
+            static_cast<unsigned long>(memory.psram.minimum_free),
+            static_cast<unsigned long>(memory.psram.largest_free_block),
+            static_cast<unsigned long>(mqtt.mqtt_stack_minimum_free),
+            static_cast<unsigned long>(mqtt.worker_stack_minimum_free));
+        return 0;
+    }
+    print_dashboard_header("Memory");
+    char left[64]{};
+    char right[64]{};
+    std::snprintf(left, sizeof(left), "%lu / %lu",
+                  static_cast<unsigned long>(memory.internal.free),
+                  static_cast<unsigned long>(memory.internal.total));
+    std::snprintf(right, sizeof(right), "%lu / %lu",
+                  static_cast<unsigned long>(memory.internal.minimum_free),
+                  static_cast<unsigned long>(memory.internal.largest_free_block));
+    print_dashboard_row("Internal free", left, ConsoleTone::kInfo, "Min / largest", right,
+                        ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%lu / %lu",
+                  static_cast<unsigned long>(memory.psram.free),
+                  static_cast<unsigned long>(memory.psram.total));
+    std::snprintf(right, sizeof(right), "%lu / %lu",
+                  static_cast<unsigned long>(memory.psram.minimum_free),
+                  static_cast<unsigned long>(memory.psram.largest_free_block));
+    print_dashboard_row("PSRAM free", left,
+                        memory.psram.total == 0 ? ConsoleTone::kMuted : ConsoleTone::kInfo,
+                        "Min / largest", right,
+                        memory.psram.total == 0 ? ConsoleTone::kMuted : ConsoleTone::kInfo);
+    print_dashboard_footer();
+    return 0;
 }
 
 int render_ota_status()
@@ -1607,12 +1711,38 @@ int status_command(int argc, char **)
     if (argc != 1) {
         return print_usage("usage: status");
     }
+    render_board_status();
     const int result = render_radio_status(true);
     render_automation_status();
     render_wifi_status();
     render_hostname_status();
     render_service_status();
+    render_memory_status();
     return result;
+}
+
+int board_command(int argc, char **argv)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    if (argc != 2 || std::strcmp(argv[1], "status") != 0) {
+        return print_usage("usage: board status");
+    }
+    return render_board_status();
+}
+
+int memory_command(int argc, char **argv)
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    if (argc != 2 || std::strcmp(argv[1], "status") != 0) {
+        return print_usage("usage: memory status");
+    }
+    return render_memory_status();
 }
 
 bool read_wifi_password(WifiCredentials *credentials)
@@ -1669,23 +1799,31 @@ int service_command(int argc, char **argv)
         return render_service_status();
     }
     if (argc == 3 && std::strcmp(argv[1], "mode") == 0) {
-        NetworkServiceProfile profile{};
+        NetworkServiceMask services{};
         if (std::strcmp(argv[2], "web") == 0) {
-            profile = NetworkServiceProfile::kWeb;
+            services = NetworkServiceMask::kWeb;
         } else if (std::strcmp(argv[2], "mqtt") == 0) {
-            profile = NetworkServiceProfile::kMqtt;
+            services = NetworkServiceMask::kMqtt;
+        } else if (std::strcmp(argv[2], "both") == 0) {
+            services = NetworkServiceMask::kBoth;
         } else {
-            return print_usage("usage: service mode <web|mqtt>");
+            return print_usage("usage: service mode <web|mqtt|both>");
         }
-        const esp_err_t error = set_network_service_profile(profile);
-        if (error == ESP_ERR_INVALID_STATE && profile == NetworkServiceProfile::kMqtt) {
+        const esp_err_t error = set_network_service_mask(services);
+        if (error == ESP_ERR_NOT_SUPPORTED && services == NetworkServiceMask::kBoth) {
             return print_validation_error(
-                "ERROR service mode mqtt: configure MQTT first or finish retirement",
+                "ERROR service mode both: this board supports only one LAN frontend",
+                "Use web or mqtt on classic ESP32; Both requires a supported ESP32-S3 profile");
+        }
+        if (error == ESP_ERR_INVALID_STATE &&
+            network_service_mask_has(services, NetworkServiceMask::kMqtt)) {
+            return print_validation_error(
+                "ERROR service mode: configure MQTT first or finish retirement",
                 "Configure MQTT first or finish the pending retirement");
         }
         return print_result("service mode", error);
     }
-    return print_usage("usage: service <status|mode <web|mqtt>>");
+    return print_usage("usage: service <status|mode <web|mqtt|both>>");
 }
 
 int mqtt_command(int argc, char **argv)
@@ -2370,9 +2508,11 @@ struct CommandDefinition {
 
 constexpr CommandDefinition kCommands[] = {
     {"status", "Show the complete system dashboard", nullptr, status_command},
+    {"board", "Show the selected board profile and wiring", "status", board_command},
+    {"memory", "Show internal RAM and PSRAM diagnostics", "status", memory_command},
     {"console", "Select colored or machine-readable output", "style [pretty|plain]", console_command},
     {"wifi", "Control optional DHCP Wi-Fi", "<status|connect <ssid>|start|stop|forget|scan>", wifi_command},
-    {"service", "Select the reboot-time LAN service profile", "<status|mode <web|mqtt>>", service_command},
+    {"service", "Select reboot-time LAN services", "<status|mode <web|mqtt|both>>", service_command},
     {"mqtt", "Configure native Home Assistant MQTT buttons", "<status|configure <ipv4> <username> [port]|forget>", mqtt_command},
     {"hostname", "Configure shared DHCP and mDNS identity", "<status|set <label>|reset>", hostname_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
@@ -2420,11 +2560,12 @@ char *console_hint(const char *line, int *color, int *bold)
     return const_cast<char *>(esp_console_get_hint(line, color, bold));
 }
 
-esp_err_t initialize_uart_console()
+esp_err_t initialize_console_transport()
 {
     std::fflush(stdout);
     fsync(fileno(stdout));
 
+#if CONFIG_ESP_CONSOLE_UART_DEFAULT
     const esp_console_dev_uart_config_t device_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     const uart_port_t uart_port = static_cast<uart_port_t>(device_config.channel);
     if (uart_vfs_dev_port_set_rx_line_endings(device_config.channel, ESP_LINE_ENDINGS_CR) != 0 ||
@@ -2459,8 +2600,19 @@ esp_err_t initialize_uart_console()
     if (error != ESP_OK) {
         return error;
     }
-    s_uart_driver_installed = true;
+    s_transport_driver_installed = true;
     uart_vfs_dev_use_driver(device_config.channel);
+#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+    usb_serial_jtag_driver_config_t device_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t error = usb_serial_jtag_driver_install(&device_config);
+    if (error != ESP_OK) {
+        return error;
+    }
+    s_transport_driver_installed = true;
+    usb_serial_jtag_vfs_use_driver();
+#endif
     fcntl(fileno(stdout), F_SETFL, 0);
     fcntl(fileno(stdin), F_SETFL, 0);
     setvbuf(stdin, nullptr, _IONBF, 0);
@@ -2558,7 +2710,7 @@ void repl_task(void *)
     }
 }
 
-esp_err_t start_uart_console_task()
+esp_err_t start_console_task()
 {
     if (xTaskCreatePinnedToCore(repl_task, "console_repl", 8192, nullptr, 2,
                                 &s_repl_task, tskNO_AFFINITY) != pdTRUE) {
@@ -2568,7 +2720,7 @@ esp_err_t start_uart_console_task()
     return ESP_OK;
 }
 
-void deinitialize_uart_console()
+void deinitialize_console_transport()
 {
     if (s_repl_task != nullptr) {
         vTaskDelete(s_repl_task);
@@ -2586,11 +2738,16 @@ void deinitialize_uart_console()
         esp_console_deinit();
         s_console_initialized = false;
     }
-    if (s_uart_driver_installed) {
+    if (s_transport_driver_installed) {
+#if CONFIG_ESP_CONSOLE_UART_DEFAULT
         const esp_console_dev_uart_config_t device_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
         uart_vfs_dev_use_nonblocking(device_config.channel);
         uart_driver_delete(static_cast<uart_port_t>(device_config.channel));
-        s_uart_driver_installed = false;
+#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+        usb_serial_jtag_vfs_use_nonblocking();
+        (void)usb_serial_jtag_driver_uninstall();
+#endif
+        s_transport_driver_installed = false;
     }
     s_repl_prompt[0] = '\0';
 }
@@ -2647,7 +2804,7 @@ void cleanup_failed_start(std::size_t registered_count)
     }
     s_log_output_owner.store(nullptr, std::memory_order_release);
     s_log_output_fragments = 0;
-    deinitialize_uart_console();
+    deinitialize_console_transport();
     if (safe_to_delete_events && s_output_mutex != nullptr) {
         s_output_depth = 0;
         vSemaphoreDelete(s_output_mutex);
@@ -2671,7 +2828,7 @@ esp_err_t start_rf_console()
         return ESP_ERR_INVALID_STATE;
     }
     if (s_started.load(std::memory_order_acquire) || s_repl_task != nullptr ||
-        s_uart_driver_installed || s_console_initialized || s_help_registered ||
+        s_transport_driver_installed || s_console_initialized || s_help_registered ||
         s_log_hook_installed || s_event_queue != nullptr ||
         s_automation_log_queue != nullptr || s_network_event_queue != nullptr ||
         s_ota_event_queue != nullptr || s_bridge_event_queue != nullptr ||
@@ -2685,9 +2842,9 @@ esp_err_t start_rf_console()
         return fail_start(ESP_ERR_NO_MEM, 0);
     }
 
-    esp_err_t error = initialize_uart_console();
+    esp_err_t error = initialize_console_transport();
     if (error != ESP_OK) {
-        ESP_LOGE(kTag, "Could not initialize UART console: %s", esp_err_to_name(error));
+        ESP_LOGE(kTag, "Could not initialize console transport: %s", esp_err_to_name(error));
         return fail_start(error, 0);
     }
 
@@ -2739,9 +2896,9 @@ esp_err_t start_rf_console()
         }
     }
     print_persistent_configuration_summary();
-    error = start_uart_console_task();
+    error = start_console_task();
     if (error != ESP_OK) {
-        ESP_LOGE(kTag, "Could not start UART REPL: %s", esp_err_to_name(error));
+        ESP_LOGE(kTag, "Could not start console REPL: %s", esp_err_to_name(error));
         return fail_start(error, registered_count);
     }
 

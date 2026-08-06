@@ -1,0 +1,21 @@
+menu "RF bridge board profile"
+
+    choice PLATFORM_BOARD_PROFILE
+        prompt "Board profile"
+        default PLATFORM_BOARD_ESP32_DEVKIT if IDF_TARGET_ESP32
+        default PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8 if IDF_TARGET_ESP32S3
+
+        config PLATFORM_BOARD_ESP32_DEVKIT
+            bool "Classic ESP32 DevKit/WROOM"
+            depends on IDF_TARGET_ESP32
+
+        config PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+            bool "ESP32-S3 DevKitC-compatible N16R8"
+            depends on IDF_TARGET_ESP32S3
+
+        config PLATFORM_BOARD_XIAO_ESP32S3
+            bool "Seeed Studio XIAO ESP32-S3"
+            depends on IDF_TARGET_ESP32S3
+    endchoice
+
+endmenu

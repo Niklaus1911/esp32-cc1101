@@ -20,6 +20,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "network_wifi.hpp"
+#include "platform_board.hpp"
 #include "sdkconfig.h"
 
 namespace rfbridge {
@@ -34,7 +35,8 @@ constexpr char kStatusUri[] = "/api/v1/ota/status";
 constexpr char kUploadUri[] = "/api/v1/ota";
 constexpr char kJsonContentType[] = "application/json";
 constexpr std::size_t kImagePrefixSize =
-    sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
+    sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t) +
+    sizeof(RfBoardImageDescriptor);
 
 SemaphoreHandle_t s_mutex = nullptr;
 TaskHandle_t s_reboot_task = nullptr;
@@ -184,9 +186,11 @@ esp_err_t receive_exact(httpd_req_t *request, uint8_t *output, std::size_t size)
     return ESP_OK;
 }
 
-esp_err_t validate_image_prefix(const uint8_t *prefix, std::size_t size, esp_app_desc_t *candidate)
+esp_err_t validate_image_prefix(const uint8_t *prefix, std::size_t size, esp_app_desc_t *candidate,
+                                RfBoardImageDescriptor *candidate_board)
 {
-    if (prefix == nullptr || candidate == nullptr || size < kImagePrefixSize) {
+    if (prefix == nullptr || candidate == nullptr || candidate_board == nullptr ||
+        size < kImagePrefixSize) {
         return ESP_ERR_INVALID_ARG;
     }
     esp_image_header_t image_header{};
@@ -194,11 +198,17 @@ esp_err_t validate_image_prefix(const uint8_t *prefix, std::size_t size, esp_app
     std::memcpy(&image_header, prefix, sizeof(image_header));
     std::memcpy(&segment_header, prefix + sizeof(image_header), sizeof(segment_header));
     std::memcpy(candidate, prefix + sizeof(image_header) + sizeof(segment_header), sizeof(*candidate));
+    std::memcpy(candidate_board,
+                prefix + sizeof(image_header) + sizeof(segment_header) + sizeof(*candidate),
+                sizeof(*candidate_board));
     if (image_header.magic != ESP_IMAGE_HEADER_MAGIC || image_header.segment_count == 0 ||
         image_header.segment_count > ESP_IMAGE_MAX_SEGMENTS ||
         image_header.chip_id != CONFIG_IDF_FIRMWARE_CHIP_ID ||
         !bootloader_common_check_chip_revision_validity(&image_header, true) ||
-        segment_header.data_len < sizeof(esp_app_desc_t) || candidate->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+        segment_header.data_len < sizeof(esp_app_desc_t) + sizeof(RfBoardImageDescriptor) ||
+        candidate->magic_word != ESP_APP_DESC_MAGIC_WORD ||
+        !board_image_descriptor_is_compatible(*candidate_board,
+                                              current_board_image_descriptor())) {
         return ESP_ERR_OTA_VALIDATE_FAILED;
     }
     char candidate_project[sizeof(candidate->project_name) + 1U]{};
@@ -249,12 +259,13 @@ esp_err_t upload_handler(httpd_req_t *request)
 
     std::array<uint8_t, kImagePrefixSize> prefix{};
     esp_app_desc_t candidate{};
+    RfBoardImageDescriptor candidate_board{};
     if (result == ESP_OK) {
         result = receive_exact(request, prefix.data(), prefix.size());
         bytes_received = result == ESP_OK ? static_cast<uint32_t>(prefix.size()) : 0;
     }
     if (result == ESP_OK) {
-        result = validate_image_prefix(prefix.data(), prefix.size(), &candidate);
+        result = validate_image_prefix(prefix.data(), prefix.size(), &candidate, &candidate_board);
     }
     if (result == ESP_OK) {
         char candidate_version[sizeof(candidate.version) + 1U]{};

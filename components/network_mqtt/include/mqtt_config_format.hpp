@@ -16,21 +16,34 @@ constexpr uint8_t kMqttAdvertisedFormatVersion = 2;
 constexpr std::size_t kMqttAdvertisedMaxRecordSize =
     20U + kMqttMaximumAdvertisedSignals * kRfStorageNameCapacity;
 
-enum class MqttServiceState : uint8_t {
-    kWeb = 0,
-    kMqtt = 1,
-    kRetiring = 2,
-    kRetired = 3,
+enum class NetworkServiceMask : uint8_t {
+    kNone = 0,
+    kWeb = 1,
+    kMqtt = 2,
+    kBoth = 3,
+};
+
+enum class MqttRetirementState : uint8_t {
+    kActive = 0,
+    kRetiring = 1,
+    kRetired = 2,
 };
 
 struct MqttServiceConfig {
-    MqttServiceState state = MqttServiceState::kWeb;
+    NetworkServiceMask requested_services = NetworkServiceMask::kWeb;
+    MqttRetirementState retirement_state = MqttRetirementState::kActive;
     uint32_t broker_ipv4 = 0;
     uint32_t generation = 0;
     uint16_t port = 0;
     char username[kMqttUsernameCapacity]{};
     char password[kMqttPasswordCapacity]{};
 };
+
+constexpr bool network_service_mask_has(NetworkServiceMask mask, NetworkServiceMask service)
+{
+    return (static_cast<uint8_t>(mask) & static_cast<uint8_t>(service)) ==
+           static_cast<uint8_t>(service);
+}
 
 struct MqttAdvertisedLedger {
     uint32_t broker_ipv4 = 0;

@@ -7,6 +7,7 @@
 #include "network_mdns.hpp"
 #include "network_mqtt.hpp"
 #include "ota_update.hpp"
+#include "platform_board.hpp"
 #include "platform_nvs.hpp"
 #include "rf_automation.hpp"
 #include "rf_console.hpp"
@@ -43,6 +44,18 @@ void initialize_web_profile(esp_err_t *mdns_error, esp_err_t *ota_error)
 
 extern "C" void app_main(void)
 {
+    const rfbridge::BoardInfo &board = rfbridge::current_board_info();
+    const rfbridge::RfBoardImageDescriptor &image =
+        rfbridge::current_board_image_descriptor();
+    const rfbridge::BoardMemorySnapshot boot_memory = rfbridge::board_memory_snapshot();
+    ESP_LOGI(kTag,
+             "Board profile=%s target=%s flash=%uMB psram=%uMB console=%s both=%u; "
+             "image_board=%u layout=%u internal_free=%lu psram_free=%lu",
+             board.profile_name, board.target_name, board.flash_mib, board.psram_mib,
+             rfbridge::console_transport_name(board.console), board.combined_services,
+             image.board_id, image.partition_layout_id,
+             static_cast<unsigned long>(boot_memory.internal.free),
+             static_cast<unsigned long>(boot_memory.psram.free));
     const esp_err_t nvs_error = rfbridge::initialize_platform_nvs();
     if (nvs_error != ESP_OK) {
         ESP_LOGE(kTag, "Platform NVS unavailable: %s; NVS was not erased", esp_err_to_name(nvs_error));
@@ -67,34 +80,41 @@ extern "C" void app_main(void)
                  esp_err_to_name(profile_error));
     }
 
-    const bool mqtt_requested = rfbridge::requested_network_service_profile() ==
-                                rfbridge::NetworkServiceProfile::kMqtt;
-    bool mqtt_profile = network_error == ESP_OK && mqtt_requested;
+    const rfbridge::NetworkServiceMask boot_services =
+        rfbridge::boot_network_service_mask();
+    const bool mqtt_requested = rfbridge::network_service_mask_has(
+        boot_services, rfbridge::NetworkServiceMask::kMqtt);
+    bool web_requested = rfbridge::network_service_mask_has(
+        boot_services, rfbridge::NetworkServiceMask::kWeb);
+    bool mqtt_available = network_error == ESP_OK && mqtt_requested;
     if (mqtt_requested && network_error != ESP_OK) {
         rfbridge::mark_network_service_web_fallback(network_error);
+        web_requested = true;
     }
-    if (mqtt_profile) {
+    if (mqtt_available) {
         const esp_err_t stack_error = rfbridge::prepare_network_wifi_stack();
         if (stack_error != ESP_OK) {
-            ESP_LOGE(kTag, "TCP/IP stack initialization failed: %s; using Web for this boot",
+            ESP_LOGE(kTag, "TCP/IP stack initialization failed for MQTT: %s",
                      esp_err_to_name(stack_error));
             rfbridge::mark_network_service_web_fallback(stack_error);
-            mqtt_profile = false;
+            mqtt_available = false;
+            web_requested = true;
         }
     }
-    if (mqtt_profile) {
+    if (mqtt_available) {
         const esp_err_t mqtt_error = rfbridge::prepare_network_mqtt();
         if (mqtt_error != ESP_OK) {
-            ESP_LOGE(kTag, "MQTT profile allocation failed: %s; using Web for this boot",
+            ESP_LOGE(kTag, "MQTT runtime allocation failed: %s",
                      esp_err_to_name(mqtt_error));
             rfbridge::mark_network_service_web_fallback(mqtt_error);
-            mqtt_profile = false;
+            mqtt_available = false;
+            web_requested = true;
         }
     }
 
     esp_err_t mdns_error = ESP_ERR_INVALID_STATE;
     esp_err_t ota_error = ESP_ERR_INVALID_STATE;
-    if (!mqtt_profile && network_error == ESP_OK) {
+    if (web_requested && network_error == ESP_OK) {
         initialize_web_profile(&mdns_error, &ota_error);
     }
     const esp_err_t events_error = rfbridge::initialize_bridge_events();
@@ -105,15 +125,16 @@ extern "C" void app_main(void)
     if (signals_error != ESP_OK) {
         ESP_LOGE(kTag, "Learned-signal service unavailable: %s", esp_err_to_name(signals_error));
     }
-    if (mqtt_profile) {
+    if (mqtt_available) {
         const esp_err_t mqtt_activation_error = rfbridge::activate_network_mqtt();
         if (mqtt_activation_error != ESP_OK) {
-            ESP_LOGE(kTag, "MQTT profile activation failed: %s; using Web for this boot",
+            ESP_LOGE(kTag, "MQTT runtime activation failed: %s",
                      esp_err_to_name(mqtt_activation_error));
             (void)rfbridge::stop_network_mqtt_for_web_fallback();
             rfbridge::mark_network_service_web_fallback(mqtt_activation_error);
-            mqtt_profile = false;
-            if (network_error == ESP_OK) {
+            mqtt_available = false;
+            if (!web_requested && network_error == ESP_OK) {
+                web_requested = true;
                 initialize_web_profile(&mdns_error, &ota_error);
                 (void)rfbridge::bridge_events_bind_available_sources();
             }
@@ -121,7 +142,7 @@ extern "C" void app_main(void)
     }
 
     esp_err_t web_error = ESP_ERR_INVALID_STATE;
-    if (!mqtt_profile) {
+    if (web_requested) {
         web_error = rfbridge::initialize_web_ui();
         if (web_error != ESP_OK) {
             ESP_LOGE(kTag, "Web UI unavailable: %s", esp_err_to_name(web_error));
@@ -131,6 +152,8 @@ extern "C" void app_main(void)
                 rfbridge::set_network_wifi_online_sink(network_online_changed, nullptr));
         }
     }
+    rfbridge::set_network_service_web_result(web_requested ? web_error
+                                                           : ESP_ERR_INVALID_STATE);
     ESP_ERROR_CHECK(rfbridge::start_rf_console());
     esp_err_t error = ESP_FAIL;
     for (int attempt = 1; attempt <= 3 && error != ESP_OK; ++attempt) {

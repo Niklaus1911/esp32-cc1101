@@ -2,7 +2,7 @@
 
 This document records the machine-local ESP-IDF, MCP, coding-agent, and browser-testing setup used for this project. It is intentionally more specific than the general build instructions in `README.md`.
 
-Last verified with ESP-IDF 6.0.2, classic ESP32, and Codex CLI 0.146.0.
+Last verified with ESP-IDF 6.0.2, all three production profiles, both Unity target configurations, and Codex CLI 0.146.0. The classic ESP32 and N16R8 production profiles have board-specific hardware paths; the XIAO remains build-only.
 
 ## Paths at a Glance
 
@@ -47,6 +47,60 @@ The production scripts source `export.sh` themselves, so they do not require a p
 ```bash
 tools/verify-production.sh
 ```
+
+## Board Builds
+
+The shared codebase produces profile-specific images. `tools/build-board.sh` selects the target, target-specific lock, board defaults, partition table, and isolated `build/<profile>` directory without invoking `set-target`:
+
+```bash
+tools/build-board.sh esp32-devkit build
+tools/build-board.sh esp32-devkit size
+tools/build-board.sh esp32s3-devkitc-n16r8 build
+tools/build-board.sh xiao-esp32s3 build
+tools/verify-production.sh
+```
+
+The production verifier rebuilds all three profiles in clean `/tmp/esp32-cc1101-production` directories, checks image target/flash headers, the `RFBD` board descriptor, partition offsets, S3 Octal PSRAM settings, board console/LED defaults, and the 25% OTA-slot margin. `dependencies.lock.esp32` and `dependencies.lock.esp32s3` are intentionally separate because ESP-IDF component resolution is target-specific. Do not copy a generated `sdkconfig`, build directory, or lock between targets.
+
+Unity compilation uses the same split defaults and locks in isolated directories:
+
+```bash
+idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32 \
+  -DIDF_TARGET=esp32 \
+  -DSDKCONFIG=/tmp/esp32-cc1101-unit-esp32/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.esp32" \
+  -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.esp32" build
+idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32s3 \
+  -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG=/tmp/esp32-cc1101-unit-esp32s3/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.esp32s3" \
+  -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.esp32s3" build
+```
+
+Run these commands from the repository root after activating ESP-IDF. Unity compilation does not run tests on a device.
+
+## VS Code Workflow
+
+Open the repository root in VS Code, then use the integrated terminal for the profile script. The ESP-IDF extension may retain a previous target in its workspace state, so the script is the authoritative profile selector:
+
+```bash
+tools/build-board.sh esp32-devkit build
+```
+
+The extension's generic target/flash buttons are not a substitute for selecting the profile. Never run `set-target`, `menuconfig`, or edit generated `sdkconfig` as part of a profile switch. Put durable defaults in the shared, target-specific, or board-specific defaults files instead.
+
+The XIAO ESP32-S3's native USB Serial/JTAG device can disappear and re-enumerate during reset, bootloader entry, or a flash. Re-select its future approved by-id path after re-enumeration; do not rely on `/dev/ttyACM*` auto-detection. The N16R8 profile uses its separate USB-UART connector on UART0 GPIO43/44 and has the fixed path listed below.
+
+## Hardware Access Contract
+
+The available boards have separate exact paths:
+
+```text
+esp32-devkit:              /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
+esp32s3-devkitc-n16r8:     /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
+```
+
+`tools/build-board.sh` checks that the selected profile's exact symlink exists and resolves to a character device before allowing `flash` or `monitor`; it also validates the built target, flash header, profile define, and `RFBD` descriptor. Do not substitute a `/dev/ttyUSB*` or `/dev/ttyACM*` path, swap paths between boards, or use port auto-detection. XIAO hardware access remains disabled. The N16R8 is currently connected without a CC1101, so only non-RF hardware acceptance is authorized.
 
 ## Python Environments
 

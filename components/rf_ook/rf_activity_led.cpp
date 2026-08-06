@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "platform_board.hpp"
 #include "rf_activity_led_policy.hpp"
 #include "sdkconfig.h"
 
@@ -165,7 +166,8 @@ esp_err_t initialize_rf_activity_led()
     if (s_initialized.load(std::memory_order_acquire)) {
         return ESP_OK;
     }
-    if (!rf_activity_led_config_is_valid(kConfig, kUnavailableGpios,
+    if (!rf_activity_led_config_is_valid(configured_board_profile(), kConfig,
+                                         kUnavailableGpios,
                                          std::size(kUnavailableGpios)) ||
         !GPIO_IS_VALID_OUTPUT_GPIO(kConfig.gpio)) {
         return ESP_ERR_INVALID_ARG;

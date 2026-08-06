@@ -1,6 +1,6 @@
 # Native ESP32 + CC1101 433 MHz RF Tool
 
-Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals with a classic ESP32 DevKit and a CC1101 transceiver.
+Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals with three board-specific images: a classic ESP32 DevKit, an ESP32-S3 N16R8 DevKitC-compatible board, and a Seeed Studio XIAO ESP32-S3.
 
 It provides:
 
@@ -10,13 +10,27 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with a reboot-selected Web profile or native Home Assistant MQTT Discovery profile. The Web profile provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; the MQTT profile exposes learned-signal buttons, RF/automation activity, retained snapshots, and automation controls without starting the Web stack.
+- Optional runtime Wi-Fi station mode with reboot-selected Web, MQTT, or (on either ESP32-S3 profile) simultaneous Web+MQTT operation. Web provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; MQTT provides native Home Assistant MQTT Discovery, learned-signal buttons, RF/automation activity, retained snapshots, and automation controls. RF, storage, automation, and the physical console remain shared by every mode.
 
 ## Hardware
 
 The pictured “CC1101 V2.0” module is a generic board; its connector order is not standardized. Wire by the module's **printed signal names**, not by physical header position.
 
-Default strap-safe wiring for a classic ESP32 DevKit/WROOM:
+The firmware is one codebase with three explicit profiles. Flash the image matching the physical board; images are not interchangeable.
+
+| Profile | Target | Flash / PSRAM | Console | Activity LED | LAN modes |
+|---|---|---|---|---|---|
+| `esp32-devkit` | ESP32 | 4 MB / none | UART0 GPIO1/3 | GPIO2 active-high | `web`, `mqtt` |
+| `esp32s3-devkitc-n16r8` | ESP32-S3 | 16 MB / 8 MB Octal | UART0 GPIO43/44 through USB-UART | Disabled by default; GPIO48 reserved | `web`, `mqtt`, `both` |
+| `xiao-esp32s3` | ESP32-S3 | 8 MB / 8 MB Octal | Native USB Serial/JTAG | GPIO21 active-low | `web`, `mqtt`, `both` |
+
+The classic ESP32 has no PSRAM and deliberately rejects `service mode both`; it keeps the memory-safe Web-or-MQTT behavior. Both S3 profiles place MQTT's cold catalogs, ledgers, rule snapshots, and discovery scratch in PSRAM while keeping control state, credentials, queues, task stacks, OTA buffers, and RF/RMT state in internal RAM. A missing or failed S3 MQTT allocation leaves Web available when it was requested, and a failed frontend never stops the other frontend in `both` mode.
+
+### CC1101 wiring
+
+Wire by the module's printed signal names, not by physical header position. All VCC/GND connections are 3.3 V only.
+
+Classic ESP32 DevKit/WROOM:
 
 | CC1101 signal | ESP32 | Direction / purpose |
 |---|---:|---|
@@ -28,6 +42,30 @@ Default strap-safe wiring for a classic ESP32 DevKit/WROOM:
 | `CSN` | GPIO27 | Manual active-low chip select |
 | `GDO0` | GPIO26 | ESP32 RMT TX into CC1101 asynchronous TX input |
 | `GDO2` | GPIO25 | CC1101 asynchronous RX output into ESP32 RMT RX |
+
+ESP32-S3 N16R8 DevKitC-compatible board:
+
+| CC1101 signal | ESP32-S3 GPIO | Direction / purpose |
+|---|---:|---|
+| `SCK` | GPIO12 | SPI clock |
+| `SO` / `GDO1` / `MISO` | GPIO13 | SPI data from CC1101 and `CHIP_RDYn` |
+| `SI` / `MOSI` | GPIO11 | SPI data to CC1101 |
+| `CSN` | GPIO10 | Manual active-low chip select |
+| `GDO0` | GPIO4 | RMT TX into CC1101 asynchronous TX input |
+| `GDO2` | GPIO5 | CC1101 asynchronous RX output into RMT RX |
+
+Seeed Studio XIAO ESP32-S3:
+
+| CC1101 signal | XIAO pin / GPIO | Direction / purpose |
+|---|---|---|
+| `SCK` | D8 / GPIO7 | SPI clock |
+| `SO` / `GDO1` / `MISO` | D9 / GPIO8 | SPI data from CC1101 and `CHIP_RDYn` |
+| `SI` / `MOSI` | D10 / GPIO9 | SPI data to CC1101 |
+| `CSN` | D3 / GPIO4 | Manual active-low chip select |
+| `GDO0` | D1 / GPIO2 | RMT TX into CC1101 asynchronous TX input |
+| `GDO2` | D0 / GPIO1 | CC1101 asynchronous RX output into RMT RX |
+
+The XIAO's native USB connector carries the Serial/JTAG console and must remain accessible while the CC1101 is wired. The N16R8 profile expects a USB-UART connection on UART0 GPIO43/44. Do not use GPIO19/20 (USB), GPIO26-37 (flash/PSRAM), or the profile-reserved console/LED pins for CC1101 wiring.
 
 Recommended hardware details:
 
@@ -48,15 +86,20 @@ GPIO2 is a boot-strapping pin. The firmware does not configure it until applicat
 
 The machine-local ESP-IDF, MCP, coding-agent, and Playwright arrangement is recorded in [Development Tooling Setup](docs/development-tooling-setup.md).
 
-Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build:
+Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build a selected profile:
 
 ```bash
 # Installed ESP-IDF 6.0.2 checkout:
 . "$HOME/.espressif/v6.0.2/esp-idf/export.sh"
-idf.py set-target esp32
-idf.py build
-idf.py size
+
+# Isolated build directories and target-specific dependency locks:
+tools/build-board.sh esp32-devkit build
+tools/build-board.sh esp32-devkit size
+tools/build-board.sh esp32s3-devkitc-n16r8 build
+tools/build-board.sh xiao-esp32s3 build
 ```
+
+`tools/build-board.sh` accepts `esp32-devkit`, `esp32s3-devkitc-n16r8`, or `xiao-esp32s3`, plus `build`, `size`, `flash`, or `monitor`. It selects `IDF_TARGET`, the board defaults, the matching dependency lock, and `build/<profile>` without invoking `set-target` or sharing target-contaminated configuration. The N16R8 is available for hardware validation without a connected CC1101; the XIAO image remains build-verified only.
 
 For a clean, no-flash production build with size and image metadata checks, run:
 
@@ -73,39 +116,47 @@ idf.py menuconfig
 # CC1101 RF configuration
 ```
 
-Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. This firmware targets the classic ESP32 with a 4 MB flash header and a two-slot OTA table. Each application slot is `0x1e0000` bytes.
+Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. Each profile has a two-slot OTA table with preserved NVS/OTA metadata offsets. The classic slot is `0x1e0000` bytes, the XIAO slot is `0x3e0000`, and the N16R8 slot is `0x7e0000`. The verifier enforces at least 25% free space in each slot.
 
-Flash only when the correct serial port and wiring have been verified:
+The classic ESP32 and N16R8 each have one authorized persistent by-id path:
 
 ```bash
-idf.py -p /dev/ttyUSB0 flash monitor
+tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
+tools/build-board.sh esp32-devkit monitor --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
+tools/build-board.sh esp32s3-devkitc-n16r8 flash --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
+tools/build-board.sh esp32s3-devkitc-n16r8 monitor --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
 ```
 
-Exit the monitor with `Ctrl+]`. The software build and host-test results do not imply that a particular CC1101 module has been RF-tested.
+The script verifies that the profile's exact symlink resolves to a character device and rejects every other port. Never substitute `/dev/ttyUSB*`, `/dev/ttyACM*`, port auto-detection, or one board's path for another. XIAO flash and monitor actions remain blocked until that board has a separately approved by-id path. Exit the monitor with `Ctrl+]`. The N16R8 currently has no connected CC1101, so its RF behavior remains hardware-unverified even after its console, PSRAM, network, OTA, and service tests pass.
 
 ### One-time OTA partition migration
 
 The first OTA-capable installation must be a wired flash because the previous single-app partition table cannot receive this image over OTA. Back up the existing NVS partition first, then use an ordinary `idf.py flash` without erasing flash:
 
 ```bash
-esptool --chip esp32 --port /dev/ttyUSB0 read-flash 0x9000 0x6000 nvs-backup.bin
-idf.py -p /dev/ttyUSB0 flash
+esptool --chip esp32 --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00 read-flash 0x9000 0x6000 nvs-backup.bin
+tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
 ```
 
 The new table deliberately preserves NVS at offset `0x9000` with size `0x6000`, so learned signals, automation rules, logging mode, and other existing NVS records remain in place. It adds `otadata` at `0xf000`, `phy_init` at `0x11000`, and `ota_0`/`ota_1` at `0x20000`/`0x200000`. Do not run `erase-flash` for this migration. Confirm the port, board, backup file, and no-erase procedure before accessing hardware.
+
+The first installation on either ESP32-S3 profile must be a wired flash of that exact profile. OTA images carry an `RFBD` board/layout descriptor and reject a different S3 profile, flash layout, or legacy image without the descriptor. A legacy downgrade therefore requires wired flashing. Never erase NVS during a profile migration; learned signals, automation rules, Wi-Fi, and MQTT persistence are intentionally retained.
 
 ## Serial console
 
 UART0 runs at 115200 baud. Type `help` to list commands. For `tio`, use normal output mode with local echo left disabled:
 
 ```bash
-tio --baudrate 115200 --color none /dev/ttyUSB0
+# Classic ESP32:
+tio --baudrate 115200 --color none /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
+# N16R8 UART0 USB-UART bridge:
+tio --baudrate 115200 --color none /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
 ```
 
 `--color none` disables coloring of tio's own connection messages; firmware ANSI colors still pass through. To keep a plain-text session log while retaining colors on screen:
 
 ```bash
-tio --baudrate 115200 --color none --log --log-file rf-console.log --log-strip /dev/ttyUSB0
+tio --baudrate 115200 --color none --log --log-file rf-console.log --log-strip /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
 ```
 
 The console starts in the nonpersistent `pretty` style after every reboot. It uses bounded ASCII sections and semantic ANSI colors: green for success/online, cyan for RF receive and information, magenta for TX/automation, yellow for waiting/maintenance/warnings, red for failures, and dim white for metadata. Change or inspect the runtime style with:
@@ -138,9 +189,9 @@ hostname reset
 
 `wifi connect <ssid>` prompts for a bounded password without echo and does not place the password in command history. Asynchronous output redraws only the password prompt and never the entered bytes. An open network uses an empty password. Candidate credentials are committed to the versioned, checksummed `net_cfg/station` NVS record only after DHCP succeeds; a failed candidate leaves the previously saved network unchanged. A valid saved network starts connecting asynchronously after normal console and RF startup on later boots. `wifi stop` is temporary, `wifi start` reconnects the saved network, and `wifi forget` deletes the saved record, stops Wi-Fi, and prevents boot reconnection.
 
-The DHCP hostname, and the Web profile's mDNS identity, default to `esp32-cc1101-<last-3-STA-MAC-bytes>`, for example `esp32-cc1101-a1b2c3`. `hostname set <label>` persists a custom 1-32 character label; ASCII letters, digits, and interior hyphens are accepted and letters are stored lowercase. Do not include `.local`. `hostname reset` removes the override and restores the MAC-derived default. Changes apply to an active Web-profile mDNS responder immediately without disconnecting Wi-Fi and become the DHCP hostname on the next Wi-Fi start or reconnect. A malformed hostname NVS record is retained for diagnosis, reported as a persistence error, and bypassed in favor of the safe default.
+The DHCP hostname, and the Web mode's mDNS identity, default to `esp32-cc1101-<last-3-STA-MAC-bytes>`, for example `esp32-cc1101-a1b2c3`. `hostname set <label>` persists a custom 1-32 character label; ASCII letters, digits, and interior hyphens are accepted and letters are stored lowercase. Do not include `.local`. `hostname reset` removes the override and restores the MAC-derived default. Changes apply to an active Web mDNS responder immediately without disconnecting Wi-Fi and become the DHCP hostname on the next Wi-Fi start or reconnect. A malformed hostname NVS record is retained for diagnosis, reported as a persistence error, and bypassed in favor of the safe default.
 
-In the Web profile, the responsive UI starts automatically on port `80` when DHCP supplies an address and stops after connectivity is lost. After every HTTP handler is ready, mDNS advertises the Web UI at `http://<hostname>.local/`. If another device already owns the name, the mDNS responder selects a conflict suffix such as `-2`; `hostname status`, the Web System dashboard, and `/api/live` report that effective name. The device remains station-only and does not create a fallback access point. Wi-Fi and hostname configuration remain UART-only.
+In Web or Both mode, the responsive UI starts automatically on port `80` when DHCP supplies an address and stops after connectivity is lost. After every HTTP handler is ready, mDNS advertises the Web UI at `http://<hostname>.local/`. If another device already owns the name, the mDNS responder selects a conflict suffix such as `-2`; `hostname status`, the Web System dashboard, and `/api/live` report that effective name. The device remains station-only and does not create a fallback access point. Wi-Fi and hostname configuration remain UART-only.
 
 The stable DNS-SD instance `ESP32 CC1101 RF Bridge <MAC-SUFFIX>` publishes:
 
@@ -157,32 +208,34 @@ WIFI CONNECTED ssid=<ssid> ip=<ip> netmask=<netmask> gateway=<gateway>
 
 Use `wifi status` or the global `status` command for driver, saved-record, DHCP, retry, scan, OTA-lock, persistence-error, and event-drop state. Network failures are nonfatal to RF, storage, automation, and the UART console. Firmware never erases NVS to repair Wi-Fi data; a malformed network record disables only saved-network startup until `wifi forget` or a later successful connection replaces it.
 
-### Network service profiles
+### Network service modes
 
-One firmware image provides two mutually exclusive LAN service profiles. The selected profile is read only at boot:
+The persisted service mask is selected at boot and is never changed implicitly by a frontend failure:
 
-- `web` is the default. It starts the HTTP UI/API, mDNS, and LAN OTA, and never initializes ESP-MQTT.
-- `mqtt` starts native Home Assistant MQTT Discovery and never initializes HTTP, the Web UI, mDNS, or HTTP OTA.
+- `web` is the default. It starts the HTTP UI/API, mDNS, and LAN OTA.
+- `mqtt` starts native Home Assistant MQTT Discovery without HTTP, Web UI, mDNS, or HTTP OTA.
+- `both` starts Web and MQTT independently. It is supported only by the two S3 profiles; classic ESP32 rejects the command before changing NVS.
 
-Wi-Fi station mode, RF receive/transmit, learned storage, automation, and UART remain available in both profiles. A missing or corrupt MQTT configuration boots the Web profile. If the MQTT client, queue, or tasks cannot be allocated, that boot falls back to Web without changing the persisted MQTT request. Inspect requested/effective mode, reboot state, fallback errors, connection state, outbox use, internal heap, and MQTT/worker stack margins with:
+Wi-Fi station mode, RF receive/transmit, learned storage, automation, and UART remain available in every mode. In `both`, a Web failure does not stop MQTT and an MQTT failure does not stop Web. MQTT allocation or activation failure in MQTT-only mode still brings up Web for that boot. A persisted `both` record imported on classic falls back to Web for that boot without rewriting the record. Inspect requested, boot, and effective masks, independent Web/MQTT errors, reboot requirement, fallback/retirement state, connection state, outbox use, internal heap, PSRAM, and MQTT/worker stack margins with:
 
 ```text
 service status
 mqtt status
 ```
 
-Configure a broker and select MQTT from UART:
+Configure a broker and select a service mode from UART:
 
 ```text
 mqtt configure 192.0.2.20 rfbridge
 # Enter the broker password at the masked prompt.
 service mode mqtt
-# Reset or power-cycle the ESP32 once.
+# On an S3, use `service mode both` for simultaneous Web and MQTT.
+# Reset or power-cycle once; mode changes are reboot-selected.
 ```
 
-`mqtt configure <broker-ipv4> <username> [port]` accepts only a numeric unicast IPv4 address; the default port is `1883`. Give the broker a DHCP reservation or static address so the persisted endpoint does not move. Usernames are 1-63 printable ASCII bytes and passwords are 1-127 printable ASCII bytes. The prompt is masked and history-free, and the password is never printed. This profile uses plaintext MQTT 3.1.1: broker credentials and traffic are not encrypted, and the CRC-protected NVS record is not credential encryption. Use it only on a trusted LAN unless flash/NVS encryption and an appropriately isolated network are handled outside this feature.
+`mqtt configure <broker-ipv4> <username> [port]` accepts only a numeric unicast IPv4 address; the default port is `1883`. Give the broker a DHCP reservation or static address so the persisted endpoint does not move. Usernames are 1-63 printable ASCII bytes and passwords are 1-127 printable ASCII bytes. The prompt is masked and history-free, and the password is never printed. MQTT uses plaintext 3.1.1: broker credentials and traffic are not encrypted, and the CRC-protected NVS record is not credential encryption. Use it only on a trusted LAN unless flash/NVS encryption and an appropriately isolated network are handled outside this feature.
 
-Mode and configuration changes are persisted but never reboot automatically. Return to Web with `service mode web`, then reset once. LAN OTA is available only after booting Web mode; while MQTT mode is active, use wired flashing or select Web and reboot before using `tools/push-ota.sh`. Switching to Web preserves the MQTT configuration and retained Home Assistant entities so switching back does not require reconfiguration.
+Mode and configuration changes are persisted but never reboot automatically. `service mode web`, `service mode mqtt`, and `service mode both` take effect after one reset. LAN OTA is available whenever Web is running, including `both`; during Web OTA the MQTT TCP client remains alive while commands and telemetry are paused, then discovery/state/birth reconciliation is forced after maintenance. While MQTT-only mode is active, use wired flashing or select Web and reboot before using `tools/push-ota.sh`. Switching modes preserves the MQTT configuration and retained Home Assistant entities.
 
 Each committed learned signal becomes one Home Assistant MQTT button. Discovery uses the default `homeassistant` prefix, the full lowercase Wi-Fi STA MAC, and these topics:
 
@@ -229,13 +282,13 @@ rfbridge/<12hex>/automation/log_mode/set
 
 Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so both profiles share one bounded administrative interface.
 
-`mqtt forget` removes the broker configuration. If retained discovery entities exist, run it while the configured MQTT profile is active and connected. The firmware durably records retirement, tombstones every discovery and availability topic with acknowledgements, clears the ledger and credentials, and selects Web; reset once after retirement completes. If Web is already active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
+`mqtt forget` is a durable retirement transaction. While MQTT is connected it records `retiring`, tombstones every discovery, state, rule, and availability topic with acknowledgements, clears the ledger and credentials, then records Web/retired and stops MQTT. In `both`, Web stays available throughout and no reset is needed after completion; in MQTT-only mode, reset once after retirement to start Web. Power loss at any step resumes the retirement path on the next boot. If Web is active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
 
 The retained ledger keeps the broker endpoint even when the signal and rule lists are empty. This marker covers the fixed activity/control entities, so they can still be tombstoned during `mqtt forget` and an endpoint change cannot strand stale retained discovery.
 
 ### Web UI
 
-The Web UI is available only in the Web profile. It is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
+The Web UI is available whenever the boot mask includes Web (`web` or `both`). It is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
 
 The Web surface calls typed services directly and provides:
 
@@ -258,10 +311,10 @@ The Web UI intentionally has no authentication. Any client already on the local 
 The OTA endpoint uses the existing inactive-partition writer, chip/project/image validation, maintenance locks, rollback support, and running-image confirmation. The same endpoint is available to the validated CLI uploader:
 
 ```bash
-tools/push-ota.sh <esp32-ipv4-or-hostname.local> <application-image.bin>
+tools/push-ota.sh <effective-hostname>.local <application-image.bin>
 ```
 
-The uploader accepts a canonical IPv4 address or one strict hostname label followed by `.local`. It lowercases hostname input and canonicalizes IPv4 octets before constructing matching Host and Origin values; ports, paths, trailing dots, whitespace, and shell metacharacters are rejected.
+Use the effective collision-resolved name reported by `hostname status`; this keeps OTA independent of the address assigned by DHCP. A canonical IPv4 address remains a diagnostic fallback. The uploader accepts that IPv4 form or one strict hostname label followed by `.local`. It lowercases hostname input and canonicalizes IPv4 octets before constructing matching Host and Origin values; ports, paths, trailing dots, whitespace, and shell metacharacters are rejected. Before uploading, it matches the image's chip, flash header, and embedded `RFBD` descriptor to one supported board profile and enforces that profile's OTA-slot limit.
 
 Firmware can also still be installed through the approved wired serial flashing process.
 
@@ -390,13 +443,15 @@ Raw rules:
 
 ```text
 status
+board status
+memory status
 radio info
 wifi status
 radio reset
 radio start
 ```
 
-`status` renders the System/RF, Automation, and Wi-Fi dashboard. `radio info` and `wifi status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
+`status` renders the System/RF, Automation, Wi-Fi, board, service, and memory dashboards. `board status` reports the running profile, target, flash/PSRAM, console transport, CC1101 wiring, and combined-service capability. `memory status` reports internal and PSRAM total/free/minimum/largest-block values. `radio info` and `wifi status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
 
 Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled/logging state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, emitted log events, dropped log events, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
 
@@ -454,14 +509,22 @@ cmake --build /tmp/esp32-cc1101-host-tests
 ctest --test-dir /tmp/esp32-cc1101-host-tests --output-on-failure
 ```
 
-Build the dedicated Unity image with ESP-IDF:
+Build the dedicated Unity image for each target with isolated configuration:
 
 ```bash
 # With ESP-IDF 6.0.2 already activated:
-cd test_apps/unit
-idf.py -B build build
-# Flash only after explicit approval and with a connected test board:
-# idf.py -B build -p /dev/ttyUSB0 flash monitor
+idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32 \
+  -DIDF_TARGET=esp32 \
+  -DSDKCONFIG=/tmp/esp32-cc1101-unit-esp32/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.esp32" \
+  -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.esp32" build
+idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32s3 \
+  -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG=/tmp/esp32-cc1101-unit-esp32s3/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.esp32s3" \
+  -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.esp32s3" build
 ```
+
+The Unity image is compile-only in this workflow. Do not flash or run on-device Unity tests without separate approval and a board-specific approved by-id path. Production firmware hardware access is authorized only for the classic ESP32 and N16R8 paths documented above; this does not authorize flashing the Unity image.
 
 The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF, Wi-Fi, and MQTT records, MQTT topics/discovery/command rejection, owned-key NVS repair, OTA compatibility policy, frequency calculation, and PA selection. MQTT broker behavior, CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

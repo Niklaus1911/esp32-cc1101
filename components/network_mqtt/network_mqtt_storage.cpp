@@ -1,8 +1,8 @@
 #include "network_mqtt_storage.hpp"
 
-#include <new>
-
+#include "esp_heap_caps.h"
 #include "nvs.h"
+#include "platform_board.hpp"
 #include "platform_nvs.hpp"
 
 namespace rfbridge {
@@ -28,10 +28,22 @@ private:
     nvs_handle_t handle_ = 0;
 };
 
-template <std::size_t Capacity>
+enum class RecordMemory : uint8_t {
+    kInternal,
+    kCold,
+};
+
+template <std::size_t Capacity, RecordMemory Memory>
 class SecureRecordBuffer {
 public:
-    SecureRecordBuffer() : data_(new (std::nothrow) uint8_t[Capacity]{}) {}
+    SecureRecordBuffer()
+    {
+        uint32_t capabilities = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        if (Memory == RecordMemory::kCold && current_board_info().psram_mib != 0) {
+            capabilities = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+        }
+        data_ = static_cast<uint8_t *>(heap_caps_calloc(1, Capacity, capabilities));
+    }
 
     ~SecureRecordBuffer()
     {
@@ -40,7 +52,7 @@ public:
             for (std::size_t index = 0; index < Capacity; ++index) {
                 cursor[index] = 0;
             }
-            delete[] data_;
+            heap_caps_free(data_);
         }
     }
 
@@ -75,7 +87,7 @@ esp_err_t open_namespace(nvs_open_mode_t mode, NvsHandle *handle)
     return nvs_open(kNamespace, mode, handle->output());
 }
 
-template <std::size_t Capacity, typename Value, typename Decoder>
+template <std::size_t Capacity, RecordMemory Memory, typename Value, typename Decoder>
 esp_err_t load_record(const char *key, Value *value, Decoder decode)
 {
     if (value == nullptr) {
@@ -94,7 +106,7 @@ esp_err_t load_record(const char *key, Value *value, Decoder decode)
     if (size == 0 || size > Capacity) {
         return ESP_ERR_INVALID_SIZE;
     }
-    SecureRecordBuffer<Capacity> record;
+    SecureRecordBuffer<Capacity, Memory> record;
     if (!record) {
         return ESP_ERR_NO_MEM;
     }
@@ -105,10 +117,10 @@ esp_err_t load_record(const char *key, Value *value, Decoder decode)
     return format_error(decode(record.get(), size, value));
 }
 
-template <std::size_t Capacity, typename Value, typename Encoder>
+template <std::size_t Capacity, RecordMemory Memory, typename Value, typename Encoder>
 esp_err_t save_record(const char *key, const Value &value, Encoder encode)
 {
-    SecureRecordBuffer<Capacity> record;
+    SecureRecordBuffer<Capacity, Memory> record;
     if (!record) {
         return ESP_ERR_NO_MEM;
     }
@@ -151,14 +163,14 @@ esp_err_t erase_record(const char *key)
 
 esp_err_t load_mqtt_service_config(MqttServiceConfig *config)
 {
-    return load_record<kMqttServiceMaxRecordSize>(kServiceKey, config,
-                                                  decode_mqtt_service_record);
+    return load_record<kMqttServiceMaxRecordSize, RecordMemory::kInternal>(
+        kServiceKey, config, decode_mqtt_service_record);
 }
 
 esp_err_t save_mqtt_service_config(const MqttServiceConfig &config)
 {
-    return save_record<kMqttServiceMaxRecordSize>(kServiceKey, config,
-                                                  encode_mqtt_service_record);
+    return save_record<kMqttServiceMaxRecordSize, RecordMemory::kInternal>(
+        kServiceKey, config, encode_mqtt_service_record);
 }
 
 esp_err_t erase_mqtt_service_config()
@@ -168,14 +180,14 @@ esp_err_t erase_mqtt_service_config()
 
 esp_err_t load_mqtt_advertised_ledger(MqttAdvertisedLedger *ledger)
 {
-    return load_record<kMqttAdvertisedMaxRecordSize>(kAdvertisedKey, ledger,
-                                                     decode_mqtt_advertised_record);
+    return load_record<kMqttAdvertisedMaxRecordSize, RecordMemory::kCold>(
+        kAdvertisedKey, ledger, decode_mqtt_advertised_record);
 }
 
 esp_err_t save_mqtt_advertised_ledger(const MqttAdvertisedLedger &ledger)
 {
-    return save_record<kMqttAdvertisedMaxRecordSize>(kAdvertisedKey, ledger,
-                                                     encode_mqtt_advertised_record);
+    return save_record<kMqttAdvertisedMaxRecordSize, RecordMemory::kCold>(
+        kAdvertisedKey, ledger, encode_mqtt_advertised_record);
 }
 
 esp_err_t erase_mqtt_advertised_ledger()

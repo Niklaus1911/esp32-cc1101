@@ -15,6 +15,7 @@
 #include "network_mdns_policy.hpp"
 #include "network_wifi_state.hpp"
 #include "ota_update_policy.hpp"
+#include "platform_board.hpp"
 #include "rf_automation_engine.hpp"
 #include "rf_codec.hpp"
 #include "rf_console_format.hpp"
@@ -648,6 +649,10 @@ void test_console_formatter()
                 ConsoleTone::kInfo, line, sizeof(line)),
             "MQTT task stack telemetry fits the dashboard");
     require(rfbridge::format_console_dashboard_row(
+                "Internal free", "123456 / 196100", ConsoleTone::kInfo, "Min / largest",
+                "123456 / 73728", ConsoleTone::kInfo, line, sizeof(line)),
+            "memory dashboard labels fit the dashboard");
+    require(rfbridge::format_console_dashboard_row(
                 "1234567890123", "1234567890123456789012", ConsoleTone::kSuccess,
                 "1234567890123", "1234567890123456789012", ConsoleTone::kInfo, line,
                 sizeof(line)),
@@ -753,6 +758,105 @@ void test_rf_activity_led_policy()
             "activity LED rearms until the latest deadline");
     require(expired.turn_off && expired.rearm_us == 0,
             "activity LED turns off at the latest deadline");
+}
+
+void test_platform_board_policy()
+{
+    using rfbridge::BoardProfile;
+    const rfbridge::BoardInfo *classic = rfbridge::board_info(BoardProfile::kEsp32Devkit);
+    const rfbridge::BoardInfo *n16r8 =
+        rfbridge::board_info(BoardProfile::kEsp32s3DevkitcN16r8);
+    const rfbridge::BoardInfo *xiao = rfbridge::board_info(BoardProfile::kXiaoEsp32s3);
+    require(classic != nullptr && n16r8 != nullptr && xiao != nullptr &&
+                classic->flash_mib == 4 && classic->psram_mib == 0 &&
+                !classic->combined_services && n16r8->flash_mib == 16 &&
+                n16r8->psram_mib == 8 && n16r8->combined_services &&
+                xiao->flash_mib == 8 && xiao->psram_mib == 8 &&
+                xiao->combined_services,
+            "all supported board profiles expose their memory and service capabilities");
+    require(rfbridge::board_info(static_cast<BoardProfile>(0)) == nullptr &&
+                !rfbridge::board_profile_supports_combined_services(
+                    static_cast<BoardProfile>(0)),
+            "unknown board profiles are rejected");
+
+    for (const rfbridge::BoardInfo *board : {classic, n16r8, xiao}) {
+        require(rfbridge::board_cc1101_gpio_map_is_valid(board->profile, board->cc1101),
+                "each profile's default CC1101 wiring is valid");
+        rfbridge::BoardGpioMap duplicate = board->cc1101;
+        duplicate.gdo2 = duplicate.gdo0;
+        require(!rfbridge::board_cc1101_gpio_map_is_valid(board->profile, duplicate),
+                "CC1101 wiring rejects duplicate GPIO ownership");
+    }
+
+    rfbridge::BoardGpioMap invalid = classic->cc1101;
+    invalid.gdo0 = 34;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(classic->profile, invalid),
+            "classic profile rejects input-only GPIO for TX");
+    invalid = n16r8->cc1101;
+    invalid.sclk = 43;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(n16r8->profile, invalid),
+            "N16R8 profile reserves its UART0 console pins");
+    invalid = n16r8->cc1101;
+    invalid.miso = 26;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(n16r8->profile, invalid),
+            "S3 profiles reserve flash and PSRAM GPIOs");
+    invalid = xiao->cc1101;
+    invalid.sclk = 10;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(xiao->profile, invalid),
+            "XIAO profile rejects GPIOs that are not exposed on its headers");
+    invalid = xiao->cc1101;
+    invalid.miso = 21;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(xiao->profile, invalid),
+            "XIAO profile reserves its onboard activity LED");
+
+    rfbridge::RfActivityLedConfig led{.enabled = true, .gpio = 21,
+                                      .active_high = false, .pulse_ms = 25};
+    const int xiao_radio[] = {7, 8, 9, 4, 2, 1};
+    require(rfbridge::rf_activity_led_config_is_valid(
+                BoardProfile::kXiaoEsp32s3, led, xiao_radio, std::size(xiao_radio)),
+            "XIAO onboard active-low LED is valid beside the default radio map");
+    led.gpio = 6;
+    require(rfbridge::rf_activity_led_config_is_valid(
+                BoardProfile::kXiaoEsp32s3, led, xiao_radio, std::size(xiao_radio)),
+            "XIAO permits an exposed non-radio GPIO as an LED override");
+    led.gpio = 2;
+    require(!rfbridge::rf_activity_led_config_is_valid(
+                BoardProfile::kXiaoEsp32s3, led, xiao_radio, std::size(xiao_radio)),
+            "XIAO LED validation rejects a CC1101 pin");
+    led.gpio = 48;
+    require(!rfbridge::rf_activity_led_config_is_valid(
+                BoardProfile::kEsp32s3DevkitcN16r8, led, nullptr, 0),
+            "N16R8 profile reserves the board RGB LED GPIO");
+
+    const auto descriptor_for = [](const rfbridge::BoardInfo &board) {
+        return rfbridge::RfBoardImageDescriptor{
+            .magic = {'R', 'F', 'B', 'D'},
+            .version = rfbridge::kBoardImageDescriptorVersion,
+            .size = sizeof(rfbridge::RfBoardImageDescriptor),
+            .board_id = static_cast<uint8_t>(board.profile),
+            .target_id = static_cast<uint8_t>(board.target),
+            .flash_mib = board.flash_mib,
+            .partition_layout_id = static_cast<uint8_t>(board.partition_layout),
+            .reserved = {},
+        };
+    };
+    const rfbridge::RfBoardImageDescriptor classic_descriptor = descriptor_for(*classic);
+    const rfbridge::RfBoardImageDescriptor xiao_descriptor = descriptor_for(*xiao);
+    require(rfbridge::board_image_descriptor_is_valid(classic_descriptor) &&
+                rfbridge::board_image_descriptor_is_valid(xiao_descriptor) &&
+                rfbridge::board_image_descriptor_is_compatible(classic_descriptor,
+                                                                classic_descriptor) &&
+                !rfbridge::board_image_descriptor_is_compatible(classic_descriptor,
+                                                                 xiao_descriptor),
+            "OTA descriptors accept exact profiles and reject cross-board images");
+    rfbridge::RfBoardImageDescriptor corrupted = classic_descriptor;
+    corrupted.reserved[0] = 1;
+    require(!rfbridge::board_image_descriptor_is_valid(corrupted),
+            "OTA descriptors reject nonzero reserved bytes");
+    corrupted = classic_descriptor;
+    corrupted.flash_mib = 8;
+    require(!rfbridge::board_image_descriptor_is_valid(corrupted),
+            "OTA descriptors reject board metadata mismatches");
 }
 
 void test_learned_signal_matching()
@@ -1278,6 +1382,7 @@ int main()
     test_prompt_safe_line_editor();
     test_prompt_safe_masked_input();
     test_rf_activity_led_policy();
+    test_platform_board_policy();
     test_learned_signal_matching();
     test_storage_format();
     test_wifi_config();

@@ -146,8 +146,9 @@ assert(!api.includes("network_wifi_is_online()"),
        "live API online state must come from the copied Wi-Fi snapshot");
 assert(liveApi.includes("escape_web_json_string(wifi.active_ssid") &&
        liveApi.includes("escape_web_json_string(wifi.saved_ssid") &&
-       liveApi.includes("MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT") &&
-       systemApi.includes("heap_caps_get_minimum_free_size"),
+       occurrenceCount(systemApi, "memory.internal.free") === 2 &&
+       occurrenceCount(systemApi, "memory.internal.minimum_free") === 2 &&
+       occurrenceCount(systemApi, "memory.internal.largest_free_block") === 2,
        "live SSID escaping or internal-heap telemetry contract missing");
 for (const id of [
   "system-status", "system-radio-summary", "system-cc1101-summary", "system-wifi-summary",
@@ -227,6 +228,9 @@ assert(compactSystemRenderer.includes(`const chip = ${radioBinding}.cc1101;`) &&
        "previous live-schema diagnostics must use bounded defaults and visible fallbacks");
 assert(compactSystemRenderer.includes('const wBadge = wTone === "bad" ? "Faulted" :'),
        "hard Wi-Fi failures must not retain a stale online badge label");
+assert(systemRenderer.includes('const mqttExpected = v && ["mqtt", "both"].includes(v.boot);') &&
+       occurrenceCount(systemRenderer, "mqttExpected && H(v.mqtt_error)") === 2,
+       "Web-only health must ignore the intentionally absent MQTT runtime");
 assert(compactSystemRenderer.includes(
   `Boolean(${radioBinding}.transmitting || ${radioBinding}.maintenance)`) &&
        compactSystemRenderer.includes("chip && !chip.available") &&

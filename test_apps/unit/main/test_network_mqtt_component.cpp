@@ -17,7 +17,7 @@ constexpr char kAdvertisedKey[] = "advertised";
 rfbridge::MqttServiceConfig service_config()
 {
     rfbridge::MqttServiceConfig config{};
-    config.state = rfbridge::MqttServiceState::kMqtt;
+    config.requested_services = rfbridge::NetworkServiceMask::kMqtt;
     config.broker_ipv4 = 0xc0a8010aU;
     config.port = 1883;
     config.generation = 11;
@@ -46,7 +46,10 @@ TEST_CASE("MQTT NVS service record survives missing corrupt and wrong-type state
     const rfbridge::MqttServiceConfig source = service_config();
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::save_mqtt_service_config(source));
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::load_mqtt_service_config(&loaded));
-    TEST_ASSERT_EQUAL(static_cast<int>(source.state), static_cast<int>(loaded.state));
+    TEST_ASSERT_EQUAL(static_cast<int>(source.requested_services),
+                      static_cast<int>(loaded.requested_services));
+    TEST_ASSERT_EQUAL(static_cast<int>(source.retirement_state),
+                      static_cast<int>(loaded.retirement_state));
     TEST_ASSERT_EQUAL_HEX32(source.broker_ipv4, loaded.broker_ipv4);
     TEST_ASSERT_EQUAL_UINT16(source.port, loaded.port);
     TEST_ASSERT_EQUAL_UINT32(source.generation, loaded.generation);

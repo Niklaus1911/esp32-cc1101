@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "platform_board.hpp"
 
 namespace rfbridge {
 namespace {
@@ -78,32 +79,18 @@ struct RegisterSetting {
     uint8_t value;
 };
 
-bool pin_is_reserved(int pin)
-{
-    return (pin >= 6 && pin <= 12) || pin == 0 || pin == 1 || pin == 2 || pin == 3 || pin == 5 || pin == 15 ||
-           pin == 16 || pin == 17;
-}
-
 bool pins_are_valid(const Cc1101Config &config)
 {
-    const int pins[] = {config.sclk_gpio, config.miso_gpio, config.mosi_gpio,
-                        config.cs_gpio, config.gdo0_gpio, config.gdo2_gpio};
-    if (!GPIO_IS_VALID_OUTPUT_GPIO(config.sclk_gpio) || !GPIO_IS_VALID_GPIO(config.miso_gpio) ||
-        !GPIO_IS_VALID_OUTPUT_GPIO(config.mosi_gpio) || !GPIO_IS_VALID_OUTPUT_GPIO(config.cs_gpio) ||
-        !GPIO_IS_VALID_OUTPUT_GPIO(config.gdo0_gpio) || !GPIO_IS_VALID_GPIO(config.gdo2_gpio)) {
-        return false;
-    }
-    for (std::size_t left = 0; left < std::size(pins); ++left) {
-        if (pin_is_reserved(pins[left])) {
-            return false;
-        }
-        for (std::size_t right = left + 1; right < std::size(pins); ++right) {
-            if (pins[left] == pins[right]) {
-                return false;
-            }
-        }
-    }
-    return config.crystal_hz >= 26000000 && config.crystal_hz <= 27000000 &&
+    const BoardGpioMap gpios = {
+        .sclk = config.sclk_gpio,
+        .miso = config.miso_gpio,
+        .mosi = config.mosi_gpio,
+        .cs = config.cs_gpio,
+        .gdo0 = config.gdo0_gpio,
+        .gdo2 = config.gdo2_gpio,
+    };
+    return board_cc1101_gpio_map_is_valid(configured_board_profile(), gpios) &&
+           config.crystal_hz >= 26000000 && config.crystal_hz <= 27000000 &&
            config.frequency_hz >= 387000000 && config.frequency_hz <= 464000000;
 }
 

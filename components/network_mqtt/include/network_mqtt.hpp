@@ -8,11 +8,6 @@
 
 namespace rfbridge {
 
-enum class NetworkServiceProfile : uint8_t {
-    kWeb,
-    kMqtt,
-};
-
 enum class NetworkMqttDiscoveryState : uint8_t {
     kStopped,
     kDisconnected,
@@ -36,8 +31,11 @@ struct NetworkMqttStatus {
     bool ledger_known = false;
     bool network_ready = false;
     bool client_start_pending = false;
-    NetworkServiceProfile requested_profile = NetworkServiceProfile::kWeb;
-    NetworkServiceProfile effective_profile = NetworkServiceProfile::kWeb;
+    bool maintenance_active = false;
+    NetworkServiceMask requested_services = NetworkServiceMask::kWeb;
+    NetworkServiceMask boot_services = NetworkServiceMask::kWeb;
+    NetworkServiceMask effective_services = NetworkServiceMask::kNone;
+    MqttRetirementState retirement_state = MqttRetirementState::kActive;
     NetworkMqttDiscoveryState discovery_state = NetworkMqttDiscoveryState::kStopped;
     uint32_t broker_ipv4 = 0;
     uint32_t persisted_generation = 0;
@@ -59,31 +57,43 @@ struct NetworkMqttStatus {
     uint32_t heap_free = 0;
     uint32_t heap_minimum = 0;
     uint32_t heap_largest = 0;
+    uint32_t internal_total = 0;
+    uint32_t psram_total = 0;
+    uint32_t psram_free = 0;
+    uint32_t psram_minimum = 0;
+    uint32_t psram_largest = 0;
     uint16_t port = 0;
     uint8_t advertised_count = 0;
     uint8_t advertised_rule_count = 0;
     uint8_t current_count = 0;
     uint8_t current_rule_count = 0;
     char username[kMqttUsernameCapacity]{};
-    esp_err_t profile_error = ESP_OK;
-    esp_err_t runtime_error = ESP_ERR_INVALID_STATE;
+    esp_err_t config_error = ESP_OK;
+    esp_err_t web_error = ESP_ERR_INVALID_STATE;
+    esp_err_t mqtt_error = ESP_ERR_INVALID_STATE;
     esp_err_t reconciliation_error = ESP_OK;
 };
 
 esp_err_t initialize_network_service_profile();
-NetworkServiceProfile requested_network_service_profile();
+NetworkServiceMask requested_network_service_mask();
+NetworkServiceMask boot_network_service_mask();
 esp_err_t prepare_network_mqtt();
 esp_err_t activate_network_mqtt();
 esp_err_t stop_network_mqtt_for_web_fallback();
 void mark_network_service_web_fallback(esp_err_t error);
+void set_network_service_web_result(esp_err_t error);
+esp_err_t begin_network_mqtt_maintenance();
+esp_err_t end_network_mqtt_maintenance();
+bool network_mqtt_maintenance_is_active();
 
-esp_err_t set_network_service_profile(NetworkServiceProfile profile);
+esp_err_t set_network_service_mask(NetworkServiceMask services);
 esp_err_t configure_network_mqtt(uint32_t broker_ipv4, uint16_t port, const char *username,
                                  const char *password);
 esp_err_t forget_network_mqtt();
 esp_err_t get_network_mqtt_status(NetworkMqttStatus *status);
 
-const char *network_service_profile_name(NetworkServiceProfile profile);
+const char *network_service_mask_name(NetworkServiceMask services);
+const char *mqtt_retirement_state_name(MqttRetirementState state);
 const char *network_mqtt_discovery_state_name(NetworkMqttDiscoveryState state);
 
 }  // namespace rfbridge

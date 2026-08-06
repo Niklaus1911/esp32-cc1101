@@ -45,7 +45,7 @@ void rewrite_crc(uint8_t *record, std::size_t size)
 rfbridge::MqttServiceConfig service_config()
 {
     rfbridge::MqttServiceConfig config{};
-    config.state = rfbridge::MqttServiceState::kMqtt;
+    config.requested_services = rfbridge::NetworkServiceMask::kMqtt;
     config.broker_ipv4 = 0xc0a8010aU;
     config.port = 1883;
     config.generation = 7;
@@ -108,6 +108,43 @@ void test_network_availability_policy()
             "scan-only events do not change MQTT network readiness");
 }
 
+void test_service_mode_policy()
+{
+    using rfbridge::NetworkServiceMask;
+    require(rfbridge::network_service_request_is_supported(NetworkServiceMask::kWeb, false) &&
+                rfbridge::network_service_request_is_supported(NetworkServiceMask::kMqtt,
+                                                                false) &&
+                !rfbridge::network_service_request_is_supported(NetworkServiceMask::kBoth,
+                                                                 false) &&
+                rfbridge::network_service_request_is_supported(NetworkServiceMask::kBoth, true),
+            "classic rejects Both while S3-capable profiles accept it");
+    require(rfbridge::network_service_boot_mask(NetworkServiceMask::kBoth, false) ==
+                NetworkServiceMask::kWeb &&
+                rfbridge::network_service_boot_mask(NetworkServiceMask::kBoth, true) ==
+                    NetworkServiceMask::kBoth,
+            "transplanted Both records fall back without changing S3 requests");
+    require(rfbridge::network_service_recovery_mask(NetworkServiceMask::kMqtt, true) ==
+                NetworkServiceMask::kBoth &&
+                rfbridge::network_service_recovery_mask(NetworkServiceMask::kBoth, true) ==
+                    NetworkServiceMask::kBoth,
+            "MQTT startup failure adds Web recovery without removing an existing Web request");
+    for (uint8_t failures = 0; failures < 4; ++failures) {
+        const bool web_started = (failures & 1U) == 0;
+        const bool mqtt_started = (failures & 2U) == 0;
+        const NetworkServiceMask effective = rfbridge::network_service_effective_mask(
+            NetworkServiceMask::kBoth, web_started, mqtt_started);
+        const uint8_t expected = static_cast<uint8_t>(web_started ? NetworkServiceMask::kWeb
+                                                                  : NetworkServiceMask::kNone) |
+                                 static_cast<uint8_t>(mqtt_started ? NetworkServiceMask::kMqtt
+                                                                   : NetworkServiceMask::kNone);
+        require(static_cast<uint8_t>(effective) == expected,
+                "Both startup preserves each independently successful frontend");
+    }
+    require(!rfbridge::mqtt_retirement_requires_reboot(NetworkServiceMask::kWeb) &&
+                rfbridge::mqtt_retirement_requires_reboot(NetworkServiceMask::kNone),
+            "Both retirement leaves Web live while MQTT-only retirement requires reboot");
+}
+
 void test_service_record()
 {
     rfbridge::MqttServiceConfig source = service_config();
@@ -123,7 +160,9 @@ void test_service_record()
     rfbridge::MqttServiceConfig decoded{};
     require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kOk &&
-                decoded.state == source.state && decoded.broker_ipv4 == source.broker_ipv4 &&
+                decoded.requested_services == source.requested_services &&
+                decoded.retirement_state == source.retirement_state &&
+                decoded.broker_ipv4 == source.broker_ipv4 &&
                 decoded.port == source.port && decoded.generation == source.generation &&
                 std::strcmp(decoded.username, source.username) == 0 &&
                 std::strcmp(decoded.password, source.password) == 0,
@@ -134,18 +173,18 @@ void test_service_record()
                 rfbridge::MqttConfigFormatResult::kInvalidCrc,
             "service record rejects CRC corruption");
     record[20] ^= 1U;
-    record[4] = 2;
+    record[4] = 3;
     rewrite_crc(record.data(), size);
     require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kInvalidVersion,
             "service record rejects unknown versions");
-    record[4] = 1;
+    record[4] = 2;
     record[5] = 99;
     rewrite_crc(record.data(), size);
     require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
                 rfbridge::MqttConfigFormatResult::kInvalidRecord,
             "service record rejects unknown state values");
-    record[5] = static_cast<uint8_t>(rfbridge::MqttServiceState::kMqtt);
+    record[5] = static_cast<uint8_t>(rfbridge::NetworkServiceMask::kMqtt);
     rewrite_crc(record.data(), size);
     record[0] = 'X';
     require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
@@ -159,20 +198,75 @@ void test_service_record()
                 rfbridge::MqttConfigFormatResult::kBufferTooSmall,
             "service encoder rejects short output buffers");
 
-    source.state = rfbridge::MqttServiceState::kWeb;
+    source.requested_services = rfbridge::NetworkServiceMask::kWeb;
     source.broker_ipv4 = 0;
     source.port = 0;
     source.username[0] = '\0';
     source.password[0] = '\0';
     require(rfbridge::mqtt_service_config_is_valid(source),
             "Web profile permits an unconfigured service record");
-    source.state = rfbridge::MqttServiceState::kMqtt;
+    source.requested_services = rfbridge::NetworkServiceMask::kMqtt;
     require(!rfbridge::mqtt_service_config_is_valid(source),
             "MQTT profile requires credentials");
+    source.retirement_state = rfbridge::MqttRetirementState::kRetiring;
+    require(!rfbridge::mqtt_service_config_is_valid(source),
+            "retiring state requires an MQTT request and credentials");
+    source = service_config();
+    source.retirement_state = rfbridge::MqttRetirementState::kRetiring;
+    require(rfbridge::mqtt_service_config_is_valid(source),
+            "MQTT retirement remains resumable with its endpoint credentials");
+    source.requested_services = rfbridge::NetworkServiceMask::kWeb;
+    require(!rfbridge::mqtt_service_config_is_valid(source),
+            "Web and retiring is not a valid persisted transition");
+    source.retirement_state = rfbridge::MqttRetirementState::kRetired;
+    require(rfbridge::mqtt_service_config_is_valid(source),
+            "Web and retired is the durable cleanup checkpoint");
+    source.requested_services = rfbridge::NetworkServiceMask::kMqtt;
+    require(!rfbridge::mqtt_service_config_is_valid(source),
+            "retired state cannot request MQTT startup");
     source = service_config();
     source.password[3] = '\n';
     require(!rfbridge::mqtt_service_has_credentials(source),
             "service credentials reject non-printable bytes");
+
+    const rfbridge::MqttServiceConfig v2_source = service_config();
+    require(rfbridge::encode_mqtt_service_record(v2_source, record.data(), record.size(), &size) ==
+                rfbridge::MqttConfigFormatResult::kOk && record[4] == 2 &&
+                record[5] == static_cast<uint8_t>(rfbridge::NetworkServiceMask::kMqtt) &&
+                record[14] == static_cast<uint8_t>(rfbridge::MqttRetirementState::kActive),
+            "service mutations encode the v2 mask and retirement fields");
+    const uint8_t legacy_states[] = {0, 1, 2, 3};
+    const rfbridge::NetworkServiceMask expected_masks[] = {
+        rfbridge::NetworkServiceMask::kWeb, rfbridge::NetworkServiceMask::kMqtt,
+        rfbridge::NetworkServiceMask::kMqtt, rfbridge::NetworkServiceMask::kWeb};
+    const rfbridge::MqttRetirementState expected_retirement[] = {
+        rfbridge::MqttRetirementState::kActive, rfbridge::MqttRetirementState::kActive,
+        rfbridge::MqttRetirementState::kRetiring, rfbridge::MqttRetirementState::kRetired};
+    for (std::size_t index = 0; index < std::size(legacy_states); ++index) {
+        record[4] = 1;
+        record[5] = legacy_states[index];
+        record[14] = 0;
+        rewrite_crc(record.data(), size);
+        require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
+                    rfbridge::MqttConfigFormatResult::kOk &&
+                    decoded.requested_services == expected_masks[index] &&
+                    decoded.retirement_state == expected_retirement[index],
+                "legacy v1 service state maps to v2 semantics");
+    }
+    record[4] = 2;
+    record[5] = static_cast<uint8_t>(rfbridge::NetworkServiceMask::kBoth);
+    record[14] = static_cast<uint8_t>(rfbridge::MqttRetirementState::kRetiring);
+    rewrite_crc(record.data(), size);
+    require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
+                rfbridge::MqttConfigFormatResult::kOk &&
+                decoded.requested_services == rfbridge::NetworkServiceMask::kBoth &&
+                decoded.retirement_state == rfbridge::MqttRetirementState::kRetiring,
+            "v2 both/retiring service record decodes");
+    record[15] = 1;
+    rewrite_crc(record.data(), size);
+    require(rfbridge::decode_mqtt_service_record(record.data(), size, &decoded) ==
+                rfbridge::MqttConfigFormatResult::kInvalidRecord,
+            "v2 service record rejects nonzero reserved bytes");
 }
 
 void test_advertised_record()
@@ -262,6 +356,10 @@ void test_advertised_record()
                 std::strcmp(merged.names[1].value, "gate") == 0 &&
                 std::strcmp(merged.names[2].value, "porch") == 0,
             "precommit merge produces a sorted unique union");
+    rfbridge::MqttAdvertisedLedger aliased = left;
+    require(rfbridge::merge_mqtt_advertised_ledgers(aliased, right, &aliased) ==
+                rfbridge::MqttConfigFormatResult::kInvalidArgument,
+            "precommit merge rejects an aliased destination");
     right.broker_ipv4++;
     require(rfbridge::merge_mqtt_advertised_ledgers(left, right, &merged) ==
                 rfbridge::MqttConfigFormatResult::kInvalidRecord,
@@ -530,6 +628,7 @@ int main()
     test_incoming_messages();
     test_automation_discovery_and_telemetry();
     test_network_availability_policy();
+    test_service_mode_policy();
     std::puts("All MQTT host tests passed");
     return 0;
 }
