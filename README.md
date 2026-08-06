@@ -246,7 +246,7 @@ rfbridge/<12hex>/availability
 homeassistant/status
 ```
 
-Discovery and availability are retained at QoS 1. Button commands are exact, non-retained QoS 0 `PRESS` messages so broker redelivery cannot cause a second RF action. A valid command replays the named signal using `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8). Retained, duplicate, fragmented, malformed, wrong-topic, and wrong-QoS commands are rejected. Learning or deleting a signal reconciles discovery automatically; a 60-second audit and `homeassistant/status` birth messages recover dropped events and Home Assistant restarts.
+Discovery and availability are retained at QoS 1. Every discovery entity keeps the stable bridge identifier and name, reports `RF Bridge` as its manufacturer, uses the running board's human-readable model, and exposes the exact profile slug as its hardware version. Button commands are exact, non-retained QoS 0 `PRESS` messages so broker redelivery cannot cause a second RF action. A valid command replays the named signal using `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8). Retained, duplicate, fragmented, malformed, wrong-topic, and wrong-QoS commands are rejected. Learning or deleting a signal reconciles discovery automatically; a 60-second audit and `homeassistant/status` birth messages recover dropped events and Home Assistant restarts.
 
 For a dedicated Mosquitto user, replace `<12hex>` with the bridge's full lowercase STA MAC and grant only the bridge-side topics:
 
@@ -274,13 +274,16 @@ rfbridge/<12hex>/state/automation
 rfbridge/<12hex>/state/last_rx
 rfbridge/<12hex>/state/last_automation
 rfbridge/<12hex>/state/rule/<trigger>
+rfbridge/<12hex>/state/system
 rfbridge/<12hex>/automation/enabled/set
 rfbridge/<12hex>/automation/log_mode/set
 ```
 
-`event/rx` and `event/automation` are non-retained QoS 0 JSON event messages. They contain sequence numbers, bounded decoded metadata or raw pulse counts, matching information, rule/action names, and result counters; complete raw pulse arrays are never sent. Home Assistant Event entities expose these messages for automations, and Home Assistant Recorder is the durable event history. `state/automation`, `state/last_rx`, `state/last_automation`, and each `state/rule/<trigger>` snapshot are retained QoS 1 so the latest configuration, counters, and result are available after a bridge or broker restart. Broker persistence must be enabled if retained snapshots must survive a broker restart.
+`event/rx` and `event/automation` are non-retained QoS 0 JSON event messages. They contain sequence numbers, bounded decoded metadata or raw pulse counts, matching information, rule/action names, and result counters; complete raw pulse arrays are never sent. Home Assistant Event entities expose these messages for automations, and Home Assistant Recorder is the durable event history. `state/automation`, `state/last_rx`, `state/last_automation`, `state/system`, and each `state/rule/<trigger>` snapshot are retained QoS 1 so the latest configuration, counters, and result are available after a bridge or broker restart. Broker persistence must be enabled if retained snapshots must survive a broker restart.
 
-Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so both profiles share one bounded administrative interface.
+`state/system` contains the board profile, target, flash and PSRAM sizes; requested/effective services and reboot requirement; uptime; and total, free, minimum-free, and largest-block values for internal RAM and PSRAM. It is republished during connection reconciliation, Home Assistant birth recovery, OTA-maintenance recovery, and the 60-second audit.
+
+Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. Four `data_size` diagnostic sensors use `state/system`: internal free, internal minimum free, largest internal block, and PSRAM free. The first three exist on every board; PSRAM free is advertised only on PSRAM-equipped S3 profiles. All four use bytes and expire after 180 seconds without a fresh snapshot. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so both profiles share one bounded administrative interface.
 
 `mqtt forget` is a durable retirement transaction. While MQTT is connected it records `retiring`, tombstones every discovery, state, rule, and availability topic with acknowledgements, clears the ledger and credentials, then records Web/retired and stops MQTT. In `both`, Web stays available throughout and no reset is needed after completion; in MQTT-only mode, reset once after retirement to start Web. Power loss at any step resumes the retirement path on the next boot. If Web is active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
 
@@ -292,9 +295,10 @@ The Web UI is available whenever the boot mask includes Web (`web` or `both`). I
 
 The Web surface calls typed services directly and provides:
 
-- A health-first System dashboard with live CC1101 identity/state, RF configuration
-  and counters, Wi-Fi addressing and retry diagnostics, uptime/reset reason,
-  internal-heap telemetry, and learning/automation service health.
+- A health-first System dashboard with board model/profile/target, flash and PSRAM,
+  console transport and pin assignments, live CC1101 identity/state, RF configuration
+  and counters, Wi-Fi addressing and retry diagnostics, uptime/reset reason, internal
+  and PSRAM watermarks, and learning/automation/LAN service health.
 - Learning and cancellation.
 - Latest-frame and named learned-signal replay with bounded repeats.
 - Learned-signal metadata and deletion with rule-reference protection.
@@ -302,7 +306,7 @@ The Web surface calls typed services directly and provides:
 - Automation rule add/remove/enable/disable and log-mode controls.
 - OTA status and direct application-image upload with progress and reboot recovery.
 
-The System dashboard is diagnostic-only apart from its existing firmware upload. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
+The System dashboard is diagnostic-only apart from its existing firmware upload. Hardware, runtime/memory, and services share three desktop columns and collapse to one below 820 px; detailed hardware and service data remain in expandable disclosures. Internal RAM determines memory health. Free or largest-block values below 12 KiB are critical, free memory below 24 KiB is degraded, and largest blocks below 16 KiB on classic ESP32 or 32 KiB on a combined-service S3 are reported as fragmented. PSRAM is explicitly shown as not installed on classic ESP32. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
 
 The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
 

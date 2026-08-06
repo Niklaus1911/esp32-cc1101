@@ -169,10 +169,14 @@
       </section>
 
       <section class="band system-status-band">
-        <div class="section-heading"><h2>Runtime and services</h2><span id="system-runtime-badge" class="state">Loading</span></div>
-        <div class="system-grid">
+        <div class="section-heading"><h2>Hardware, runtime and services</h2><span id="system-runtime-badge" class="state">Loading</span></div>
+        <div class="system-grid system-runtime-grid">
           <div class="system-group">
-            <h3>Runtime</h3>
+            <h3>Hardware</h3>
+            <dl id="system-hardware-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
+          </div>
+          <div class="system-group">
+            <h3>Runtime and memory</h3>
             <dl id="system-runtime-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
           </div>
           <div class="system-group">
@@ -180,6 +184,10 @@
             <dl id="system-services-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
           </div>
         </div>
+        <details class="system-disclosure">
+          <summary>Hardware diagnostics</summary>
+          <dl id="system-hardware-diagnostics" class="details"><dt>State</dt><dd>Loading</dd></dl>
+        </details>
         <details class="system-disclosure">
           <summary>Service diagnostics</summary>
           <dl id="system-services-diagnostics" class="details"><dt>State</dt><dd>Loading</dd></dl>

@@ -71,6 +71,7 @@ textarea { resize: vertical; min-height: 112px; font-family: ui-monospace, SFMon
 .system-summary .metric { min-height: 82px; }
 .system-summary .metric strong { min-height: 2.9em; }
 .system-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 32px; }
+.system-runtime-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .system-group { min-width: 0; }
 .system-group h3 { margin: 0; font-size: .78rem; color: #cbd3d5; letter-spacing: 0; text-transform: uppercase; }
 .system-group .details { margin-top: 8px; font-size: .9rem; }

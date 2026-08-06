@@ -547,12 +547,13 @@ esp_err_t live_handler(httpd_req_t *request)
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "\"board\":{\"profile\":\"%s\",\"target\":\"%s\",\"flash_mib\":%u,"
+            "\"board\":{\"profile\":\"%s\",\"model\":\"%s\",\"target\":\"%s\",\"flash_mib\":%u,"
             "\"psram_mib\":%u,\"console\":\"%s\",\"combined_services\":%s,"
             "\"activity_led_enabled\":%s,\"activity_led_gpio\":%d,"
             "\"activity_led_active_high\":%s,\"cc1101\":{\"sclk\":%d,\"miso\":%d,"
             "\"mosi\":%d,\"cs\":%d,\"gdo0_tx\":%d,\"gdo2_rx\":%d}},",
-            board.profile_name, board.target_name, board.flash_mib, board.psram_mib,
+            board.profile_name, board.model_name, board.target_name, board.flash_mib,
+            board.psram_mib,
             console_transport_name(board.console),
             board.combined_services ? "true" : "false",
             board.activity_led_enabled ? "true" : "false", board.activity_led_gpio,

@@ -42,6 +42,7 @@ struct BoardInfo {
     ConsoleTransport console = ConsoleTransport::kUart0;
     PartitionLayout partition_layout = PartitionLayout::kFlash4Mb;
     const char *profile_name = nullptr;
+    const char *model_name = nullptr;
     const char *target_name = nullptr;
     uint8_t flash_mib = 0;
     uint8_t psram_mib = 0;

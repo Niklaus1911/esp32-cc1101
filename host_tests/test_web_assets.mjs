@@ -116,14 +116,22 @@ assertFields(networkApi, [
 ], "live network");
 const mdnsApi = sourceSection(liveApi, '"\\"mdns\\":{',
                               '"\\"system\\":{', "live mdns");
+const boardApi = sourceSection(liveApi, '"\\"board\\":{',
+                               '"\\"services\\":{', "live board");
 assertFields(mdnsApi, [
   "available", "state", "configured_hostname", "hostname_custom", "effective_hostname",
   "effective_known", "conflict_renamed", "http_registered", "rfbridge_registered",
   "configured_generation", "applied_generation", "heartbeat_age_ms", "initialization_error",
   "last_error",
 ], "live mdns");
+assertFields(boardApi, [
+  "profile", "model", "target", "flash_mib", "psram_mib", "console", "combined_services",
+  "activity_led_enabled", "activity_led_gpio", "activity_led_active_high", "cc1101", "sclk",
+  "miso", "mosi", "cs", "gdo0_tx", "gdo2_rx",
+], "live board");
 assertFields(systemApi, [
   "uptime_ms", "reset_reason", "heap_free", "heap_minimum", "heap_largest",
+  "internal", "psram", "total", "free", "minimum", "largest",
 ], "live system");
 assertFields(errorsApi, ["radio", "signals", "automation", "wifi", "mdns"], "live errors");
 assert(compactSource(radioApi).includes(
@@ -154,8 +162,9 @@ for (const id of [
   "system-status", "system-radio-summary", "system-cc1101-summary", "system-wifi-summary",
   "system-memory-summary", "system-radio-badge", "system-wifi-badge", "system-runtime-badge",
   "system-radio-details", "system-cc1101-details", "system-wifi-details", "system-network-details",
-  "system-runtime-details", "system-services-details", "system-rf-diagnostics",
-  "system-wifi-diagnostics", "system-services-diagnostics",
+  "system-hardware-details", "system-runtime-details", "system-services-details",
+  "system-rf-diagnostics", "system-wifi-diagnostics", "system-hardware-diagnostics",
+  "system-services-diagnostics",
 ]) assert(index.includes(`id="${id}"`), `system status DOM target missing: ${id}`);
 const firmwareDisclosure = sourceSection(index, '<details id="firmware-disclosure"',
                                          "</details>", "firmware disclosure");
@@ -199,44 +208,47 @@ assert(connectionSource.includes(
 assert.match(js, /heapCriticalBytes = 12 \* 1024;/, "critical heap threshold changed");
 assert.match(js, /heapWarningBytes = 24 \* 1024;/, "warning heap threshold changed");
 assert(systemRenderer.includes('"system-memory-summary"') &&
-       systemRenderer.includes("s.heap_free < heapCriticalBytes") &&
-       systemRenderer.includes("s.heap_free < heapWarningBytes"),
+       systemRenderer.includes("i.free<heapCriticalBytes") &&
+       systemRenderer.includes("i.free<heapWarningBytes") &&
+       systemRenderer.includes("b?.combined_services?32:16") &&
+       systemRenderer.includes('frag?"Fragmented":"Low memory"'),
        "heap health tone missing from system summary");
-assert.match(systemRenderer,
-             /const \w+ = \w+ === "bad" \|\| \w+ === "bad" \? "bad" :\s*\w+ === "warn" \|\| \w+ === "warn" \? "warn" : "ok";/,
-       "runtime badge must include heap and service health");
 const compactSystemRenderer = compactSource(systemRenderer);
+assert(/const runTone\s*=\s*svcTone\s*===\s*"bad"\s*\|\|\s*hTone\s*===\s*"bad"\s*\?\s*"bad"\s*:\s*svcTone\s*===\s*"warn"\s*\|\|\s*hTone\s*===\s*"warn"\s*\?\s*"warn"\s*:\s*"ok";/.test(
+         compactSystemRenderer),
+       "runtime badge must include heap and service health");
 const systemBindings =
-  /const \{ radio: (\w+), learning: (\w+), automation: (\w+), network: (\w+), mdns: (\w+), system: (\w+) = null, errors: (\w+) = \{\} \} = live;/.exec(
+  /const \{\s*radio:\s*(\w+),\s*learning:\s*(\w+),\s*automation:\s*(\w+),\s*network:\s*(\w+),\s*mdns:\s*(\w+),\s*system:\s*(\w+)\s*=\s*null,\s*errors:\s*(\w+)\s*=\s*\{\}\s*\}\s*=\s*live;/.exec(
     compactSystemRenderer);
 assert(systemBindings, "previous live-schema object defaults missing");
 const [, radioBinding, learningBinding, automationBinding, networkBinding, mdnsBinding, systemBinding] =
   systemBindings;
-assert(compactSystemRenderer.includes(`const chip = ${radioBinding}.cc1101;`) &&
+assert(compactSystemRenderer.includes(`const chip=${radioBinding}.cc1101;`) &&
        compactSystemRenderer.includes(`${mdnsBinding}.effective_hostname`) &&
        systemRenderer.includes('"Diagnostics unavailable"') &&
        systemRenderer.includes('Q+"."') &&
        js.includes('value ?? "-"') &&
        /function formatError\(\w+\) \{ return \w+ (?:=== undefined|== null) \? "-"/.test(js) &&
        /function formatBoolean\(\w+,[^}]+typeof \w+ === "boolean"/.test(js) &&
-       compactSystemRenderer.includes(`const hLim = !${systemBinding} || ${systemBinding}.heap_free == null;`) &&
-       compactSystemRenderer.includes(`const rLim = !chip || ${radioBinding}.truncated == null;`) &&
+       compactSystemRenderer.includes(`free:${systemBinding}.heap_free`) &&
+       compactSystemRenderer.includes("hLim=!i||i.free==null") &&
+       compactSystemRenderer.includes(`const rLim=!chip||${radioBinding}.truncated == null;`) &&
        compactSystemRenderer.includes(
-         `const wLim = ${networkBinding}.state == null || ${networkBinding}.event_drops == null;`) &&
+         `const wLim=${networkBinding}.state == null||${networkBinding}.event_drops == null;`) &&
        compactSystemRenderer.includes(
-         `const sLim = ${learningBinding}.catalog_available == null || ${automationBinding}.log_drops == null || !${mdnsBinding};`),
+         `const sLim=${learningBinding}.catalog_available == null||${automationBinding}.log_drops == null||!${mdnsBinding};`),
        "previous live-schema diagnostics must use bounded defaults and visible fallbacks");
-assert(compactSystemRenderer.includes('const wBadge = wTone === "bad" ? "Faulted" :'),
+assert(compactSystemRenderer.includes('const wBadge=wTone === "bad"?"Faulted" :'),
        "hard Wi-Fi failures must not retain a stale online badge label");
-assert(systemRenderer.includes('const mqttExpected = v && ["mqtt", "both"].includes(v.boot);') &&
-       occurrenceCount(systemRenderer, "mqttExpected && H(v.mqtt_error)") === 2,
+assert(compactSystemRenderer.includes('const mqttExpected=v&&["mqtt","both"].includes(v.boot);') &&
+       occurrenceCount(compactSystemRenderer, "mqttExpected&&H(v.mqtt_error)") === 2,
        "Web-only health must ignore the intentionally absent MQTT runtime");
 assert(compactSystemRenderer.includes(
-  `Boolean(${radioBinding}.transmitting || ${radioBinding}.maintenance)`) &&
-       compactSystemRenderer.includes("chip && !chip.available") &&
-       compactSystemRenderer.includes('["ESP_ERR_TIMEOUT", "ESP_ERR_INVALID_STATE"].includes(chip.error)') &&
-       /\? `Deferred \/ \$\{chip\.error\}`/.test(systemRenderer) &&
-       /!chip \|\| \w+ \? "warn"/.test(systemRenderer),
+  `Boolean(${radioBinding}.transmitting||${radioBinding}.maintenance)`) &&
+       compactSystemRenderer.includes("chip&&!chip.available") &&
+       compactSystemRenderer.includes('["ESP_ERR_TIMEOUT","ESP_ERR_INVALID_STATE"].includes(chip.error)') &&
+       /deferred\?`Deferred \/ \$\{chip\.error\}`/.test(systemRenderer) &&
+       /!chip\|\|\w+\?"warn"/.test(systemRenderer),
        "busy CC1101 status deferral must remain warning-classified and retain its error");
 const bindingNames = new Map([
   [radioBinding, "radio"], [learningBinding, "learn"], [automationBinding, "auto"],
@@ -258,10 +270,16 @@ for (const counter of [
   "radio.duplicates", "chip.resets", "auto.stale", "auto.ambiguous", "auto.suppressed",
   "auto.log_events",
 ]) assert(!healthCounterInputs.includes(counter), `normal counter must not degrade health: ${counter}`);
-for (const id of ["system-rf-diagnostics", "system-wifi-diagnostics", "system-services-diagnostics"]) {
+for (const id of [
+  "system-rf-diagnostics", "system-wifi-diagnostics", "system-hardware-diagnostics",
+  "system-services-diagnostics",
+]) {
   assert(js.includes(`D("${id}"`) || js.includes(`renderDetails(byId("${id}")`),
          `system diagnostics renderer missing: ${id}`);
 }
+assert(css.includes(".system-runtime-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }") &&
+       /@media\s*\(max-width\s*:\s*820px\)[\s\S]*?\.system-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css),
+       "system hardware/runtime/services responsive grid missing");
 assert(!js.includes('byId("runtime-details")'), "stale runtime details renderer remains");
 assert(js.includes("document.hidden"), "visibility-aware polling missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");

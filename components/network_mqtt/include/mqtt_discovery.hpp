@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "platform_board_policy.hpp"
 #include "rf_storage_format.hpp"
 
 namespace rfbridge {
@@ -24,6 +25,7 @@ enum class MqttStateTopicKind : uint8_t {
     kLastRx,
     kLastAutomation,
     kRule,
+    kSystem,
 };
 
 enum class MqttAutomationCommandKind : uint8_t {
@@ -39,6 +41,10 @@ enum class MqttDiscoveryEntityKind : uint8_t {
     kRuleCountSensor,
     kEventDropsSensor,
     kRuleSensor,
+    kInternalFreeSensor,
+    kInternalMinimumSensor,
+    kInternalLargestSensor,
+    kPsramFreeSensor,
 };
 
 struct MqttDeviceIdentity {
@@ -80,11 +86,12 @@ bool format_mqtt_entity_discovery_topic(const MqttDeviceIdentity &identity,
                                         MqttDiscoveryEntityKind kind, const char *rule_name,
                                         char *output, std::size_t capacity);
 bool format_mqtt_discovery_payload(const MqttDeviceIdentity &identity, const char *signal_name,
-                                   const char *firmware_version, char *output,
+                                   const BoardInfo &board, const char *firmware_version, char *output,
                                    std::size_t capacity);
 bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                                           MqttDiscoveryEntityKind kind, const char *rule_name,
-                                          const char *firmware_version, char *output,
+                                          const BoardInfo &board, const char *firmware_version,
+                                          char *output,
                                           std::size_t capacity);
 bool parse_mqtt_button_command(const MqttDeviceIdentity &identity,
                                const MqttIncomingMessage &message,

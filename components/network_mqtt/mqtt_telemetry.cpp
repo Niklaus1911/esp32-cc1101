@@ -252,4 +252,40 @@ bool format_mqtt_rule_state_payload(const MqttRuleTelemetry &rule, char *output,
     return writer.valid();
 }
 
+bool format_mqtt_system_state_payload(const MqttSystemTelemetry &system, char *output,
+                                      std::size_t capacity)
+{
+    if (system.board_profile == nullptr || system.board_target == nullptr ||
+        system.requested_services == nullptr || system.effective_services == nullptr) {
+        return false;
+    }
+    BoundedWriter writer(output, capacity);
+    if (!writer.append("{\"board\":{\"profile\":") ||
+        !writer.append_json_string(system.board_profile) ||
+        !writer.append(",\"target\":") || !writer.append_json_string(system.board_target) ||
+        !writer.append_format(",\"flash_mib\":%u,\"psram_mib\":%u},\"services\":{\"requested\":",
+                              static_cast<unsigned>(system.flash_mib),
+                              static_cast<unsigned>(system.psram_mib)) ||
+        !writer.append_json_string(system.requested_services) ||
+        !writer.append(",\"effective\":") ||
+        !writer.append_json_string(system.effective_services) ||
+        !writer.append_format(",\"reboot_required\":%s},\"uptime_s\":%llu,\"memory\":{"
+                              "\"internal\":{\"total\":%lu,\"free\":%lu,\"minimum\":%lu,"
+                              "\"largest\":%lu},\"psram\":{\"total\":%lu,\"free\":%lu,"
+                              "\"minimum\":%lu,\"largest\":%lu}}}",
+                              system.reboot_required ? "true" : "false",
+                              static_cast<unsigned long long>(system.uptime_s),
+                              static_cast<unsigned long>(system.internal.total),
+                              static_cast<unsigned long>(system.internal.free),
+                              static_cast<unsigned long>(system.internal.minimum),
+                              static_cast<unsigned long>(system.internal.largest),
+                              static_cast<unsigned long>(system.psram.total),
+                              static_cast<unsigned long>(system.psram.free),
+                              static_cast<unsigned long>(system.psram.minimum),
+                              static_cast<unsigned long>(system.psram.largest))) {
+        return false;
+    }
+    return writer.valid();
+}
+
 }  // namespace rfbridge

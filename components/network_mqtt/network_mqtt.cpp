@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "mqtt_client.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -1136,7 +1137,7 @@ esp_err_t publish_discovery_config(RuntimeContext *context, const char *name)
 {
     if (!format_mqtt_discovery_topic(context->identity, name, context->cold->topic,
                                      sizeof(context->cold->topic)) ||
-        !format_mqtt_discovery_payload(context->identity, name,
+        !format_mqtt_discovery_payload(context->identity, name, current_board_info(),
                                        esp_app_get_description()->version,
                                        context->cold->payload, sizeof(context->cold->payload))) {
         return ESP_ERR_INVALID_SIZE;
@@ -1160,6 +1161,7 @@ esp_err_t publish_entity_discovery_config(RuntimeContext *context, MqttDiscovery
     if (!format_mqtt_entity_discovery_topic(context->identity, kind, rule_name, context->cold->topic,
                                             sizeof(context->cold->topic)) ||
         !format_mqtt_entity_discovery_payload(context->identity, kind, rule_name,
+                                              current_board_info(),
                                               esp_app_get_description()->version,
                                               context->cold->payload, sizeof(context->cold->payload))) {
         return ESP_ERR_INVALID_SIZE;
@@ -1230,11 +1232,19 @@ constexpr MqttDiscoveryEntityKind kFixedEntityKinds[] = {
     MqttDiscoveryEntityKind::kAutomationLogSelect,
     MqttDiscoveryEntityKind::kRuleCountSensor,
     MqttDiscoveryEntityKind::kEventDropsSensor,
+    MqttDiscoveryEntityKind::kInternalFreeSensor,
+    MqttDiscoveryEntityKind::kInternalMinimumSensor,
+    MqttDiscoveryEntityKind::kInternalLargestSensor,
+    MqttDiscoveryEntityKind::kPsramFreeSensor,
 };
 
 esp_err_t publish_fixed_discovery(RuntimeContext *context)
 {
     for (const MqttDiscoveryEntityKind kind : kFixedEntityKinds) {
+        if (kind == MqttDiscoveryEntityKind::kPsramFreeSensor &&
+            current_board_info().psram_mib == 0) {
+            continue;
+        }
         const esp_err_t error = publish_entity_discovery_config(context, kind, nullptr);
         if (error != ESP_OK) {
             return error;
@@ -1283,6 +1293,59 @@ esp_err_t publish_automation_state(RuntimeContext *context)
     return error;
 }
 
+esp_err_t publish_system_state(RuntimeContext *context)
+{
+    const BoardInfo &board = current_board_info();
+    const BoardMemorySnapshot memory = board_memory_snapshot();
+    NetworkServiceMask requested = NetworkServiceMask::kWeb;
+    NetworkServiceMask effective = NetworkServiceMask::kNone;
+    bool reboot_required = false;
+    taskENTER_CRITICAL(&s_status_lock);
+    requested = s_status.requested_services;
+    effective = s_status.effective_services;
+    reboot_required = s_status.reboot_required;
+    taskEXIT_CRITICAL(&s_status_lock);
+
+    MqttSystemTelemetry system{};
+    system.board_profile = board.profile_name;
+    system.board_target = board.target_name;
+    system.requested_services = network_service_mask_name(requested);
+    system.effective_services = network_service_mask_name(effective);
+    system.uptime_s = static_cast<uint64_t>(esp_timer_get_time()) / 1000000ULL;
+    system.internal = {
+        .total = memory.internal.total,
+        .free = memory.internal.free,
+        .minimum = memory.internal.minimum_free,
+        .largest = memory.internal.largest_free_block,
+    };
+    system.psram = {
+        .total = memory.psram.total,
+        .free = memory.psram.free,
+        .minimum = memory.psram.minimum_free,
+        .largest = memory.psram.largest_free_block,
+    };
+    system.flash_mib = board.flash_mib;
+    system.psram_mib = board.psram_mib;
+    system.reboot_required = reboot_required;
+
+    char topic[kMqttTopicCapacity]{};
+    if (!format_mqtt_state_topic(context->identity, MqttStateTopicKind::kSystem, nullptr,
+                                 topic, sizeof(topic)) ||
+        !format_mqtt_system_state_payload(system, context->cold->payload,
+                                          sizeof(context->cold->payload))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const esp_err_t error = wait_for_publish(
+        context, topic, context->cold->payload,
+        static_cast<int>(std::strlen(context->cold->payload)));
+    if (error != ESP_OK) {
+        taskENTER_CRITICAL(&s_status_lock);
+        ++s_status.state_publish_failures;
+        taskEXIT_CRITICAL(&s_status_lock);
+    }
+    return error;
+}
+
 esp_err_t publish_rule_states(RuntimeContext *context)
 {
     for (std::size_t index = 0; index < context->cold->current_rule_count; ++index) {
@@ -1319,6 +1382,9 @@ esp_err_t reconcile_discovery(RuntimeContext *context, bool force_configs)
         context->cold->ledger.format_version == kMqttAdvertisedFormatVersion &&
         ledgers_have_same_names(context->cold->ledger, context->cold->current)) {
         error = publish_automation_state(context);
+        if (error == ESP_OK) {
+            error = publish_system_state(context);
+        }
         if (error == ESP_OK) {
             set_discovery_state(NetworkMqttDiscoveryState::kReady);
         } else {
@@ -1417,6 +1483,9 @@ esp_err_t reconcile_discovery(RuntimeContext *context, bool force_configs)
         error = publish_rule_states(context);
     }
     if (error == ESP_OK) {
+        error = publish_system_state(context);
+    }
+    if (error == ESP_OK) {
         taskENTER_CRITICAL(&s_status_lock);
         ++s_status.reconciliations;
         taskEXIT_CRITICAL(&s_status_lock);
@@ -1477,6 +1546,7 @@ esp_err_t retire_discovery(RuntimeContext *context)
             MqttStateTopicKind::kAutomation,
             MqttStateTopicKind::kLastRx,
             MqttStateTopicKind::kLastAutomation,
+            MqttStateTopicKind::kSystem,
         };
         for (const MqttStateTopicKind kind : state_kinds) {
             if (!format_mqtt_state_topic(context->identity, kind, nullptr, topic,

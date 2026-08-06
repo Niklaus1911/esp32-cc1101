@@ -46,6 +46,7 @@ add_test(NAME rf_host_tests COMMAND rf_host_tests)
 
 add_executable(mqtt_host_tests
     test_network_mqtt.cpp
+    ../components/platform_board/platform_board_policy.cpp
     ../components/network_mqtt/network_mqtt_policy.cpp
     ../components/network_mqtt/mqtt_config_format.cpp
     ../components/network_mqtt/mqtt_discovery.cpp
@@ -55,6 +56,7 @@ add_executable(mqtt_host_tests
 )
 target_include_directories(mqtt_host_tests PRIVATE
     ../components/network_mqtt/include
+    ../components/platform_board/include
     ../components/rf_codec/include
     ../components/rf_storage/include
 )
@@ -67,4 +69,7 @@ add_test(NAME push_ota_script_tests
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME web_asset_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_web_assets.mjs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME mqtt_runtime_source_contract_tests
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_network_mqtt_source.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")

@@ -225,140 +225,148 @@ function setStatus(id, v, tone, badge = false) { const target = byId(id);
 target.textContent = v; target.className = badge ? `state state-${tone}` : `value-${tone}`; }
 
 function renderSystem(live) {
-if (!live || byId("system-status").classList.contains("is-stale")) return;
-const { radio: r, learning: l, automation: a, network: w, mdns: m, system: s = null, errors: e = {} } = live;
-const b = live.board || null;
-const v = live.services || null;
+if (!live||byId("system-status").classList.contains("is-stale")) return;
+const { radio: r,learning: l,automation: a,network: w,mdns: m,system: s=null,errors: e={} }=live;
+const b=live.board||null;
+const v=live.services||null;
 const E=formatError,T=formatState,B=formatBoolean,H=hasError,A=formatAddress,Z=formatBytes,
-  P=setStatus,D=(id,v)=>renderDetails(byId(id),v),Q="Diagnostics unavailable";
-const chip = r.cc1101;
-const info = chip?.available ? chip : {};
-const busy = Boolean(r.transmitting || r.maintenance);
-const deferred = chip && !chip.available && busy &&
-  ["ESP_ERR_TIMEOUT", "ESP_ERR_INVALID_STATE"].includes(chip.error);
-const rLim = !chip || r.truncated == null;
-const rDeg = hasCount(r.truncated, r.queue_drops, r.timeouts,
-                            chip?.recoveries, chip?.ready_timeouts, chip?.state_timeouts);
-const rBad = !r.available || !r.running || chip && !chip.available && !deferred;
-const rPause = deferred || busy || r.rx !== "active";
-const rfTone = rBad ? "bad" : rPause || rLim || rDeg ? "warn" : "ok";
-const rfBadge = rBad ? "Faulted" : rPause ? "Paused" :
-  rLim ? "Limited" : rDeg ? "Degraded" : "Healthy";
-const wLim = w.state == null || w.event_drops == null;
-const wTone = !w.available || w.state === "fault" || w.state === "off" ||
-  H(e.wifi) || H(w.initialization_error) ? "bad" :
-  !w.online || wLim || hasCount(w.event_drops) ||
-  H(w.persistence_error) || H(w.last_error) ? "warn" : "ok";
-const wBadge = wTone === "bad" ? "Faulted" :
-  wLim ? "Limited" : w.online ? "Online" : T(w.state);
-const sLim = l.catalog_available == null || a.log_drops == null || !m;
-const sBad = !l.available || !a.available || H(e.signals) || H(e.automation) ||
-  m && (!m.available || ["faulted", "stalled"].includes(m.state) || H(e.mdns));
-const sDeg = l.catalog_available === false || a.runtime_paused ||
-  hasCount(l.queue_drops, l.catalog_errors, a.tx_errors, a.queue_drops, a.log_drops) ||
-  H(l.initialization_error) || H(a.initialization_error) || H(a.last_error) ||
-  m && (m.state !== "ready" || H(m.initialization_error) || H(m.last_error));
-const mqttExpected = v && ["mqtt", "both"].includes(v.boot);
-const serviceBad = v && (H(v.config_error) || H(v.web_error) || H(v.status_error) ||
-  mqttExpected && H(v.mqtt_error));
-const serviceDegraded = v && (v.fallback || v.maintenance || v.requested !== v.effective ||
-  mqttExpected && H(v.mqtt_error));
-const svcTone = sBad || serviceBad ? "bad" : sLim || sDeg || !v ? "warn" :
-  serviceDegraded ? "warn" : "ok";
-const hLim = !s || s.heap_free == null;
-const hTone = hLim ? "warn" : s.heap_free < heapCriticalBytes ? "bad" :
-  s.heap_free < heapWarningBytes ? "warn" : "ok";
-const runTone = svcTone === "bad" || hTone === "bad" ? "bad" :
-  svcTone === "warn" || hTone === "warn" ? "warn" : "ok";
-const signal = Number.isFinite(w.rssi) ? `${w.rssi} dBm / ${formatWifiQuality(w.rssi)}` : "-";
-
+P=setStatus,D=(id,v)=>renderDetails(byId(id),v),Q="Diagnostics unavailable",N="Not installed";
+const chip=r.cc1101;
+const info=chip?.available?chip:{};
+const busy=Boolean(r.transmitting||r.maintenance);
+const deferred=chip&&!chip.available&&busy &&
+["ESP_ERR_TIMEOUT","ESP_ERR_INVALID_STATE"].includes(chip.error);
+const rLim=!chip||r.truncated == null;
+const rDeg=hasCount(r.truncated,r.queue_drops,r.timeouts,
+chip?.recoveries,chip?.ready_timeouts,chip?.state_timeouts);
+const rBad=!r.available||!r.running||chip&&!chip.available&&!deferred;
+const rPause=deferred||busy||r.rx !== "active";
+const rfTone=rBad?"bad":rPause||rLim||rDeg?"warn":"ok";
+const rfBadge=rBad?"Faulted":rPause?"Paused" :
+rLim?"Limited":rDeg?"Degraded":"Healthy";
+const wLim=w.state == null||w.event_drops == null;
+const wTone=!w.available||w.state === "fault"||w.state === "off" ||
+H(e.wifi)||H(w.initialization_error)?"bad" :
+!w.online||wLim||hasCount(w.event_drops) ||
+H(w.persistence_error)||H(w.last_error)?"warn":"ok";
+const wBadge=wTone === "bad"?"Faulted" :
+wLim?"Limited":w.online?"Online":T(w.state);
+const sLim=l.catalog_available == null||a.log_drops == null||!m;
+const sBad=!l.available||!a.available||H(e.signals)||H(e.automation) ||
+m&&(!m.available||["faulted","stalled"].includes(m.state)||H(e.mdns));
+const sDeg=l.catalog_available === false||a.runtime_paused ||
+hasCount(l.queue_drops,l.catalog_errors,a.tx_errors,a.queue_drops,a.log_drops) ||
+H(l.initialization_error)||H(a.initialization_error)||H(a.last_error) ||
+m&&(m.state !== "ready"||H(m.initialization_error)||H(m.last_error));
+const mqttExpected=v&&["mqtt","both"].includes(v.boot);
+const serviceBad=v&&(H(v.config_error)||H(v.web_error)||H(v.status_error) ||
+mqttExpected&&H(v.mqtt_error));
+const serviceDegraded=v&&(v.fallback||v.maintenance||v.requested !== v.effective ||
+mqttExpected&&H(v.mqtt_error));
+const svcTone=sBad||serviceBad?"bad":sLim||sDeg||!v?"warn" :
+serviceDegraded?"warn":"ok";
+const i=s?.internal||(s&&{free:s.heap_free,minimum:s.heap_minimum,largest:s.heap_largest}),p=s?.psram,
+pOk=p?.total>0,hLim=!i||i.free==null,frag=!hLim&&i.largest<(b?.combined_services?32:16)*1024;
+const hTone=hLim?"warn":i.free<heapCriticalBytes||i.largest<heapCriticalBytes?"bad":
+i.free<heapWarningBytes||frag?"warn":"ok";
+const runTone=svcTone === "bad"||hTone === "bad"?"bad" :
+svcTone === "warn"||hTone === "warn"?"warn":"ok";
+const signal=Number.isFinite(w.rssi)?`${w.rssi} dBm / ${formatWifiQuality(w.rssi)}`:"-";
 P("system-radio-summary",
-          r.available ? `${r.running ? "Running" : "Faulted"} / ${T(r.rx)}` : "Unavailable",
-          rfTone);
-P("system-cc1101-summary", !chip ? Q : chip.available
-  ? `Available / ${formatMarcState(chip.marc_state)}`
-  : deferred ? `Deferred / ${chip.error}` : `Unavailable / ${E(chip.error)}`,
-          !chip || deferred ? "warn" : chip.available ? rfTone : "bad");
-P("system-wifi-summary", w.online
-  ? `${w.state ? T(w.state) : "Online"} / ${signal}` : T(w.state),
-          wTone);
-P("system-memory-summary", hLim ? Q : Z(s.heap_free), hTone);
-P("system-radio-badge", rfBadge, rfTone, true);
-P("system-wifi-badge", wBadge, wTone, true);
+r.available?`${r.running?"Running":"Faulted"} / ${T(r.rx)}`:"Unavailable",
+rfTone);
+P("system-cc1101-summary",!chip?Q:chip.available
+? `Available / ${formatMarcState(chip.marc_state)}`
+: deferred?`Deferred / ${chip.error}`:`Unavailable / ${E(chip.error)}`,
+!chip||deferred?"warn":chip.available?rfTone:"bad");
+P("system-wifi-summary",w.online
+? `${w.state?T(w.state):"Online"} / ${signal}`:T(w.state),
+wTone);
+P("system-memory-summary",hLim?Q:`${Z(i.free)} internal${pOk?` / ${Z(p.free)} PSRAM`:""}`,hTone);
+P("system-radio-badge",rfBadge,rfTone,true);
+P("system-wifi-badge",wBadge,wTone,true);
 P("system-runtime-badge",
-          sBad ? "Faulted" : hLim || sLim ? "Limited" : hTone !== "ok" ? "Low memory" :
-            runTone === "bad" ? "Faulted" : runTone === "warn" ? "Degraded" : "Healthy",
-          runTone, true);
-
-D("system-radio-details", [
-  ["Service", r.available ? (r.running ? "Running" : "Faulted") : "Unavailable"], ["Receiver", r.available ? T(r.rx) : "-"],
-  ["Transmitter", r.available ? B(r.transmitting, "Active", "Idle") : "-"], ["Maintenance", r.available ? B(r.maintenance, "Active", "Inactive") : "-"],
-  ["Frequency", Number.isFinite(r.frequency_hz) ? `${(r.frequency_hz / 1000000).toFixed(3)} MHz` : "-"],
-  ["TX power", Number.isFinite(r.tx_power_dbm) ? `${r.tx_power_dbm} dBm` : "-"],
+sBad?"Faulted":hLim||sLim?"Limited":hTone !== "ok"?frag?"Fragmented":"Low memory" :
+runTone === "bad"?"Faulted":runTone === "warn"?"Degraded":"Healthy",
+runTone,true);
+D("system-radio-details",[
+["Service",r.available?(r.running?"Running":"Faulted"):"Unavailable"],["Receiver",r.available?T(r.rx):"-"],
+["Transmitter",r.available?B(r.transmitting,"Active","Idle"):"-"],["Maintenance",r.available?B(r.maintenance,"Active","Inactive"):"-"],
+["Frequency",Number.isFinite(r.frequency_hz)?`${(r.frequency_hz / 1000000).toFixed(3)} MHz`:"-"],
+["TX power",Number.isFinite(r.tx_power_dbm)?`${r.tx_power_dbm} dBm`:"-"],
 ]);
-D("system-cc1101-details", !chip ? [["State", Q+"."]] : [
-  ["Available", deferred ? "Deferred" : B(chip.available)], ["Error", E(chip.error)],
-  ["Part number", formatHexByte(info.part)], ["Version", formatHexByte(info.version)],
-  ["MARC state", formatMarcState(info.marc_state)], ["RSSI", formatHalfDbm(info.rssi_dbm_x2)],
-  ["Carrier sense", B(info.carrier_sense)], ["Clear channel", B(info.clear_channel)],
+D("system-cc1101-details",!chip?[["State",Q+"."]]:[
+["Available",deferred?"Deferred":B(chip.available)],["Error",E(chip.error)],
+["Part number",formatHexByte(info.part)],["Version",formatHexByte(info.version)],
+["MARC state",formatMarcState(info.marc_state)],["RSSI",formatHalfDbm(info.rssi_dbm_x2)],
+["Carrier sense",B(info.carrier_sense)],["Clear channel",B(info.clear_channel)],
 ]);
-D("system-wifi-details", [
-  ["State", T(w.state)], ["Active SSID", w.ssid || "-"], ["Signal", w.online ? signal : "-"],
-  ["Saved network", w.saved_known == null ? "-" : !w.saved_known ? "Unknown" : !w.saved ? "Not configured" :
-    w.active_saved ? "Active" : "Configured"],
+D("system-wifi-details",[
+["State",T(w.state)],["Active SSID",w.ssid||"-"],["Signal",w.online?signal:"-"],
+["Saved network",w.saved_known == null?"-":!w.saved_known?"Unknown":!w.saved?"Not configured" :
+w.active_saved?"Active":"Configured"],
 ]);
-D("system-network-details", [
-  ["IP address", A(w.ip)], ["Gateway", A(w.gateway)],
-  ["Driver", w.driver_initialized == null ? "-" : w.driver_initialized && w.driver_started ? "Started" :
-    w.driver_initialized ? "Initialized" : "Not initialized"],
-  ["Scan", B(w.scan_running, "Running", "Idle")], ["OTA lock", B(w.ota_locked, "Active", "Inactive")],
+D("system-network-details",[
+["IP address",A(w.ip)],["Gateway",A(w.gateway)],
+["Driver",w.driver_initialized == null?"-":w.driver_initialized&&w.driver_started?"Started" :
+w.driver_initialized?"Initialized":"Not initialized"],
+["Scan",B(w.scan_running,"Running","Idle")],["OTA lock",B(w.ota_locked,"Active","Inactive")],
 ]);
-D("system-runtime-details", hLim ? [["State", Q+"."]] : [
-  ["Uptime", formatUptime(s.uptime_ms)], ["Reset reason", T(s.reset_reason)],
-  ["Free heap", Z(s.heap_free)], ["Largest free block", Z(s.heap_largest)],
-  ["Minimum free heap", Z(s.heap_minimum)],
-  ["Internal heap total", Z(s.internal?.total)], ["PSRAM free", Z(s.psram?.free)],
-  ["PSRAM largest block", Z(s.psram?.largest)], ["Board", b?.profile],
+D("system-hardware-details",!b?[["State",Q+"."]]:[
+["Model",b.model||b.profile],["Profile",b.profile],["Target",b.target==="esp32s3"?"ESP32-S3":"ESP32"],
+["Flash",b.flash_mib+" MiB"],["PSRAM",b.psram_mib?b.psram_mib+" MiB":N],
+["Console",b.console==="usb-serial-jtag"?"USB Serial/JTAG":"UART0"],
 ]);
-D("system-services-details", [
-  ["Learned signals", l.available ? `${l.count} / catalog ${l.catalog_available === undefined ? "-" : l.catalog_available ? "ready" : "unavailable"}` : "Unavailable"],
-  ["Automation", a.available ? `${a.enabled ? "Enabled" : "Disabled"}${a.runtime_paused ? " / paused" : ""} / ${a.rules} rules` : "Unavailable"],
-  ["mDNS", !m ? Q : m.effective_known ? `${T(m.state)} / http://${m.effective_hostname}.local/` : T(m.state)],
-  ["LAN services", v ? `${v.effective} / requested ${v.requested}` : Q],
-  ...[["RF", "radio"], ["Signals", "signals"], ["Automation", "automation"], ["Wi-Fi", "wifi"], ["mDNS", "mdns"]]
-    .map(([label, key]) => [`${label} error`, E(e[key])]),
+D("system-runtime-details",hLim?[["State",Q+"."]]:[
+["Uptime",formatUptime(s.uptime_ms)],["Reset reason",T(s.reset_reason)],
+["Internal free",Z(i.free)],["Internal total",Z(i.total)],
+["PSRAM free",pOk?Z(p.free):N],["PSRAM total",pOk?Z(p.total):N],
 ]);
-D("system-rf-diagnostics", [
-  ...rows(r, "Accepted frames:accepted|Suppressed duplicates:duplicates|Truncated captures:truncated|RF queue drops:queue_drops|Command timeouts:timeouts"),
-  ...rows(info,
-                  "Resets:resets|Recoveries:recoveries|Ready timeouts:ready_timeouts|State timeouts:state_timeouts"),
+D("system-services-details",[
+["Learned signals",l.available?`${l.count} / catalog ${l.catalog_available === undefined?"-":l.catalog_available?"ready":"unavailable"}`:"Unavailable"],
+["Automation",a.available?`${a.enabled?"Enabled":"Disabled"}${a.runtime_paused?" / paused":""} / ${a.rules} rules`:"Unavailable"],
+["mDNS",!m?Q:m.effective_known?`${T(m.state)} / http://${m.effective_hostname}.local/`:T(m.state)],
+["LAN services",v?`${v.effective} / requested ${v.requested}`:Q],
+...[["RF","radio"],["Signals","signals"],["Automation","automation"],["Wi-Fi","wifi"],["mDNS","mdns"]]
+.map(([label,key]) => [`${label} error`,E(e[key])]),
 ]);
-D("system-wifi-diagnostics", [
-  ["Netmask", A(w.netmask)],
-  ["DNS", A(w.dns)],
-  ["Saved SSID", w.saved_known && w.saved ? w.saved_ssid || "-" : "-"],
-  ["Retries", w.retries],
-  ["Disconnect reason", w.disconnect_reason == null ? "-" : w.disconnect_reason || "None"],
-  ["Event drops", w.event_drops],
-  ...["initialization", "persistence", "last"]
-    .map((name) => [`${T(name)} error`, E(w[`${name}_error`])]),
+D("system-rf-diagnostics",[
+...rows(r,"Accepted frames:accepted|Suppressed duplicates:duplicates|Truncated captures:truncated|RF queue drops:queue_drops|Command timeouts:timeouts"),
+...rows(info,
+"Resets:resets|Recoveries:recoveries|Ready timeouts:ready_timeouts|State timeouts:state_timeouts"),
 ]);
-D("system-services-diagnostics", [
-  ...rows(l, "Learning queue drops:queue_drops|Catalog errors:catalog_errors"),
-  ["Learning initialization error", E(l.initialization_error)],
-  ...rows(a, "Frames:frames|Stale frames:stale|Ambiguous frames:ambiguous|Matches:matches|Actions:actions|Cooldown suppressed:suppressed|TX errors:tx_errors|Queue drops:queue_drops|Log events:log_events|Log drops:log_drops"),
-  ["Initialization error", E(a.initialization_error)],
-  ["Last error", E(a.last_error)],
-  ...(!v ? [["LAN service diagnostics", Q+"."]] : [
-    ["LAN service errors", `${E(v.config_error)} / Web ${E(v.web_error)} / MQTT ${E(v.mqtt_error)}`],
-    ["LAN service state", `${v.effective} / ${v.retirement || "active"}${v.fallback ? " / fallback" : ""}`],
-  ]),
-  ...(!m ? [] : [["mDNS identity", `${m.configured_hostname}.local${m.hostname_custom ? " / custom" : " / default"} -> ${m.effective_known ? m.effective_hostname + ".local" : "unknown"}${m.conflict_renamed ? " / renamed" : ""}`],
-    ["mDNS services", `HTTP ${m.http_registered ? "ready" : "missing"} / RF bridge ${m.rfbridge_registered ? "ready" : "missing"}`],
-    ["mDNS health", `gen ${m.applied_generation}/${m.configured_generation} / owner ${m.heartbeat_age_ms} ms / ${E(m.initialization_error)} / ${E(m.last_error)}`]]),
+D("system-wifi-diagnostics",[
+["Netmask",A(w.netmask)],
+["DNS",A(w.dns)],
+["Saved SSID",w.saved_known&&w.saved?w.saved_ssid||"-":"-"],
+["Retries",w.retries],
+["Disconnect reason",w.disconnect_reason == null?"-":w.disconnect_reason||"None"],
+["Event drops",w.event_drops],
+...["initialization","persistence","last"]
+.map((name) => [`${T(name)} error`,E(w[`${name}_error`])]),
+]);
+D("system-services-diagnostics",[
+...rows(l,"Learning queue drops:queue_drops|Catalog errors:catalog_errors"),
+["Learning initialization error",E(l.initialization_error)],
+...rows(a,"Frames:frames|Stale frames:stale|Ambiguous frames:ambiguous|Matches:matches|Actions:actions|Cooldown suppressed:suppressed|TX errors:tx_errors|Queue drops:queue_drops|Log events:log_events|Log drops:log_drops"),
+["Initialization error",E(a.initialization_error)],
+["Last error",E(a.last_error)],
+...(!v?[["LAN service diagnostics",Q+"."]]:[
+["LAN service errors",`${E(v.config_error)} / Web ${E(v.web_error)} / MQTT ${E(v.mqtt_error)}`],
+["LAN service state",`${v.effective} / ${v.retirement||"active"}${v.fallback?" / fallback":""}`],
+]),
+...(!m?[]:[["mDNS identity",`${m.configured_hostname}.local${m.hostname_custom?" / custom":" / default"} -> ${m.effective_known?m.effective_hostname + ".local":"unknown"}${m.conflict_renamed?" / renamed":""}`],
+["mDNS services",`HTTP ${m.http_registered?"ready":"missing"} / RF bridge ${m.rfbridge_registered?"ready":"missing"}`],
+["mDNS health",`gen ${m.applied_generation}/${m.configured_generation} / owner ${m.heartbeat_age_ms} ms / ${E(m.initialization_error)} / ${E(m.last_error)}`]]),
+]);
+D("system-hardware-diagnostics",!b?[["State",Q+"."]]:[
+["Concurrent Web + MQTT",B(b.combined_services,"Supported","Not supported")],
+["Activity LED",b.activity_led_enabled?`GPIO ${b.activity_led_gpio} / active ${b.activity_led_active_high?"high":"low"}`:"Disabled"],
+["CC1101 wiring",`SCLK ${b.cc1101?.sclk} / MISO ${b.cc1101?.miso} / MOSI ${b.cc1101?.mosi} / CS ${b.cc1101?.cs} / TX ${b.cc1101?.gdo0_tx} / RX ${b.cc1101?.gdo2_rx}`],
+["Internal watermarks",`${Z(i?.minimum)} minimum / ${Z(i?.largest)} largest`],
+["PSRAM watermarks",pOk?`${Z(p.minimum)} minimum / ${Z(p.largest)} largest`:N],
 ]);
 }
-
 function frameSummary(frame) {
 if (!frame) return "No frame";
 if (frame.error) return frame.error;

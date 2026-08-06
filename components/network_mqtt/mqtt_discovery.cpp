@@ -114,6 +114,7 @@ const char *state_suffix(MqttStateTopicKind kind)
         case MqttStateTopicKind::kLastRx: return "last_rx";
         case MqttStateTopicKind::kLastAutomation: return "last_automation";
         case MqttStateTopicKind::kRule: return "rule";
+        case MqttStateTopicKind::kSystem: return "system";
         case MqttStateTopicKind::kAutomation: default: return "automation";
     }
 }
@@ -160,20 +161,50 @@ bool entity_parts(MqttDiscoveryEntityKind kind, const char **component, const ch
             *object = "rule";
             *requires_rule = true;
             return true;
+        case MqttDiscoveryEntityKind::kInternalFreeSensor:
+            *component = "sensor";
+            *object = "internal_free";
+            return true;
+        case MqttDiscoveryEntityKind::kInternalMinimumSensor:
+            *component = "sensor";
+            *object = "internal_minimum";
+            return true;
+        case MqttDiscoveryEntityKind::kInternalLargestSensor:
+            *component = "sensor";
+            *object = "internal_largest";
+            return true;
+        case MqttDiscoveryEntityKind::kPsramFreeSensor:
+            *component = "sensor";
+            *object = "psram_free";
+            return true;
     }
     return false;
 }
 
 bool append_device(BoundedWriter *writer, const MqttDeviceIdentity &identity,
-                   const char *firmware_version)
+                   const BoardInfo &board, const char *firmware_version)
 {
+    if (writer == nullptr || board.model_name == nullptr || board.profile_name == nullptr ||
+        firmware_version == nullptr) {
+        return false;
+    }
     return writer->append(",\"device\":{\"identifiers\":[") &&
            writer->append_json_string(identity.device_id) &&
            writer->append("],\"name\":") &&
            writer->append_json_string(identity.device_name) &&
-           writer->append(",\"manufacturer\":\"RF Bridge\",\"model\":\"ESP32 + CC1101\","
-                          "\"sw_version\":") &&
+           writer->append(",\"manufacturer\":\"RF Bridge\",\"model\":") &&
+           writer->append_json_string(board.model_name) &&
+           writer->append(",\"hw_version\":") &&
+           writer->append_json_string(board.profile_name) && writer->append(",\"sw_version\":") &&
            writer->append_json_string(firmware_version) && writer->append("}");
+}
+
+bool system_entity(MqttDiscoveryEntityKind kind)
+{
+    return kind == MqttDiscoveryEntityKind::kInternalFreeSensor ||
+           kind == MqttDiscoveryEntityKind::kInternalMinimumSensor ||
+           kind == MqttDiscoveryEntityKind::kInternalLargestSensor ||
+           kind == MqttDiscoveryEntityKind::kPsramFreeSensor;
 }
 
 }  // namespace
@@ -280,7 +311,7 @@ bool format_mqtt_entity_discovery_topic(const MqttDeviceIdentity &identity,
 }
 
 bool format_mqtt_discovery_payload(const MqttDeviceIdentity &identity, const char *signal_name,
-                                   const char *firmware_version, char *output,
+                                   const BoardInfo &board, const char *firmware_version, char *output,
                                    std::size_t capacity)
 {
     if (!rf_storage_name_is_valid(signal_name) || firmware_version == nullptr || output == nullptr) {
@@ -305,20 +336,15 @@ bool format_mqtt_discovery_payload(const MqttDeviceIdentity &identity, const cha
     writer.append(",\"payload_press\":\"PRESS\",\"qos\":0,\"retain\":false,");
     writer.append("\"availability_topic\":");
     writer.append_json_string(availability_topic);
-    writer.append(",\"payload_available\":\"online\",\"payload_not_available\":\"offline\",");
-    writer.append("\"device\":{\"identifiers\":[");
-    writer.append_json_string(identity.device_id);
-    writer.append("],\"name\":");
-    writer.append_json_string(identity.device_name);
-    writer.append(",\"manufacturer\":\"RF Bridge\",\"model\":\"ESP32 + CC1101\",\"sw_version\":");
-    writer.append_json_string(firmware_version);
-    writer.append("}}");
-    return writer.valid();
+    writer.append(",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"");
+    return append_device(&writer, identity, board, firmware_version) && writer.append("}") &&
+           writer.valid();
 }
 
 bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                                           MqttDiscoveryEntityKind kind, const char *rule_name,
-                                          const char *firmware_version, char *output,
+                                          const BoardInfo &board, const char *firmware_version,
+                                          char *output,
                                           std::size_t capacity)
 {
     if (firmware_version == nullptr || output == nullptr) {
@@ -354,6 +380,12 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
             !format_text(unique_id, sizeof(unique_id), "%s_%s", identity.device_id, object)) {
             return false;
         }
+    } else if (system_entity(kind)) {
+        if (!format_mqtt_state_topic(identity, MqttStateTopicKind::kSystem, nullptr,
+                                     state_topic, sizeof(state_topic)) ||
+            !format_text(unique_id, sizeof(unique_id), "%s_%s", identity.device_id, object)) {
+            return false;
+        }
     } else if (!format_mqtt_state_topic(identity, MqttStateTopicKind::kAutomation, nullptr,
                                         state_topic, sizeof(state_topic)) ||
                !format_text(unique_id, sizeof(unique_id), "%s_%s", identity.device_id, object)) {
@@ -381,7 +413,7 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                writer.append_json_string(availability_topic) &&
                writer.append(",\"payload_available\":\"online\","
                              "\"payload_not_available\":\"offline\"") &&
-               append_device(&writer, identity, firmware_version) && writer.append("}") &&
+               append_device(&writer, identity, board, firmware_version) && writer.append("}") &&
                writer.valid();
     }
     const char *name = object;
@@ -397,6 +429,14 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
         name = "Automation rule count";
     } else if (kind == MqttDiscoveryEntityKind::kEventDropsSensor) {
         name = "MQTT event drops";
+    } else if (kind == MqttDiscoveryEntityKind::kInternalFreeSensor) {
+        name = "Internal free memory";
+    } else if (kind == MqttDiscoveryEntityKind::kInternalMinimumSensor) {
+        name = "Internal minimum free memory";
+    } else if (kind == MqttDiscoveryEntityKind::kInternalLargestSensor) {
+        name = "Largest internal memory block";
+    } else if (kind == MqttDiscoveryEntityKind::kPsramFreeSensor) {
+        name = "PSRAM free memory";
     }
     if (!writer.append("{\"name\":") || !writer.append_json_string(name) ||
         !writer.append(",\"unique_id\":") || !writer.append_json_string(unique_id)) {
@@ -442,6 +482,25 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                            "\"entity_category\":\"diagnostic\"")) {
             return false;
         }
+    } else if (system_entity(kind)) {
+        const char *field = kind == MqttDiscoveryEntityKind::kInternalFreeSensor
+                                ? "free"
+                            : kind == MqttDiscoveryEntityKind::kInternalMinimumSensor
+                                ? "minimum"
+                            : kind == MqttDiscoveryEntityKind::kInternalLargestSensor
+                                ? "largest"
+                                : "free";
+        const char *region = kind == MqttDiscoveryEntityKind::kPsramFreeSensor
+                                 ? "psram"
+                                 : "internal";
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append_format(",\"value_template\":\"{{ value_json.memory.%s.%s }}\","
+                                  "\"device_class\":\"data_size\","
+                                  "\"unit_of_measurement\":\"B\","
+                                  "\"entity_category\":\"diagnostic\",\"expire_after\":180",
+                                  region, field)) {
+            return false;
+        }
     }
     if (!writer.append(",\"availability_topic\":") ||
         !writer.append_json_string(availability_topic) ||
@@ -449,7 +508,7 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                        "\"payload_not_available\":\"offline\"")) {
         return false;
     }
-    return append_device(&writer, identity, firmware_version) && writer.append("}") &&
+    return append_device(&writer, identity, board, firmware_version) && writer.append("}") &&
            writer.valid();
 }
 

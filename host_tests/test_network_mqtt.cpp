@@ -409,9 +409,17 @@ rfbridge::MqttDeviceIdentity test_identity()
     return identity;
 }
 
+const rfbridge::BoardInfo &test_board(rfbridge::BoardProfile profile)
+{
+    const rfbridge::BoardInfo *board = rfbridge::board_info(profile);
+    require(board != nullptr, "test board profile resolves");
+    return *board;
+}
+
 void test_discovery_contract()
 {
     const rfbridge::MqttDeviceIdentity identity = test_identity();
+    const rfbridge::BoardInfo &board = test_board(rfbridge::BoardProfile::kEsp32Devkit);
     char text[rfbridge::kMqttDiscoveryPayloadCapacity]{};
     require(rfbridge::format_mqtt_command_filter(identity, text, sizeof(text)) &&
                 std::strcmp(text, "rfbridge/102030a1b2c3/signal/+/press") == 0,
@@ -426,7 +434,7 @@ void test_discovery_contract()
     require(rfbridge::format_mqtt_command_topic(identity, "gate", text, sizeof(text)) &&
                 std::strcmp(text, "rfbridge/102030a1b2c3/signal/gate/press") == 0,
             "button command topic is exact");
-    require(rfbridge::format_mqtt_discovery_payload(identity, "gate", "1.2.3", text,
+    require(rfbridge::format_mqtt_discovery_payload(identity, "gate", board, "1.2.3", text,
                                                      sizeof(text)),
             "bounded discovery JSON formats");
     constexpr char expected[] =
@@ -437,17 +445,37 @@ void test_discovery_contract()
         "\"payload_available\":\"online\",\"payload_not_available\":\"offline\","
         "\"device\":{\"identifiers\":[\"rfbridge_102030a1b2c3\"],"
         "\"name\":\"RF Bridge A1B2C3\",\"manufacturer\":\"RF Bridge\","
-        "\"model\":\"ESP32 + CC1101\",\"sw_version\":\"1.2.3\"}}";
+        "\"model\":\"ESP32 DevKit + CC1101\",\"hw_version\":\"esp32-devkit\","
+        "\"sw_version\":\"1.2.3\"}}";
     require(std::strcmp(text, expected) == 0, "discovery JSON contract is exact");
-    require(rfbridge::format_mqtt_discovery_payload(identity, "gate", "a\"b\\c", text,
+    require(rfbridge::format_mqtt_discovery_payload(identity, "gate", board, "a\"b\\c", text,
                                                      sizeof(text)) &&
                 std::strstr(text, "\"sw_version\":\"a\\\"b\\\\c\"") != nullptr,
             "discovery JSON escapes firmware metadata");
     char short_payload[128]{};
-    require(!rfbridge::format_mqtt_discovery_payload(identity, "gate", "1.2.3",
+    require(!rfbridge::format_mqtt_discovery_payload(identity, "gate", board, "1.2.3",
                                                       short_payload, sizeof(short_payload)) &&
                 !rfbridge::format_mqtt_discovery_topic(identity, "list", text, sizeof(text)),
             "discovery formatting rejects truncation and invalid signal names");
+
+    const struct {
+        rfbridge::BoardProfile profile;
+        const char *model;
+        const char *hardware;
+    } boards[] = {
+        {rfbridge::BoardProfile::kEsp32Devkit, "ESP32 DevKit + CC1101", "esp32-devkit"},
+        {rfbridge::BoardProfile::kEsp32s3DevkitcN16r8,
+         "ESP32-S3 DevKitC N16R8 + CC1101", "esp32s3-devkitc-n16r8"},
+        {rfbridge::BoardProfile::kXiaoEsp32s3,
+         "Seeed Studio XIAO ESP32-S3 + CC1101", "xiao-esp32s3"},
+    };
+    for (const auto &expected_board : boards) {
+        require(rfbridge::format_mqtt_discovery_payload(
+                    identity, "gate", test_board(expected_board.profile), "1.2.3", text,
+                    sizeof(text)) && std::strstr(text, expected_board.model) != nullptr &&
+                    std::strstr(text, expected_board.hardware) != nullptr,
+                "discovery metadata matches each board profile");
+    }
 }
 
 void test_incoming_messages()
@@ -529,6 +557,8 @@ void test_incoming_messages()
 void test_automation_discovery_and_telemetry()
 {
     const rfbridge::MqttDeviceIdentity identity = test_identity();
+    const rfbridge::BoardInfo &board =
+        test_board(rfbridge::BoardProfile::kEsp32s3DevkitcN16r8);
     char text[rfbridge::kMqttDiscoveryPayloadCapacity]{};
     require(rfbridge::format_mqtt_event_topic(identity, rfbridge::MqttEventTopicKind::kRx, text,
                                               sizeof(text)) &&
@@ -548,14 +578,15 @@ void test_automation_discovery_and_telemetry()
                 std::strcmp(text, "homeassistant/sensor/rfbridge_102030a1b2c3/rule_gate/config") == 0,
             "rule discovery topic is stable");
     require(rfbridge::format_mqtt_entity_discovery_payload(
-                identity, rfbridge::MqttDiscoveryEntityKind::kAutomationSwitch, nullptr, "1.2.3",
+                identity, rfbridge::MqttDiscoveryEntityKind::kAutomationSwitch, nullptr, board,
+                "1.2.3",
                 text, sizeof(text)) &&
                 std::strstr(text, "\"command_topic\":\"rfbridge/102030a1b2c3/automation/enabled/set\"") !=
                     nullptr &&
                 std::strstr(text, "\"value_template\":\"{{ value_json.enabled }}\"") != nullptr,
             "automation switch discovery contains state and command contracts");
     require(rfbridge::format_mqtt_entity_discovery_payload(
-                identity, rfbridge::MqttDiscoveryEntityKind::kRuleSensor, "gate", "1.2.3",
+                identity, rfbridge::MqttDiscoveryEntityKind::kRuleSensor, "gate", board, "1.2.3",
                 text, sizeof(text)) &&
                 std::strstr(text, "\"json_attributes_topic\":\"rfbridge/102030a1b2c3/state/rule/gate\"") !=
                     nullptr,
@@ -617,6 +648,81 @@ void test_automation_discovery_and_telemetry()
             "retained automation state contains persistent controls");
 }
 
+void test_system_discovery_and_telemetry()
+{
+    const rfbridge::MqttDeviceIdentity identity = test_identity();
+    const rfbridge::BoardInfo &board =
+        test_board(rfbridge::BoardProfile::kEsp32s3DevkitcN16r8);
+    char text[rfbridge::kMqttDiscoveryPayloadCapacity]{};
+    require(rfbridge::format_mqtt_state_topic(identity, rfbridge::MqttStateTopicKind::kSystem,
+                                              nullptr, text, sizeof(text)) &&
+                std::strcmp(text, "rfbridge/102030a1b2c3/state/system") == 0,
+            "system state topic is stable");
+
+    const struct {
+        rfbridge::MqttDiscoveryEntityKind kind;
+        const char *object;
+        const char *path;
+    } sensors[] = {
+        {rfbridge::MqttDiscoveryEntityKind::kInternalFreeSensor, "internal_free",
+         "memory.internal.free"},
+        {rfbridge::MqttDiscoveryEntityKind::kInternalMinimumSensor, "internal_minimum",
+         "memory.internal.minimum"},
+        {rfbridge::MqttDiscoveryEntityKind::kInternalLargestSensor, "internal_largest",
+         "memory.internal.largest"},
+        {rfbridge::MqttDiscoveryEntityKind::kPsramFreeSensor, "psram_free",
+         "memory.psram.free"},
+    };
+    for (const auto &sensor : sensors) {
+        char expected_topic[128]{};
+        std::snprintf(expected_topic, sizeof(expected_topic),
+                      "homeassistant/sensor/rfbridge_102030a1b2c3/%s/config", sensor.object);
+        require(rfbridge::format_mqtt_entity_discovery_topic(
+                    identity, sensor.kind, nullptr, text, sizeof(text)) &&
+                    std::strcmp(text, expected_topic) == 0,
+                "system sensor discovery topic is exact");
+        require(rfbridge::format_mqtt_entity_discovery_payload(
+                    identity, sensor.kind, nullptr, board, "1.2.3", text, sizeof(text)) &&
+                    std::strstr(text, "\"state_topic\":\"rfbridge/102030a1b2c3/state/system\"") !=
+                        nullptr &&
+                    std::strstr(text, sensor.path) != nullptr &&
+                    std::strstr(text, "\"device_class\":\"data_size\"") != nullptr &&
+                    std::strstr(text, "\"unit_of_measurement\":\"B\"") != nullptr &&
+                    std::strstr(text, "\"entity_category\":\"diagnostic\"") != nullptr &&
+                    std::strstr(text, "\"expire_after\":180") != nullptr,
+                "system sensor discovery payload is exact and expiring");
+    }
+
+    rfbridge::MqttSystemTelemetry system{};
+    system.board_profile = board.profile_name;
+    system.board_target = board.target_name;
+    system.requested_services = "both";
+    system.effective_services = "both";
+    system.uptime_s = 123;
+    system.internal = {.total = 332187, .free = 53143, .minimum = 51883, .largest = 30720};
+    system.psram = {
+        .total = 8388608, .free = 8302836, .minimum = 8295624, .largest = 8257536};
+    system.flash_mib = board.flash_mib;
+    system.psram_mib = board.psram_mib;
+    require(rfbridge::format_mqtt_system_state_payload(system, text, sizeof(text)),
+            "bounded system telemetry formats");
+    constexpr char expected[] =
+        "{\"board\":{\"profile\":\"esp32s3-devkitc-n16r8\",\"target\":\"esp32s3\","
+        "\"flash_mib\":16,\"psram_mib\":8},\"services\":{\"requested\":\"both\","
+        "\"effective\":\"both\",\"reboot_required\":false},\"uptime_s\":123,"
+        "\"memory\":{\"internal\":{\"total\":332187,\"free\":53143,\"minimum\":51883,"
+        "\"largest\":30720},\"psram\":{\"total\":8388608,\"free\":8302836,"
+        "\"minimum\":8295624,\"largest\":8257536}}}";
+    require(std::strcmp(text, expected) == 0, "system telemetry JSON contract is exact");
+    char short_payload[128]{};
+    require(!rfbridge::format_mqtt_system_state_payload(system, short_payload,
+                                                         sizeof(short_payload)),
+            "system telemetry rejects truncation");
+    system.board_profile = nullptr;
+    require(!rfbridge::format_mqtt_system_state_payload(system, text, sizeof(text)),
+            "system telemetry rejects missing metadata");
+}
+
 }  // namespace
 
 int main()
@@ -627,6 +733,7 @@ int main()
     test_discovery_contract();
     test_incoming_messages();
     test_automation_discovery_and_telemetry();
+    test_system_discovery_and_telemetry();
     test_network_availability_policy();
     test_service_mode_policy();
     std::puts("All MQTT host tests passed");

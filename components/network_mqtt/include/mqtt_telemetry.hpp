@@ -74,6 +74,26 @@ struct MqttRuleTelemetry {
     char target_name[16]{};
 };
 
+struct MqttSystemMemoryTelemetry {
+    uint32_t total = 0;
+    uint32_t free = 0;
+    uint32_t minimum = 0;
+    uint32_t largest = 0;
+};
+
+struct MqttSystemTelemetry {
+    const char *board_profile = nullptr;
+    const char *board_target = nullptr;
+    const char *requested_services = nullptr;
+    const char *effective_services = nullptr;
+    uint64_t uptime_s = 0;
+    MqttSystemMemoryTelemetry internal{};
+    MqttSystemMemoryTelemetry psram{};
+    uint8_t flash_mib = 0;
+    uint8_t psram_mib = 0;
+    bool reboot_required = false;
+};
+
 bool format_mqtt_rx_event_payload(const MqttRxTelemetry &event, char *output,
                                   std::size_t capacity);
 bool format_mqtt_automation_event_payload(const MqttAutomationTelemetry &event, char *output,
@@ -82,5 +102,7 @@ bool format_mqtt_automation_state_payload(const MqttAutomationStateTelemetry &st
                                           std::size_t capacity);
 bool format_mqtt_rule_state_payload(const MqttRuleTelemetry &rule, char *output,
                                     std::size_t capacity);
+bool format_mqtt_system_state_payload(const MqttSystemTelemetry &system, char *output,
+                                      std::size_t capacity);
 
 }  // namespace rfbridge
