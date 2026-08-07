@@ -24,6 +24,10 @@
 
 Run commands from the repository root. Start Codex CLI from this directory so project instructions and tool working directories resolve consistently.
 
+At the start of every new coding-agent session, read `docs/development-tooling-setup.md` completely before using ESP-IDF, MCP tools, Playwright, or connected hardware. That guide is authoritative for the machine-local toolchain, profile workflow, and approved board-to-port mappings.
+
+Use `tools/build-board.sh <profile> <build|size|flash|monitor> [--port <approved-by-id-path>]` for every profile-specific production build, size report, flash, or monitor operation. Do not bypass its target, profile, image-header, `RFBD` descriptor, and persistent by-id checks with direct `esptool`, generic `idf.py flash`/`monitor`, the ESP-IDF Tools MCP `flash_project` operation, `/dev/ttyUSB*` or `/dev/ttyACM*` paths, or port auto-detection. Flash and monitor still require explicit approval for the confirmed board and exact approved path; keep the exact mappings authoritative in the tooling guide rather than duplicating them here.
+
 Run host tests from a clean native shell before activating the ESP-IDF cross-toolchain:
 
 ```bash
@@ -70,7 +74,7 @@ The active Codex CLI setup provides the Espressif Documentation, ESP-IDF Tools, 
 
 Use the ESP-IDF Tools MCP `build_project` operation as a fast iterative compiler check. It writes the normal in-tree build output and does not replace applicable host tests or Unity compilation. When the risk-based criteria above require `tools/verify-production.sh`, the production verifier remains the final clean build, size, image, and partition gate. MCP success does not prove RF timing, range, recovery, NVS persistence, browser behavior, or hardware behavior.
 
-Do not call `set_target` without approval because it can regenerate project configuration. Do not call `clean_project` without approval because it removes build artifacts. Never call `flash_project` without explicit approval and a confirmed port and board. An MCP startup failure is not permission to modify, reinstall, repair, or delete anything under `~/.espressif`; fall back to the documented shell commands and report the failure.
+Do not call `set_target` without approval because it can regenerate project configuration. Do not call `clean_project` without approval because it removes build artifacts. Do not use `flash_project`; after explicit hardware approval, use the repository's validated `tools/build-board.sh` workflow instead. An MCP startup failure is not permission to modify, reinstall, repair, or delete anything under `~/.espressif`; fall back to the documented shell commands and report the failure.
 
 ## Browser Validation
 
