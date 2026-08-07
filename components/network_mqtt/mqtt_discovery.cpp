@@ -177,6 +177,10 @@ bool entity_parts(MqttDiscoveryEntityKind kind, const char **component, const ch
             *component = "sensor";
             *object = "psram_free";
             return true;
+        case MqttDiscoveryEntityKind::kHardwareSelect:
+            *component = "select";
+            *object = "radio_hardware";
+            return true;
     }
     return false;
 }
@@ -204,7 +208,8 @@ bool system_entity(MqttDiscoveryEntityKind kind)
     return kind == MqttDiscoveryEntityKind::kInternalFreeSensor ||
            kind == MqttDiscoveryEntityKind::kInternalMinimumSensor ||
            kind == MqttDiscoveryEntityKind::kInternalLargestSensor ||
-           kind == MqttDiscoveryEntityKind::kPsramFreeSensor;
+           kind == MqttDiscoveryEntityKind::kPsramFreeSensor ||
+           kind == MqttDiscoveryEntityKind::kHardwareSelect;
 }
 
 }  // namespace
@@ -289,6 +294,12 @@ bool format_mqtt_automation_command_topic(const MqttDeviceIdentity &identity,
 {
     return format_text(output, capacity, "rfbridge/%s/automation/%s/set", identity.mac_hex,
                        command_suffix(kind));
+}
+
+bool format_mqtt_hardware_command_topic(const MqttDeviceIdentity &identity, char *output,
+                                        std::size_t capacity)
+{
+    return format_text(output, capacity, "rfbridge/%s/radio/hardware/set", identity.mac_hex);
 }
 
 bool format_mqtt_entity_discovery_topic(const MqttDeviceIdentity &identity,
@@ -401,6 +412,11 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
                                                command_topic, sizeof(command_topic))) {
         return false;
     }
+    if (kind == MqttDiscoveryEntityKind::kHardwareSelect &&
+        (!format_mqtt_hardware_command_topic(identity, command_topic, sizeof(command_topic)) ||
+         !format_text(unique_id, sizeof(unique_id), "%s_radio_hardware", identity.device_id))) {
+        return false;
+    }
     BoundedWriter writer(output, capacity);
     if (requires_rule) {
         return writer.append("{\"name\":\"Rule ") && writer.append(rule_name) &&
@@ -425,6 +441,8 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
         name = "Automation enabled";
     } else if (kind == MqttDiscoveryEntityKind::kAutomationLogSelect) {
         name = "Automation log mode";
+    } else if (kind == MqttDiscoveryEntityKind::kHardwareSelect) {
+        name = "RF hardware";
     } else if (kind == MqttDiscoveryEntityKind::kRuleCountSensor) {
         name = "Automation rule count";
     } else if (kind == MqttDiscoveryEntityKind::kEventDropsSensor) {
@@ -466,8 +484,15 @@ bool format_mqtt_entity_discovery_payload(const MqttDeviceIdentity &identity,
         if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
             !writer.append(",\"value_template\":\"{{ value_json.log_mode }}\","
                            "\"command_topic\":") ||
+                           !writer.append_json_string(command_topic) ||
+                           !writer.append(",\"options\":[\"off\",\"actions\",\"verbose\"]")) {
+            return false;
+        }
+    } else if (kind == MqttDiscoveryEntityKind::kHardwareSelect) {
+        if (!writer.append(",\"state_topic\":") || !writer.append_json_string(state_topic) ||
+            !writer.append(",\"value_template\":\"{{ value_json.hardware }}\",\"command_topic\":") ||
             !writer.append_json_string(command_topic) ||
-            !writer.append(",\"options\":[\"off\",\"actions\",\"verbose\"]")) {
+            !writer.append(",\"options\":[\"cc1101\",\"generic\"]")) {
             return false;
         }
     } else if (kind == MqttDiscoveryEntityKind::kRuleCountSensor) {
@@ -593,6 +618,32 @@ bool parse_mqtt_automation_command(const MqttDeviceIdentity &identity,
         *kind = MqttAutomationCommandKind::kLogMode;
         *enabled = false;
         *log_mode = message.data_length == 3 ? 0 : (message.data[0] == 'a' ? 1 : 2);
+        return true;
+    }
+    return false;
+}
+
+bool parse_mqtt_hardware_command(const MqttDeviceIdentity &identity,
+                                 const MqttIncomingMessage &message, RfHardware *hardware)
+{
+    if (hardware == nullptr || message.topic == nullptr || message.data == nullptr ||
+        message.qos != 0 || message.retain || message.duplicate ||
+        message.current_data_offset != 0 || message.total_data_length != message.data_length ||
+        message.data_length == 0) {
+        return false;
+    }
+    char topic[kMqttTopicCapacity]{};
+    if (!format_mqtt_hardware_command_topic(identity, topic, sizeof(topic)) ||
+        message.topic_length != std::strlen(topic) ||
+        std::memcmp(message.topic, topic, message.topic_length) != 0) {
+        return false;
+    }
+    if (message.data_length == 6 && std::memcmp(message.data, "cc1101", 6) == 0) {
+        *hardware = RfHardware::kCc1101;
+        return true;
+    }
+    if (message.data_length == 7 && std::memcmp(message.data, "generic", 7) == 0) {
+        *hardware = RfHardware::kGeneric;
         return true;
     }
     return false;

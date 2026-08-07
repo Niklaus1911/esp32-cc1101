@@ -35,6 +35,8 @@ struct BoardGpioMap {
     int cs = -1;
     int gdo0 = -1;
     int gdo2 = -1;
+    int generic_tx = -1;
+    int generic_rx = -1;
 };
 
 struct BoardInfo {
@@ -57,6 +59,8 @@ struct BoardInfo {
 const BoardInfo *board_info(BoardProfile profile);
 bool board_profile_supports_combined_services(BoardProfile profile);
 bool board_cc1101_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &gpios);
+bool board_generic_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &cc1101,
+                                     int generic_tx, int generic_rx, int activity_led_gpio = -1);
 bool board_activity_led_gpio_is_valid(BoardProfile profile, int gpio,
                                       const int *unavailable_gpios,
                                       std::size_t unavailable_gpio_count);

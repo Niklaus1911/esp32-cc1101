@@ -434,6 +434,9 @@ void test_discovery_contract()
     require(rfbridge::format_mqtt_command_topic(identity, "gate", text, sizeof(text)) &&
                 std::strcmp(text, "rfbridge/102030a1b2c3/signal/gate/press") == 0,
             "button command topic is exact");
+    require(rfbridge::format_mqtt_hardware_command_topic(identity, text, sizeof(text)) &&
+                std::strcmp(text, "rfbridge/102030a1b2c3/radio/hardware/set") == 0,
+            "RF hardware command topic is exact");
     require(rfbridge::format_mqtt_discovery_payload(identity, "gate", board, "1.2.3", text,
                                                      sizeof(text)),
             "bounded discovery JSON formats");
@@ -445,7 +448,7 @@ void test_discovery_contract()
         "\"payload_available\":\"online\",\"payload_not_available\":\"offline\","
         "\"device\":{\"identifiers\":[\"rfbridge_102030a1b2c3\"],"
         "\"name\":\"RF Bridge A1B2C3\",\"manufacturer\":\"RF Bridge\","
-        "\"model\":\"ESP32 DevKit + CC1101\",\"hw_version\":\"esp32-devkit\","
+        "\"model\":\"ESP32 DevKit RF Bridge\",\"hw_version\":\"esp32-devkit\","
         "\"sw_version\":\"1.2.3\"}}";
     require(std::strcmp(text, expected) == 0, "discovery JSON contract is exact");
     require(rfbridge::format_mqtt_discovery_payload(identity, "gate", board, "a\"b\\c", text,
@@ -463,13 +466,13 @@ void test_discovery_contract()
         const char *model;
         const char *hardware;
     } boards[] = {
-        {rfbridge::BoardProfile::kEsp32Devkit, "ESP32 DevKit + CC1101", "esp32-devkit"},
+        {rfbridge::BoardProfile::kEsp32Devkit, "ESP32 DevKit RF Bridge", "esp32-devkit"},
         {rfbridge::BoardProfile::kEsp32s3DevkitcN16r8,
-         "ESP32-S3 DevKitC N16R8 + CC1101", "esp32s3-devkitc-n16r8"},
+         "ESP32-S3 DevKitC N16R8 RF Bridge", "esp32s3-devkitc-n16r8"},
         {rfbridge::BoardProfile::kXiaoEsp32s3,
-         "Seeed Studio XIAO ESP32-S3 + CC1101", "xiao-esp32s3"},
+         "Seeed Studio XIAO ESP32-S3 RF Bridge", "xiao-esp32s3"},
         {rfbridge::BoardProfile::kEsp32s3SuperminiFh4r2,
-         "ESP32-S3 SuperMini FH4R2 + CC1101", "esp32s3-supermini-fh4r2"},
+         "ESP32-S3 SuperMini FH4R2 RF Bridge", "esp32s3-supermini-fh4r2"},
     };
     for (const auto &expected_board : boards) {
         require(rfbridge::format_mqtt_discovery_payload(
@@ -533,6 +536,39 @@ void test_incoming_messages()
     message.topic_length = sizeof(embedded_nul_topic) - 1U;
     require(!rfbridge::parse_mqtt_button_command(identity, message, name),
             "commands with embedded topic NUL bytes are rejected");
+
+    constexpr char hardware_topic[] = "rfbridge/102030a1b2c3/radio/hardware/set";
+    message = {};
+    message.topic = hardware_topic;
+    message.topic_length = sizeof(hardware_topic) - 1U;
+    message.data = "generic";
+    message.data_length = 7;
+    message.total_data_length = message.data_length;
+    rfbridge::RfHardware hardware = rfbridge::RfHardware::kCc1101;
+    require(rfbridge::parse_mqtt_hardware_command(identity, message, &hardware) &&
+                hardware == rfbridge::RfHardware::kGeneric,
+            "exact generic RF hardware command is accepted");
+    message.data = "cc1101";
+    message.data_length = 6;
+    message.total_data_length = message.data_length;
+    require(rfbridge::parse_mqtt_hardware_command(identity, message, &hardware) &&
+                hardware == rfbridge::RfHardware::kCc1101,
+            "exact CC1101 RF hardware command is accepted");
+    constexpr char embedded_hardware[] = "cc1101\0junk";
+    message.data = embedded_hardware;
+    message.data_length = sizeof(embedded_hardware) - 1U;
+    message.total_data_length = message.data_length;
+    require(!rfbridge::parse_mqtt_hardware_command(identity, message, &hardware),
+            "RF hardware command rejects an embedded NUL suffix");
+    message.data = "GENERIC";
+    message.data_length = 7;
+    message.total_data_length = message.data_length;
+    require(!rfbridge::parse_mqtt_hardware_command(identity, message, &hardware),
+            "RF hardware command payload is case-sensitive");
+    message.data = "generic";
+    message.retain = true;
+    require(!rfbridge::parse_mqtt_hardware_command(identity, message, &hardware),
+            "retained RF hardware commands are rejected");
 
     constexpr char birth_topic[] = "homeassistant/status";
     constexpr char birth_payload[] = "online";
@@ -660,6 +696,22 @@ void test_system_discovery_and_telemetry()
                                               nullptr, text, sizeof(text)) &&
                 std::strcmp(text, "rfbridge/102030a1b2c3/state/system") == 0,
             "system state topic is stable");
+    require(rfbridge::format_mqtt_entity_discovery_topic(
+                identity, rfbridge::MqttDiscoveryEntityKind::kHardwareSelect, nullptr, text,
+                sizeof(text)) &&
+                std::strcmp(text,
+                            "homeassistant/select/rfbridge_102030a1b2c3/radio_hardware/config") == 0,
+            "RF hardware selector discovery topic is exact");
+    require(rfbridge::format_mqtt_entity_discovery_payload(
+                identity, rfbridge::MqttDiscoveryEntityKind::kHardwareSelect, nullptr, board,
+                "1.2.3", text, sizeof(text)) &&
+                std::strstr(text,
+                            "\"command_topic\":\"rfbridge/102030a1b2c3/radio/hardware/set\"") !=
+                    nullptr &&
+                std::strstr(text, "\"value_template\":\"{{ value_json.hardware }}\"") !=
+                    nullptr &&
+                std::strstr(text, "\"options\":[\"cc1101\",\"generic\"]") != nullptr,
+            "RF hardware selector discovery publishes exact state and command contracts");
 
     const struct {
         rfbridge::MqttDiscoveryEntityKind kind;
@@ -696,6 +748,7 @@ void test_system_discovery_and_telemetry()
     }
 
     rfbridge::MqttSystemTelemetry system{};
+    system.hardware = "generic";
     system.board_profile = board.profile_name;
     system.board_target = board.target_name;
     system.requested_services = "both";
@@ -709,7 +762,7 @@ void test_system_discovery_and_telemetry()
     require(rfbridge::format_mqtt_system_state_payload(system, text, sizeof(text)),
             "bounded system telemetry formats");
     constexpr char expected[] =
-        "{\"board\":{\"profile\":\"esp32s3-devkitc-n16r8\",\"target\":\"esp32s3\","
+        "{\"hardware\":\"generic\",\"board\":{\"profile\":\"esp32s3-devkitc-n16r8\",\"target\":\"esp32s3\","
         "\"flash_mib\":16,\"psram_mib\":8},\"services\":{\"requested\":\"both\","
         "\"effective\":\"both\",\"reboot_required\":false},\"uptime_s\":123,"
         "\"memory\":{\"internal\":{\"total\":332187,\"free\":53143,\"minimum\":51883,"

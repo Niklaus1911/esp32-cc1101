@@ -18,6 +18,8 @@ namespace {
 constexpr char kCodeNamespace[] = "rf_codes";
 constexpr char kRuleNamespace[] = "rf_rules";
 constexpr char kRuleMetaNamespace[] = "rf_rule_meta";
+constexpr char kHardwareNamespace[] = "rf_hw";
+constexpr char kHardwareKey[] = "selection";
 constexpr char kRuleEnabledKey[] = "enabled";
 constexpr char kRuleLogModeKey[] = "log_mode";
 constexpr TickType_t kMutexTimeout = pdMS_TO_TICKS(1000);
@@ -27,6 +29,7 @@ std::atomic<bool> s_initialization_started{false};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_rule_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_rule_meta_initialization_error{ESP_ERR_INVALID_STATE};
+std::atomic<esp_err_t> s_hardware_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<bool> s_rule_namespace_known_absent{false};
 
 class StorageLock {
@@ -182,6 +185,19 @@ esp_err_t map_rule_format_result(RfRuleFormatResult result)
     return ESP_ERR_INVALID_RESPONSE;
 }
 
+esp_err_t map_hardware_format_result(RfHardwareFormatResult result)
+{
+    switch (result) {
+        case RfHardwareFormatResult::kOk: return ESP_OK;
+        case RfHardwareFormatResult::kInvalidArgument: return ESP_ERR_INVALID_ARG;
+        case RfHardwareFormatResult::kInvalidVersion: return ESP_ERR_INVALID_VERSION;
+        case RfHardwareFormatResult::kInvalidCrc: return ESP_ERR_INVALID_CRC;
+        case RfHardwareFormatResult::kBufferTooSmall: return ESP_ERR_INVALID_SIZE;
+        case RfHardwareFormatResult::kInvalidRecord: return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_ERR_INVALID_RESPONSE;
+}
+
 esp_err_t load_signal_owned(const char *name, RfStoredSignal *signal)
 {
     NvsHandle handle;
@@ -269,6 +285,7 @@ esp_err_t initialize_rf_storage()
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_rule_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_rule_meta_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        s_hardware_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
 
@@ -276,6 +293,7 @@ esp_err_t initialize_rf_storage()
     esp_err_t code_error = nvs_error;
     esp_err_t rule_error = nvs_error;
     esp_err_t meta_error = nvs_error;
+    esp_err_t hardware_error = nvs_error;
     if (nvs_error == ESP_OK) {
         bool code_absent = false;
         code_error = initialize_namespace(kCodeNamespace, &code_absent);
@@ -284,10 +302,13 @@ esp_err_t initialize_rf_storage()
         s_rule_namespace_known_absent.store(rule_absent, std::memory_order_release);
         bool meta_absent = false;
         meta_error = initialize_namespace(kRuleMetaNamespace, &meta_absent);
+        bool hardware_absent = false;
+        hardware_error = initialize_namespace(kHardwareNamespace, &hardware_absent);
     }
 
     s_rule_initialization_error.store(rule_error, std::memory_order_release);
     s_rule_meta_initialization_error.store(meta_error, std::memory_order_release);
+    s_hardware_initialization_error.store(hardware_error, std::memory_order_release);
     s_initialization_error.store(code_error, std::memory_order_release);
     return code_error;
 }
@@ -469,6 +490,86 @@ esp_err_t rf_storage_forget(const char *name)
     if (erase_error != ESP_OK) {
         return map_not_found(erase_error);
     }
+    return nvs_commit(handle.get());
+}
+
+esp_err_t rf_storage_hardware_get(RfHardware *hardware, bool *persisted)
+{
+    if (hardware == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *hardware = RfHardware::kCc1101;
+    if (persisted != nullptr) {
+        *persisted = false;
+    }
+    const esp_err_t ready = s_hardware_initialization_error.load(std::memory_order_acquire);
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kHardwareNamespace, NVS_READONLY, &handle), "rf_storage", "open hardware");
+    std::size_t size = 0;
+    esp_err_t error = nvs_get_blob(handle.get(), kHardwareKey, nullptr, &size);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (error != ESP_OK || size > 32U) {
+        return error == ESP_OK ? ESP_ERR_INVALID_RESPONSE : error;
+    }
+    uint8_t record[32]{};
+    error = nvs_get_blob(handle.get(), kHardwareKey, record, &size);
+    if (error != ESP_OK) {
+        return error;
+    }
+    const esp_err_t decode_error = map_hardware_format_result(
+        decode_rf_hardware_record(record, size, hardware));
+    if (decode_error == ESP_OK && persisted != nullptr) {
+        *persisted = true;
+    }
+    return decode_error;
+}
+
+esp_err_t rf_storage_hardware_set(RfHardware hardware)
+{
+    const esp_err_t ready = s_hardware_initialization_error.load(std::memory_order_acquire);
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    uint8_t record[32]{};
+    std::size_t size = 0;
+    ESP_RETURN_ON_ERROR(map_hardware_format_result(
+                            encode_rf_hardware_record(hardware, record, sizeof(record), &size)),
+                        "rf_storage", "encode hardware");
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kHardwareNamespace, NVS_READWRITE, &handle), "rf_storage", "open hardware");
+    bool matches = false;
+    std::size_t existing_size = 0;
+    esp_err_t existing_error = nvs_get_blob(handle.get(), kHardwareKey, nullptr, &existing_size);
+    if (existing_error == ESP_OK && existing_size <= sizeof(record)) {
+        uint8_t existing_record[32]{};
+        existing_error = nvs_get_blob(handle.get(), kHardwareKey, existing_record, &existing_size);
+        if (existing_error == ESP_OK) {
+            RfHardware existing_hardware = RfHardware::kCc1101;
+            matches = decode_rf_hardware_record(existing_record, existing_size, &existing_hardware) ==
+                          RfHardwareFormatResult::kOk && existing_hardware == hardware;
+        }
+    }
+    if (existing_error != ESP_OK && existing_error != ESP_ERR_NVS_NOT_FOUND &&
+        existing_error != ESP_ERR_NVS_TYPE_MISMATCH) {
+        return existing_error;
+    }
+    if (matches) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kHardwareKey, record, size), "rf_storage", "set hardware");
     return nvs_commit(handle.get());
 }
 

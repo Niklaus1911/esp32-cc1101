@@ -41,6 +41,11 @@ struct RfAutomationRuleInfo {
     esp_err_t validation_error = ESP_OK;
 };
 
+enum class RfAutomationPauseReason : uint8_t {
+    kOtaMaintenance = 1U << 0U,
+    kHardwareSwitch = 1U << 1U,
+};
+
 esp_err_t initialize_rf_automation();
 esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_name, uint8_t repeats);
 esp_err_t rf_automation_remove_rule(const char *trigger_name);
@@ -48,7 +53,7 @@ esp_err_t rf_automation_list_rules(RfStorageRuleEntry *rules, std::size_t capaci
 esp_err_t rf_automation_list_rule_info(RfAutomationRuleInfo *rules, std::size_t capacity, std::size_t *count);
 esp_err_t rf_automation_set_enabled(bool enabled);
 esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode);
-esp_err_t rf_automation_set_runtime_paused(bool paused);
+esp_err_t rf_automation_set_runtime_paused(RfAutomationPauseReason reason, bool paused);
 esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context);
 esp_err_t rf_automation_get_status(RfAutomationStatus *status);
 void rf_automation_on_frame(const RfFrame &frame);

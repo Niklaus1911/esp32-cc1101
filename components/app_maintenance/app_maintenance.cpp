@@ -32,7 +32,8 @@ esp_err_t begin_ota_maintenance()
     }
     s_network_acquired.store(error == ESP_OK, std::memory_order_release);
     if (error == ESP_OK) {
-        error = rf_automation_set_runtime_paused(true);
+        error = rf_automation_set_runtime_paused(
+            RfAutomationPauseReason::kOtaMaintenance, true);
         s_automation_acquired.store(error == ESP_OK, std::memory_order_release);
     }
     if (error == ESP_OK) {
@@ -61,7 +62,8 @@ esp_err_t end_ota_maintenance()
         }
     }
     if (s_automation_acquired.load(std::memory_order_acquire)) {
-        const esp_err_t error = rf_automation_set_runtime_paused(false);
+        const esp_err_t error = rf_automation_set_runtime_paused(
+            RfAutomationPauseReason::kOtaMaintenance, false);
         if (error == ESP_OK) {
             s_automation_acquired.store(false, std::memory_order_release);
         } else if (first_error == ESP_OK) {

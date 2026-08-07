@@ -13,12 +13,13 @@ constexpr BoardInfo kBoards[] = {
         .console = ConsoleTransport::kUart0,
         .partition_layout = PartitionLayout::kFlash4Mb,
         .profile_name = "esp32-devkit",
-        .model_name = "ESP32 DevKit + CC1101",
+        .model_name = "ESP32 DevKit RF Bridge",
         .target_name = "esp32",
         .flash_mib = 4,
         .psram_mib = 0,
         .combined_services = false,
-        .cc1101 = {.sclk = 18, .miso = 19, .mosi = 23, .cs = 27, .gdo0 = 26, .gdo2 = 25},
+        .cc1101 = {.sclk = 18, .miso = 19, .mosi = 23, .cs = 27, .gdo0 = 26, .gdo2 = 25,
+                   .generic_tx = 32, .generic_rx = 33},
         .activity_led_enabled = true,
         .activity_led_gpio = 2,
         .activity_led_active_high = true,
@@ -29,12 +30,13 @@ constexpr BoardInfo kBoards[] = {
         .console = ConsoleTransport::kUart0,
         .partition_layout = PartitionLayout::kFlash16Mb,
         .profile_name = "esp32s3-devkitc-n16r8",
-        .model_name = "ESP32-S3 DevKitC N16R8 + CC1101",
+        .model_name = "ESP32-S3 DevKitC N16R8 RF Bridge",
         .target_name = "esp32s3",
         .flash_mib = 16,
         .psram_mib = 8,
         .combined_services = true,
-        .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5},
+        .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5,
+                   .generic_tx = 6, .generic_rx = 7},
         .activity_led_enabled = false,
         .activity_led_gpio = -1,
         .activity_led_active_high = true,
@@ -45,12 +47,13 @@ constexpr BoardInfo kBoards[] = {
         .console = ConsoleTransport::kUsbSerialJtag,
         .partition_layout = PartitionLayout::kFlash8Mb,
         .profile_name = "xiao-esp32s3",
-        .model_name = "Seeed Studio XIAO ESP32-S3 + CC1101",
+        .model_name = "Seeed Studio XIAO ESP32-S3 RF Bridge",
         .target_name = "esp32s3",
         .flash_mib = 8,
         .psram_mib = 8,
         .combined_services = true,
-        .cc1101 = {.sclk = 7, .miso = 8, .mosi = 9, .cs = 4, .gdo0 = 2, .gdo2 = 1},
+        .cc1101 = {.sclk = 7, .miso = 8, .mosi = 9, .cs = 4, .gdo0 = 2, .gdo2 = 1,
+                   .generic_tx = 5, .generic_rx = 6},
         .activity_led_enabled = true,
         .activity_led_gpio = 21,
         .activity_led_active_high = false,
@@ -61,12 +64,13 @@ constexpr BoardInfo kBoards[] = {
         .console = ConsoleTransport::kUsbSerialJtag,
         .partition_layout = PartitionLayout::kFlash4Mb,
         .profile_name = "esp32s3-supermini-fh4r2",
-        .model_name = "ESP32-S3 SuperMini FH4R2 + CC1101",
+        .model_name = "ESP32-S3 SuperMini FH4R2 RF Bridge",
         .target_name = "esp32s3",
         .flash_mib = 4,
         .psram_mib = 2,
         .combined_services = true,
-        .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5},
+        .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5,
+                   .generic_tx = 6, .generic_rx = 7},
         .activity_led_enabled = false,
         .activity_led_gpio = -1,
         .activity_led_active_high = true,
@@ -164,6 +168,25 @@ bool board_cc1101_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &gp
             if (pins[left] == pins[right]) {
                 return false;
             }
+        }
+    }
+    return true;
+}
+
+bool board_generic_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &cc1101,
+                                     int generic_tx, int generic_rx, int activity_led_gpio)
+{
+    if (!board_cc1101_gpio_map_is_valid(profile, cc1101) ||
+        !gpio_is_valid_for_role(profile, generic_tx, true) ||
+        !gpio_is_valid_for_role(profile, generic_rx, false) || generic_tx == generic_rx ||
+        generic_tx == activity_led_gpio || generic_rx == activity_led_gpio) {
+        return false;
+    }
+    const int cc_pins[] = {cc1101.sclk, cc1101.miso, cc1101.mosi, cc1101.cs,
+                           cc1101.gdo0, cc1101.gdo2};
+    for (const int pin : cc_pins) {
+        if (pin == generic_tx || pin == generic_rx) {
+            return false;
         }
     }
     return true;

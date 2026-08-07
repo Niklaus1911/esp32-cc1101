@@ -260,7 +260,13 @@ bool format_mqtt_system_state_payload(const MqttSystemTelemetry &system, char *o
         return false;
     }
     BoundedWriter writer(output, capacity);
-    if (!writer.append("{\"board\":{\"profile\":") ||
+    if (system.hardware != nullptr &&
+        (!writer.append("{\"hardware\":") || !writer.append_json_string(system.hardware) ||
+         !writer.append(","))) {
+        return false;
+    }
+    if (!writer.append(system.hardware == nullptr ? "{\"board\":{\"profile\":"
+                                                   : "\"board\":{\"profile\":") ||
         !writer.append_json_string(system.board_profile) ||
         !writer.append(",\"target\":") || !writer.append_json_string(system.board_target) ||
         !writer.append_format(",\"flash_mib\":%u,\"psram_mib\":%u},\"services\":{\"requested\":",

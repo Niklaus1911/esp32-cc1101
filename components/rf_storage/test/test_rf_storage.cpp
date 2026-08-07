@@ -227,6 +227,77 @@ TEST_CASE("RF storage decoder rejects malformed raw and trailing data", "[rf_sto
                       static_cast<int>(rfbridge::decode_rf_storage_record(record, size - 1U, &loaded)));
 }
 
+TEST_CASE("RF hardware selection record is versioned and CRC protected", "[rf_storage]")
+{
+    uint8_t record[32]{};
+    std::size_t size = 0;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kOk),
+                      static_cast<int>(rfbridge::encode_rf_hardware_record(
+                          rfbridge::RfHardware::kGeneric, record, sizeof(record), &size)));
+    TEST_ASSERT_EQUAL_UINT32(13, size);
+    rfbridge::RfHardware loaded = rfbridge::RfHardware::kCc1101;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kOk),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size, &loaded)));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardware::kGeneric),
+                      static_cast<int>(loaded));
+
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size - 1U, &loaded)));
+    record[4] += 1U;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kInvalidVersion),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size, &loaded)));
+    record[4] -= 1U;
+    record[8] = 2;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size, &loaded)));
+    record[8] = static_cast<uint8_t>(rfbridge::RfHardware::kGeneric);
+    record[5] = 2;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kInvalidRecord),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size, &loaded)));
+    record[5] = 1;
+    rewrite_crc(record, size);
+    record[size - 1U] ^= 1U;
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardwareFormatResult::kInvalidCrc),
+                      static_cast<int>(rfbridge::decode_rf_hardware_record(
+                          record, size, &loaded)));
+}
+
+TEST_CASE("RF hardware selection persists independently in NVS", "[rf_storage][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+    rfbridge::RfHardware previous = rfbridge::RfHardware::kCc1101;
+    bool previous_persisted = false;
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      rfbridge::rf_storage_hardware_get(&previous, &previous_persisted));
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      rfbridge::rf_storage_hardware_set(rfbridge::RfHardware::kGeneric));
+    rfbridge::RfHardware loaded = rfbridge::RfHardware::kCc1101;
+    bool persisted = false;
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_hardware_get(&loaded, &persisted));
+    TEST_ASSERT_TRUE(persisted);
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardware::kGeneric),
+                      static_cast<int>(loaded));
+
+    if (previous_persisted) {
+        TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_hardware_set(previous));
+    } else {
+        nvs_handle_t handle = 0;
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_hw", NVS_READWRITE, &handle));
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_erase_key(handle, "selection"));
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+        nvs_close(handle);
+    }
+}
+
 TEST_CASE("RF storage NVS backend is create only and forgets one key", "[rf_storage][nvs]")
 {
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());

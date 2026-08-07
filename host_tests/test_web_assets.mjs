@@ -56,6 +56,7 @@ for (const route of [
   '"/api/rules", HTTP_POST, add_rule_handler',
   '"/api/rules", HTTP_DELETE, remove_rule_handler',
   '"/api/rules", HTTP_PATCH, patch_rule_handler',
+  '"/api/radio/hardware", HTTP_POST, hardware_handler',
 ]) assert(api.includes(route), `missing Web route: ${route}`);
 
 assert(source.includes("register_ota_http_handlers"), "OTA must share the Web server");
@@ -78,6 +79,18 @@ assert(index.includes('rel="icon" href="data:,"'), "embedded favicon contract mi
 assert(api.includes("img-src 'self' data:"), "favicon CSP contract missing");
 assert(index.includes("Replay"), "Replay control missing");
 assert(index.includes("Install and reboot"), "OTA control missing");
+assert(index.includes('id="radio-hardware"') && index.includes('id="apply-radio-hardware"') &&
+       js.includes('requestAction("/api/radio/hardware","POST"'),
+       "explicit Web RF hardware selector contract missing");
+const hardwareRenderer = sourceSection(js, "function renderRadioHardware(",
+                                       "function formatState(", "RF hardware renderer");
+assert(hardwareRenderer.includes('["cc1101","generic"].includes') &&
+       hardwareRenderer.includes("select.disabled=state.busy||!supported") &&
+       hardwareRenderer.includes("apply.disabled=state.busy||!supported||!state.radioDirty") &&
+       hardwareRenderer.includes("Backend selection unavailable on this firmware") &&
+       hardwareRenderer.includes("hardware_switch_error") &&
+       hardwareRenderer.includes("hardware_switches"),
+       "RF hardware compatibility, feedback, or diagnostics renderer missing");
 assert(js.includes("/api/live") && js.includes("schedulePoll"), "live polling missing");
 const liveApi = sourceSection(api, "esp_err_t live_handler(", "esp_err_t signals_handler(",
                               "live API");
@@ -94,7 +107,8 @@ const systemApi = sourceSection(liveApi, '"\\"system\\":{',
 const errorsApi = sourceSection(liveApi, '"\\"errors\\":{',
                                 "if (error != ESP_OK)", "live errors");
 assertFields(radioApi, [
-  "available", "running", "rx", "transmitting", "maintenance", "accepted", "duplicates",
+  "available", "running", "hardware", "hardware_switch_error", "hardware_switches", "rx",
+  "transmitting", "maintenance", "accepted", "duplicates",
   "queue_drops", "timeouts", "truncated", "frequency_hz", "tx_power_dbm", "cc1101", "error",
   "part", "version", "marc_state", "rssi_dbm_x2", "carrier_sense", "clear_channel", "resets",
   "recoveries", "ready_timeouts", "state_timeouts",
@@ -127,7 +141,7 @@ assertFields(mdnsApi, [
 assertFields(boardApi, [
   "profile", "model", "target", "flash_mib", "psram_mib", "console", "combined_services",
   "activity_led_enabled", "activity_led_gpio", "activity_led_active_high", "cc1101", "sclk",
-  "miso", "mosi", "cs", "gdo0_tx", "gdo2_rx",
+  "miso", "mosi", "cs", "gdo0_tx", "gdo2_rx", "generic", "tx", "rx",
 ], "live board");
 assertFields(systemApi, [
   "uptime_ms", "reset_reason", "heap_free", "heap_minimum", "heap_largest",
@@ -250,6 +264,10 @@ assert(compactSystemRenderer.includes(
        /deferred\?`Deferred \/ \$\{chip\.error\}`/.test(systemRenderer) &&
        /!chip\|\|\w+\?"warn"/.test(systemRenderer),
        "busy CC1101 status deferral must remain warning-classified and retain its error");
+assert(compactSystemRenderer.includes(`H(${radioBinding}.hardware_switch_error)`) &&
+       compactSystemRenderer.includes("Hardware switch error:hardware_switch_error") &&
+       compactSystemRenderer.includes("Hardware switches:hardware_switches"),
+       "RF health and diagnostics must expose hardware switch failures");
 const bindingNames = new Map([
   [radioBinding, "radio"], [learningBinding, "learn"], [automationBinding, "auto"],
   [networkBinding, "wifi"], [mdnsBinding, "mdns"],
@@ -283,6 +301,13 @@ assert(css.includes(".system-runtime-grid { grid-template-columns: repeat(3, min
 assert(!js.includes('byId("runtime-details")'), "stale runtime details renderer remains");
 assert(js.includes("document.hidden"), "visibility-aware polling missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
+assert(liveRenderer.includes("const incomingRadio=live.radio||{}") &&
+       liveRenderer.includes("renderRadioHardware(incomingRadio)"),
+       "old live snapshots must route missing hardware through the compatibility renderer");
+assert(js.includes("state.radioDirty=false") &&
+       js.includes("renderRadioHardware(state.live?.radio)") &&
+       js.includes("RF hardware switch failed; active backend restored"),
+       "failed hardware switches must resynchronize the selector and report rollback");
 assert(js.includes("otaRebooting"), "OTA reconnect state missing");
 assert(js.includes("XMLHttpRequest"), "OTA progress upload missing");
 assert(js.includes('"rfbridge.observed-activity.v1"'), "versioned activity storage key missing");
@@ -346,7 +371,7 @@ for (const forbidden of [
          `forbidden or stale Web contract remains: ${forbidden}`);
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
-  const maximumSize = name === "app.js" ? 32 * 1024 : 20000;
+  const maximumSize = name === "app.js" ? 34 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

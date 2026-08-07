@@ -31,6 +31,16 @@ TEST_CASE("responsive Web forms accept only exact bounded fields", "[web_ui]")
     TEST_ASSERT_TRUE(
         rfbridge::parse_web_raw_form(raw_body, sizeof(raw_body) - 1U, &raw));
     TEST_ASSERT_EQUAL_size_t(8, raw.count);
+
+    rfbridge::WebHardwareForm hardware{};
+    constexpr char generic_body[] = "hardware=generic";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_hardware_form(
+        generic_body, sizeof(generic_body) - 1U, &hardware));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfHardware::kGeneric),
+                      static_cast<int>(hardware.hardware));
+    constexpr char embedded_nul_body[] = "hardware=cc1101\0junk";
+    TEST_ASSERT_FALSE(rfbridge::parse_web_hardware_form(
+        embedded_nul_body, sizeof(embedded_nul_body) - 1U, &hardware));
 }
 
 TEST_CASE("responsive Web origin and escaping contracts are bounded", "[web_ui]")

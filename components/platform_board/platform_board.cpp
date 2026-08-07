@@ -91,6 +91,11 @@ const BoardInfo &current_board_info()
             .gdo0 = CONFIG_CC1101_GDO0_GPIO,
             .gdo2 = CONFIG_CC1101_GDO2_GPIO,
         };
+        const BoardInfo *profile = board_info(kConfiguredProfile);
+        if (profile != nullptr) {
+            value.cc1101.generic_tx = profile->cc1101.generic_tx;
+            value.cc1101.generic_rx = profile->cc1101.generic_rx;
+        }
 #if defined(CONFIG_RF_ACTIVITY_LED_ENABLE)
         value.activity_led_enabled = true;
         value.activity_led_gpio = CONFIG_RF_ACTIVITY_LED_GPIO;

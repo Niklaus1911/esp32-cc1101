@@ -360,13 +360,16 @@ esp_err_t live_handler(httpd_req_t *request)
                                           : (radio.receive_active ? "active" : "recovering"));
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "{\"radio\":{\"available\":%s,\"running\":%s,\"rx\":\"%s\","
+            "{\"radio\":{\"available\":%s,\"running\":%s,\"hardware\":\"%s\","
+            "\"hardware_switch_error\":\"%s\",\"hardware_switches\":%lu,\"rx\":\"%s\","
             "\"transmitting\":%s,\"maintenance\":%s,\"accepted\":%lu,"
             "\"duplicates\":%lu,\"queue_drops\":%lu,\"timeouts\":%lu,"
             "\"truncated\":%lu,\"frequency_hz\":%lu,\"tx_power_dbm\":%d,"
             "\"cc1101\":{\"available\":%s,\"error\":\"%s\"",
             radio_error == ESP_OK ? "true" : "false",
-            radio_error == ESP_OK && radio.running ? "true" : "false", rx_state,
+            radio_error == ESP_OK && radio.running ? "true" : "false",
+            rf_hardware_name(radio.hardware), esp_err_to_name(radio.hardware_switch_error),
+            static_cast<unsigned long>(radio.hardware_switches), rx_state,
             radio.transmitting ? "true" : "false", radio.maintenance_active ? "true" : "false",
             static_cast<unsigned long>(radio.accepted_frames),
             static_cast<unsigned long>(radio.suppressed_duplicates),
@@ -551,7 +554,8 @@ esp_err_t live_handler(httpd_req_t *request)
             "\"psram_mib\":%u,\"console\":\"%s\",\"combined_services\":%s,"
             "\"activity_led_enabled\":%s,\"activity_led_gpio\":%d,"
             "\"activity_led_active_high\":%s,\"cc1101\":{\"sclk\":%d,\"miso\":%d,"
-            "\"mosi\":%d,\"cs\":%d,\"gdo0_tx\":%d,\"gdo2_rx\":%d}},",
+            "\"mosi\":%d,\"cs\":%d,\"gdo0_tx\":%d,\"gdo2_rx\":%d},"
+            "\"generic\":{\"tx\":%d,\"rx\":%d}},",
             board.profile_name, board.model_name, board.target_name, board.flash_mib,
             board.psram_mib,
             console_transport_name(board.console),
@@ -559,7 +563,7 @@ esp_err_t live_handler(httpd_req_t *request)
             board.activity_led_enabled ? "true" : "false", board.activity_led_gpio,
             board.activity_led_active_high ? "true" : "false", board.cc1101.sclk,
             board.cc1101.miso, board.cc1101.mosi, board.cc1101.cs, board.cc1101.gdo0,
-            board.cc1101.gdo2);
+            board.cc1101.gdo2, board.cc1101.generic_tx, board.cc1101.generic_rx);
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     if (error == ESP_OK) {
@@ -905,6 +909,23 @@ esp_err_t patch_rule_handler(httpd_req_t *request)
     return send_operation_result(request, error);
 }
 
+esp_err_t hardware_handler(httpd_req_t *request)
+{
+    std::unique_ptr<char[]> body;
+    std::size_t length = 0;
+    esp_err_t error = receive_action_form(request, &body, &length);
+    if (error != ESP_OK) {
+        return error;
+    }
+    WebHardwareForm form{};
+    if (!parse_web_hardware_form(body.get(), length, &form)) {
+        return send_api_error(request, "400 Bad Request", "invalid_hardware_request",
+                              ESP_ERR_INVALID_ARG);
+    }
+    return send_operation_result(
+        request, bridge_control_set_rf_hardware(form.hardware, BridgeEventSource::kWeb));
+}
+
 esp_err_t register_handler(httpd_handle_t server, const char *uri, httpd_method_t method,
                            esp_err_t (*handler)(httpd_req_t *), void *context = nullptr)
 {
@@ -970,6 +991,7 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/api/rules", HTTP_POST, add_rule_handler, nullptr},
         {"/api/rules", HTTP_DELETE, remove_rule_handler, nullptr},
         {"/api/rules", HTTP_PATCH, patch_rule_handler, nullptr},
+        {"/api/radio/hardware", HTTP_POST, hardware_handler, nullptr},
     };
     for (const Route &route : routes) {
         const esp_err_t error = register_handler(server, route.uri, route.method, route.handler,

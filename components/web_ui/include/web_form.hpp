@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "rf_storage_format.hpp"
+
 namespace rfbridge {
 
 constexpr std::size_t kWebMaxRawPulses = 256;
@@ -55,6 +57,10 @@ struct WebRulePatchForm {
     char log_mode[8]{};
 };
 
+struct WebHardwareForm {
+    RfHardware hardware = RfHardware::kCc1101;
+};
+
 bool parse_web_learn_form(const char *body, std::size_t length, char *name,
                           std::size_t name_capacity);
 bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *output);
@@ -65,6 +71,7 @@ bool parse_web_raw_form(const char *body, std::size_t length, WebRawForm *output
 bool parse_web_rule_add_form(const char *body, std::size_t length, WebRuleAddForm *output);
 bool parse_web_rule_remove_form(const char *body, std::size_t length, WebRuleRemoveForm *output);
 bool parse_web_rule_patch_form(const char *body, std::size_t length, WebRulePatchForm *output);
+bool parse_web_hardware_form(const char *body, std::size_t length, WebHardwareForm *output);
 bool web_form_content_type_is_valid(const char *content_type);
 bool web_octet_stream_content_type_is_valid(const char *content_type);
 bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_port);

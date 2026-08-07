@@ -1,11 +1,12 @@
-# Native ESP32 + CC1101 433 MHz RF Tool
+# Native ESP32 433 MHz RF Tool
 
-Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals with four board-specific images: a classic ESP32 DevKit, an ESP32-S3 N16R8 DevKitC-compatible board, a Seeed Studio XIAO ESP32-S3, and an ESP32-S3FH4R2 SuperMini.
+Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals through either a CC1101 or direct-data generic transmitter/receiver pair such as STX882/SRX882. Four board-specific images support a classic ESP32 DevKit, an ESP32-S3 N16R8 DevKitC-compatible board, a Seeed Studio XIAO ESP32-S3, and an ESP32-S3FH4R2 SuperMini.
 
 It provides:
 
 - All 12 current `rc-switch` protocol definitions and compatible protocol numbering.
 - Hardware-timed ESP32 RMT capture and transmission—no Arduino layer or GPIO bit-banging.
+- Live, persistent selection of exactly one RF backend through Web, MQTT/Home Assistant, or UART.
 - Stable complete-frame decoding with repeated-frame consensus and ambiguity rejection.
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
@@ -14,7 +15,7 @@ It provides:
 
 ## Hardware
 
-The pictured “CC1101 V2.0” module is a generic board; its connector order is not standardized. Wire by the module's **printed signal names**, not by physical header position.
+CC1101 and low-cost ASK/OOK module connector orders are not standardized. Wire by each module's **printed signal names**, not by physical header position.
 
 The firmware is one codebase with four explicit profiles. Flash the image matching the physical board; images are not interchangeable.
 
@@ -88,11 +89,41 @@ Recommended hardware details:
 - Attach the 433 MHz SMA antenna **before transmitting**.
 - Never power or drive the CC1101 at 5 V. Avoid powering one board while the other is unpowered.
 
+### Generic ASK/OOK wiring
+
+Generic mode is for direct digital DATA modules: one 433 MHz ASK/OOK transmitter such as STX882 and one receiver such as SRX882/SRX882S. It does not use SPI. The GPIOs are fixed per board profile so the CC1101 and generic modules may remain wired at the same time without sharing pins:
+
+| Profile | Generic TX DATA | Generic RX DATA |
+|---|---:|---:|
+| `esp32-devkit` | GPIO32 | GPIO33 |
+| `esp32s3-devkitc-n16r8` | GPIO6 | GPIO7 |
+| `xiao-esp32s3` | D4 / GPIO5 | D5 / GPIO6 |
+| `esp32s3-supermini-fh4r2` | GPIO6 | GPIO7 |
+
+Wire an STX882/SRX882 pair as follows. Use the equivalent labels on another direct-data ASK/OOK pair:
+
+| Module signal | ESP32 connection | Direction / purpose |
+|---|---|---|
+| STX882 `VCC` | `3V3` | 3.3 V supply |
+| STX882 `GND` | `GND` | Common ground |
+| STX882 `DATA` | Profile's Generic TX DATA GPIO | ESP32 RMT output to transmitter |
+| SRX882 `VCC` | `3V3` | 3.3 V supply |
+| SRX882 `GND` | `GND` | Common ground; connect every GND pin provided |
+| SRX882 `DATA` | Profile's Generic RX DATA GPIO | Receiver output to ESP32 RMT input |
+| SRX882 `CS` / `EN` | `3V3` | Strap active-high for normal operation; do not leave floating |
+| Each module `ANT` | Correct 433 MHz antenna | Use the module vendor's antenna connection |
+
+The original NiceRF [STX882 datasheet](https://www.nicerf.com/pdf/stx882-100mw-high-power-ask-transmitter-module-v2.1.pdf) specifies a 1.2–6 V supply and DATA-low sleep, while the [SRX882S datasheet](https://www.nicerf.com/pdf/srx882s-micropower-superheterodyne-receiver-module-v1.0.pdf) specifies 2.0–5.5 V and active-high `CS`. Powering both at 3.3 V therefore keeps their DATA levels directly compatible with ESP32 GPIO. Clone pinouts and electrical limits vary: check the exact module datasheet. If a receiver is powered at 5 V, its DATA output must pass through a proper 5 V-to-3.3 V level shifter or divider before the ESP32. If a 5 V transmitter does not accept a 3.3 V high level, level-shift TX DATA as well. Never apply more than 3.3 V to an ESP32 GPIO.
+
+Place 100 nF ceramic plus 4.7–10 µF bulk capacitance close to each module, keep DATA wiring short, and attach the correct antenna before transmitting. A straight quarter-wave wire for 433.92 MHz is approximately 17.3 cm, but follow the module vendor's antenna/layout guidance. The firmware does not control generic `CS`/`EN`; strap it to its documented active level. Modules without `CS`/`EN` need no extra connection.
+
+Only one backend runs at a time. In CC1101 mode, the generic TX DATA pin is held low. In generic mode, the CC1101 is placed idle and its SPI driver is released; the generic RX DATA pin has an explicit internal pull-down before RMT capture so an absent or tri-stated receiver cannot float. RMT is bound only to the active backend, and RX remains half-duplex with TX. The generic TX DATA pin is driven low again after RMT teardown, including failed or timed-out transmission cleanup. The default is `cc1101`; a successfully applied choice persists in a versioned, CRC-protected NVS record.
+
 ### RF activity LED
 
 By default, GPIO2 blinks active-high three times during application startup, using 25 ms pulses separated by 150 ms inactive gaps. It then pulses for 25 ms whenever a decoded or raw frame is accepted. RF activity received before the startup sequence completes is coalesced into one normal pulse after the final inactive gap. Many DOIT/clone ESP32 DevKit V1 boards connect a blue LED to GPIO2. The official Espressif ESP32-DevKitC V4 does not: its onboard red LED is a non-programmable 5 V power indicator. On that board, disable the feature or connect an external active-high LED as `GPIO2 -> 220-1000 ohm resistor -> LED anode`, with the LED cathode connected to GND.
 
-GPIO2 is a boot-strapping pin. The firmware does not configure it until application startup, so the three-blink indication does not run during ROM or bootloader execution and external circuitry must not force an incompatible level while the ESP32 resets. `RF_ACTIVITY_LED_ENABLE`, `RF_ACTIVITY_LED_GPIO`, `RF_ACTIVITY_LED_ACTIVE_HIGH`, and `RF_ACTIVITY_LED_PULSE_MS` configure both startup and RF activity pulses. GPIO0, GPIO5, GPIO12, and GPIO15 are rejected because external LED wiring on those strapping pins can prevent boot or select an unsafe flash voltage. The selected output must not overlap UART0, flash/PSRAM, or any configured CC1101 pin. An invalid software configuration is nonfatal and never prevents RF reception.
+GPIO2 is a boot-strapping pin. The firmware does not configure it until application startup, so the three-blink indication does not run during ROM or bootloader execution and external circuitry must not force an incompatible level while the ESP32 resets. `RF_ACTIVITY_LED_ENABLE`, `RF_ACTIVITY_LED_GPIO`, `RF_ACTIVITY_LED_ACTIVE_HIGH`, and `RF_ACTIVITY_LED_PULSE_MS` configure both startup and RF activity pulses. GPIO0, GPIO5, GPIO12, and GPIO15 are rejected because external LED wiring on those strapping pins can prevent boot or select an unsafe flash voltage. The selected output must not overlap UART0, flash/PSRAM, any configured CC1101 pin, or either generic RF DATA pin. An invalid software configuration is nonfatal and never prevents RF reception.
 
 ## Build
 
@@ -186,6 +217,20 @@ console style pretty
 
 If terminal probing falls back to dumb mode, history and cursor editing remain disabled as in the ESP-IDF fallback. Asynchronous output starts on a fresh line and the prompt plus the unmasked input collected so far is printed again without ANSI cursor sequences; the earlier partial line cannot be erased on such a terminal.
 
+### Select the RF backend
+
+The initial and fallback selection is CC1101. Inspect or change it from the serial console with:
+
+```text
+radio hardware
+radio hardware cc1101
+radio hardware generic
+```
+
+A change is applied live; no reboot is required. The switch pauses automation, invalidates frames and actions queued before the switch, stops and idles the old backend, initializes the requested backend, restores receive, and only then commits the choice to NVS. If activation or persistence fails, the firmware attempts to restore the previous backend and reports the error. Reapplying the active choice does not rewrite an already-valid matching NVS record; it repairs a missing, corrupt, invalid-version, or mismatched record without restarting RF. Start, stop, maintenance, and hardware switching are serialized, and requests that overlap a transition are rejected.
+
+The same operation is available in the Web UI under **System > RF hardware** using the two-option selector and explicit **Apply** button. MQTT creates a Home Assistant **RF hardware** select entity with `cc1101` and `generic` options. All three interfaces call the same switching transaction, and concurrent switch requests are rejected rather than overlapping.
+
 ### Wi-Fi
 
 Wi-Fi is optional and uses station mode with DHCP. With no saved network, the Wi-Fi driver remains off. Configure it from UART:
@@ -229,7 +274,7 @@ The persisted service mask is selected at boot and is never changed implicitly b
 
 - `web` is the default. It starts the HTTP UI/API, mDNS, and LAN OTA.
 - `mqtt` starts native Home Assistant MQTT Discovery without HTTP, Web UI, mDNS, or HTTP OTA.
-- `both` starts Web and MQTT independently. It is supported only by the two S3 profiles; classic ESP32 rejects the command before changing NVS.
+- `both` starts Web and MQTT independently. It is supported by all three S3 profiles; classic ESP32 rejects the command before changing NVS.
 
 Wi-Fi station mode, RF receive/transmit, learned storage, automation, and UART remain available in every mode. In `both`, a Web failure does not stop MQTT and an MQTT failure does not stop Web. MQTT allocation or activation failure in MQTT-only mode still brings up Web for that boot. A persisted `both` record imported on classic falls back to Web for that boot without rewriting the record. Inspect requested, boot, and effective masks, independent Web/MQTT errors, reboot requirement, fallback/retirement state, connection state, outbox use, internal heap, PSRAM, and MQTT/worker stack margins with:
 
@@ -256,7 +301,9 @@ Each committed learned signal becomes one Home Assistant MQTT button. Discovery 
 
 ```text
 homeassistant/button/rfbridge_<12hex>/<signal>/config
+homeassistant/select/rfbridge_<12hex>/radio_hardware/config
 rfbridge/<12hex>/signal/<signal>/press
+rfbridge/<12hex>/radio/hardware/set
 rfbridge/<12hex>/availability
 homeassistant/status
 ```
@@ -270,6 +317,7 @@ user rfbridge_<12hex>
 topic read homeassistant/status
 topic read rfbridge/<12hex>/signal/+/press
 topic read rfbridge/<12hex>/automation/+/set
+topic read rfbridge/<12hex>/radio/hardware/set
 topic write rfbridge/<12hex>/availability
 topic write rfbridge/<12hex>/event/#
 topic write rfbridge/<12hex>/state/#
@@ -292,13 +340,14 @@ rfbridge/<12hex>/state/rule/<trigger>
 rfbridge/<12hex>/state/system
 rfbridge/<12hex>/automation/enabled/set
 rfbridge/<12hex>/automation/log_mode/set
+rfbridge/<12hex>/radio/hardware/set
 ```
 
 `event/rx` and `event/automation` are non-retained QoS 0 JSON event messages. They contain sequence numbers, bounded decoded metadata or raw pulse counts, matching information, rule/action names, and result counters; complete raw pulse arrays are never sent. Home Assistant Event entities expose these messages for automations, and Home Assistant Recorder is the durable event history. `state/automation`, `state/last_rx`, `state/last_automation`, `state/system`, and each `state/rule/<trigger>` snapshot are retained QoS 1 so the latest configuration, counters, and result are available after a bridge or broker restart. Broker persistence must be enabled if retained snapshots must survive a broker restart.
 
-`state/system` contains the board profile, target, flash and PSRAM sizes; requested/effective services and reboot requirement; uptime; and total, free, minimum-free, and largest-block values for internal RAM and PSRAM. It is republished during connection reconciliation, Home Assistant birth recovery, OTA-maintenance recovery, and the 60-second audit.
+`state/system` contains the active RF hardware; board profile, target, flash and PSRAM sizes; requested/effective services and reboot requirement; uptime; and total, free, minimum-free, and largest-block values for internal RAM and PSRAM. It is republished after a hardware switch, during connection reconciliation, Home Assistant birth recovery, OTA-maintenance recovery, and the 60-second audit.
 
-Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. Four `data_size` diagnostic sensors use `state/system`: internal free, internal minimum free, largest internal block, and PSRAM free. The first three exist on every board; PSRAM free is advertised only on PSRAM-equipped S3 profiles. All four use bytes and expire after 180 seconds without a fresh snapshot. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so all profiles share one bounded administrative interface.
+Discovery additionally creates RF activity and automation activity Event entities, an RF hardware select, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. Four `data_size` diagnostic sensors use `state/system`: internal free, internal minimum free, largest internal block, and PSRAM free. The first three exist on every board; PSRAM free is advertised only on PSRAM-equipped S3 profiles. All four use bytes and expire after 180 seconds without a fresh snapshot. Hardware commands accept only exact `cc1101` or `generic`; automation commands accept only exact `ON`/`OFF` or `off`/`actions`/`verbose`. Every command must be non-retained, non-duplicate, unfragmented QoS 0. Successful switches publish the new state; failed switches publish a reconciliation snapshot for the backend restored by rollback, so Home Assistant does not retain a requested-but-inactive value. Rule CRUD intentionally remains a UART operation so all profiles share one bounded administrative interface.
 
 `mqtt forget` is a durable retirement transaction. While MQTT is connected it records `retiring`, tombstones every discovery, state, rule, and availability topic with acknowledgements, clears the ledger and credentials, then records Web/retired and stops MQTT. In `both`, Web stays available throughout and no reset is needed after completion; in MQTT-only mode, reset once after retirement to start Web. Power loss at any step resumes the retirement path on the next boot. If Web is active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
 
@@ -311,9 +360,10 @@ The Web UI is available whenever the boot mask includes Web (`web` or `both`). I
 The Web surface calls typed services directly and provides:
 
 - A health-first System dashboard with board model/profile/target, flash and PSRAM,
-  console transport and pin assignments, live CC1101 identity/state, RF configuration
+  console transport and both backend pin assignments, active RF backend, live CC1101 identity/state, RF configuration
   and counters, Wi-Fi addressing and retry diagnostics, uptime/reset reason, internal
   and PSRAM watermarks, and learning/automation/LAN service health.
+- Explicit live selection of CC1101 or generic ASK/OOK hardware.
 - Learning and cancellation.
 - Latest-frame and named learned-signal replay with bounded repeats.
 - Learned-signal metadata and deletion with rule-reference protection.
@@ -321,7 +371,7 @@ The Web surface calls typed services directly and provides:
 - Automation rule add/remove/enable/disable and log-mode controls.
 - OTA status and direct application-image upload with progress and reboot recovery.
 
-The System dashboard is diagnostic-only apart from its existing firmware upload. Hardware, runtime/memory, and services share three desktop columns and collapse to one below 820 px; detailed hardware and service data remain in expandable disclosures. Internal RAM determines memory health. Free or largest-block values below 12 KiB are critical, free memory below 24 KiB is degraded, and largest blocks below 16 KiB on classic ESP32 or 32 KiB on a combined-service S3 are reported as fragmented. PSRAM is explicitly shown as not installed on classic ESP32. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
+The System dashboard is diagnostic apart from RF hardware selection and firmware upload. Hardware, runtime/memory, and services share three desktop columns and collapse to one below 820 px; detailed hardware and service data remain in expandable disclosures. Internal RAM determines memory health. Free or largest-block values below 12 KiB are critical, free memory below 24 KiB is degraded, and largest blocks below 16 KiB on classic ESP32 or 32 KiB on a combined-service S3 are reported as fragmented. PSRAM is explicitly shown as not installed on classic ESP32. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted; CC1101 diagnostics are inactive, not failed, while generic RF is selected. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
 
 The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
 
@@ -454,7 +504,7 @@ raw clear
 Raw rules:
 
 - Start level is 0 or 1.
-- Durations are 100–29000 µs. This keeps pulses above the CC1101 asynchronous sampling floor and below the 30 ms RMT frame-stop threshold.
+- Durations are 100–29000 µs. This keeps pulses above the supported asynchronous sampling floor and below the 30 ms RMT frame-stop threshold.
 - A frame must contain an even 8–256 alternating pulses.
 - The staged frame and unnamed last received frame are not persistent; only frames captured by `learn <name>` are stored in NVS.
 
@@ -466,17 +516,19 @@ board status
 memory status
 radio info
 wifi status
+radio hardware
+radio hardware generic
 radio reset
 radio start
 ```
 
-`status` renders the System/RF, Automation, Wi-Fi, board, service, and memory dashboards. `board status` reports the running profile, target, flash/PSRAM, console transport, CC1101 wiring, and combined-service capability. `memory status` reports internal and PSRAM total/free/minimum/largest-block values. `radio info` and `wifi status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
+`status` renders the System/RF, Automation, Wi-Fi, board, service, and memory dashboards. `board status` reports the running profile, target, flash/PSRAM, console transport, CC1101 wiring, generic DATA GPIOs, and combined-service capability. `memory status` reports internal and PSRAM total/free/minimum/largest-block values. `radio info` and `wifi status` render only their owning subsystem; in plain style they emit only the corresponding stable record.
 
-Diagnostics include CC1101 PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, resets/recoveries/timeouts, RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled/logging state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, emitted log events, dropped log events, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
+Diagnostics include the active backend, generic TX/RX GPIOs, last switch error and successful switch count. In CC1101 mode they also include PARTNUM/VERSION, stable MARCSTATE, RSSI in half-dBm units (`rssi_x2`), carrier/CCA bits, and resets/recoveries/timeouts. Generic modules have no SPI control or diagnostic channel, so carrier frequency, bandwidth, AGC behavior, TX power, RSSI, CCA, identity, reset, and recovery are module-defined or unavailable. Both modes report RMT queue drops/truncations, duplicate count, whether desired RX is actually armed, and automation availability/enabled/logging state, rules, stale or ambiguous frames, matches, actions, cooldown suppressions, queue drops, TX errors, emitted log events, dropped log events, and last result. Software status remains available while RF is stopped or busy; hardware fields are explicitly marked unavailable when they cannot be sampled safely.
 
-`radio reset` temporarily disables capture, performs the CC1101 reset/profile/readback/calibration sequence, and restores the always-on RX state. `radio start` retries complete initialization after wiring or power is corrected. Boot also makes three bounded startup attempts. All command, SPI-ready, and radio-state waits are bounded. An unrecoverable classic-ESP32 RMT TX timeout attempts to force the CC1101 idle and leaves the service faulted; reboot is then required rather than risking a late transmission or an unbounded driver abort.
+`radio reset` temporarily disables capture and restores the always-on RX state. In CC1101 mode it also performs the chip reset/profile/readback/calibration sequence; in generic mode it resets only the RMT receive lifecycle. `radio start` retries complete initialization after wiring or power is corrected. Boot also makes three bounded startup attempts. All command, SPI-ready, and radio-state waits are bounded. An unrecoverable classic-ESP32 RMT TX timeout attempts to idle the active backend and leaves the service faulted; reboot is then required rather than risking a late transmission or an unbounded driver abort.
 
-## Radio profile
+## CC1101 radio profile
 
 The default CC1101 profile assumes a 26 MHz crystal:
 
@@ -487,7 +539,7 @@ The default CC1101 profile assumes a 26 MHz crystal:
 - OOK AGC baseline `AGCCTRL2/1/0 = 04/00/92`.
 - Nominal default TX power: +5 dBm using TI's 433 MHz PATABLE guidance.
 
-Generic-module matching networks, oscillators, antennas, and local regulations vary. Frequency, bandwidth/AGC sensitivity, actual output power, and usable range require measurement on the real hardware.
+In generic mode, the firmware supplies only the baseband DATA waveform. The transmitter module determines carrier frequency and output power; the receiver determines bandwidth, AGC, sensitivity, polarity, and noise behavior. Use 433.92 MHz ASK/OOK modules whose DATA polarity is active-high. Generic-module matching networks, oscillators, antennas, and local regulations vary, so actual output power and usable range require measurement on the real hardware.
 
 ## Codec behavior
 
@@ -513,8 +565,8 @@ Not supported:
 - Rolling-code garage, alarm, or vehicle remotes.
 - Encryption, challenge/response, FSK/GFSK, Manchester-specific protocols, or CC1101 packet-mode traffic.
 - Continuous/gapless streams larger than classic ESP32 RMT memory. RX uses seven 64-symbol blocks and TX uses the remaining block, so no other RMT peripheral can be used concurrently with the default build.
-- Sharing `SPI3_HOST` with another component. The CC1101 driver owns that host exclusively so its reset and transaction deadlines remain deterministic.
-- Simultaneous RX and TX; the CC1101 is operated half-duplex.
+- Sharing `SPI3_HOST` with another component while CC1101 is selected. The CC1101 driver owns that host exclusively so its reset and transaction deadlines remain deterministic.
+- Simultaneous RX and TX; either backend is operated half-duplex.
 
 Do not attempt to clone security or access-control devices. Follow local 433 MHz frequency, power, bandwidth, duty-cycle, antenna-gain, and listen-before-talk rules.
 

@@ -32,15 +32,6 @@ constexpr RfActivityLedConfig kConfig{
     .active_high = kActiveHigh,
     .pulse_ms = CONFIG_RF_ACTIVITY_LED_PULSE_MS,
 };
-constexpr int kUnavailableGpios[] = {
-    CONFIG_CC1101_SPI_SCLK_GPIO,
-    CONFIG_CC1101_SPI_MISO_GPIO,
-    CONFIG_CC1101_SPI_MOSI_GPIO,
-    CONFIG_CC1101_SPI_CS_GPIO,
-    CONFIG_CC1101_GDO0_GPIO,
-    CONFIG_CC1101_GDO2_GPIO,
-};
-
 enum class LedMode : uint8_t {
     kIdle,
     kStartup,
@@ -166,9 +157,16 @@ esp_err_t initialize_rf_activity_led()
     if (s_initialized.load(std::memory_order_acquire)) {
         return ESP_OK;
     }
+    const BoardInfo &board = current_board_info();
+    const int unavailable_gpios[] = {
+        CONFIG_CC1101_SPI_SCLK_GPIO, CONFIG_CC1101_SPI_MISO_GPIO,
+        CONFIG_CC1101_SPI_MOSI_GPIO, CONFIG_CC1101_SPI_CS_GPIO,
+        CONFIG_CC1101_GDO0_GPIO,     CONFIG_CC1101_GDO2_GPIO,
+        board.cc1101.generic_tx,     board.cc1101.generic_rx,
+    };
     if (!rf_activity_led_config_is_valid(configured_board_profile(), kConfig,
-                                         kUnavailableGpios,
-                                         std::size(kUnavailableGpios)) ||
+                                         unavailable_gpios,
+                                         std::size(unavailable_gpios)) ||
         !GPIO_IS_VALID_OUTPUT_GPIO(kConfig.gpio)) {
         return ESP_ERR_INVALID_ARG;
     }

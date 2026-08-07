@@ -14,6 +14,11 @@ TEST_CASE("running board metadata reflects compiled GPIO configuration", "[platf
     TEST_ASSERT_EQUAL(CONFIG_CC1101_SPI_CS_GPIO, board.cc1101.cs);
     TEST_ASSERT_EQUAL(CONFIG_CC1101_GDO0_GPIO, board.cc1101.gdo0);
     TEST_ASSERT_EQUAL(CONFIG_CC1101_GDO2_GPIO, board.cc1101.gdo2);
+    TEST_ASSERT_GREATER_OR_EQUAL(0, board.cc1101.generic_tx);
+    TEST_ASSERT_GREATER_OR_EQUAL(0, board.cc1101.generic_rx);
+    TEST_ASSERT_TRUE(board_generic_gpio_map_is_valid(
+        board.profile, board.cc1101, board.cc1101.generic_tx, board.cc1101.generic_rx,
+        board.activity_led_enabled ? board.activity_led_gpio : -1));
 #if defined(CONFIG_RF_ACTIVITY_LED_ENABLE)
     TEST_ASSERT_TRUE(board.activity_led_enabled);
     TEST_ASSERT_EQUAL(CONFIG_RF_ACTIVITY_LED_GPIO, board.activity_led_gpio);
@@ -37,5 +42,11 @@ TEST_CASE("FH4R2 board policy is available to the Unity image", "[platform_board
     TEST_ASSERT_TRUE(board->combined_services);
     TEST_ASSERT_EQUAL(ConsoleTransport::kUsbSerialJtag, board->console);
     TEST_ASSERT_TRUE(board_cc1101_gpio_map_is_valid(board->profile, board->cc1101));
+    TEST_ASSERT_EQUAL(6, board->cc1101.generic_tx);
+    TEST_ASSERT_EQUAL(7, board->cc1101.generic_rx);
+    TEST_ASSERT_TRUE(board_generic_gpio_map_is_valid(
+        board->profile, board->cc1101, board->cc1101.generic_tx, board->cc1101.generic_rx));
+    TEST_ASSERT_FALSE(board_generic_gpio_map_is_valid(
+        board->profile, board->cc1101, board->cc1101.gdo0, board->cc1101.generic_rx));
     TEST_ASSERT_FALSE(board_activity_led_gpio_is_valid(board->profile, 48, nullptr, 0));
 }

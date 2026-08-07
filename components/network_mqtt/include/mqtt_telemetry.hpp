@@ -82,6 +82,7 @@ struct MqttSystemMemoryTelemetry {
 };
 
 struct MqttSystemTelemetry {
+    const char *hardware = nullptr;
     const char *board_profile = nullptr;
     const char *board_target = nullptr;
     const char *requested_services = nullptr;

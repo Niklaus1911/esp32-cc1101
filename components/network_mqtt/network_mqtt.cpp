@@ -77,12 +77,14 @@ enum class MqttCommandType : uint8_t {
     kReplay,
     kSetEnabled,
     kSetLogMode,
+    kSetHardware,
 };
 
 struct MqttCommand {
     MqttCommandType type = MqttCommandType::kReplay;
     bool enabled = false;
     uint8_t log_mode = 0;
+    RfHardware hardware = RfHardware::kCc1101;
     RfStorageName signal{};
 };
 
@@ -163,10 +165,12 @@ struct RuntimeContext {
     char command_filter[kMqttTopicCapacity]{};
     char enabled_command_topic[kMqttTopicCapacity]{};
     char log_command_topic[kMqttTopicCapacity]{};
+    char hardware_command_topic[kMqttTopicCapacity]{};
     char availability_topic[kMqttTopicCapacity]{};
 };
 
 esp_err_t publish_automation_state(RuntimeContext *context);
+esp_err_t publish_system_state(RuntimeContext *context);
 void destroy_runtime_from_worker(RuntimeContext *context);
 
 portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -822,7 +826,11 @@ void mqtt_event_handler(void *handler_context, esp_event_base_t, int32_t event_i
             MqttAutomationCommandKind automation_kind{};
             bool enabled = false;
             uint8_t log_mode = 0;
-            if (parse_mqtt_automation_command(context->identity, message, &automation_kind,
+            RfHardware hardware = RfHardware::kCc1101;
+            if (parse_mqtt_hardware_command(context->identity, message, &hardware)) {
+                command.type = MqttCommandType::kSetHardware;
+                command.hardware = hardware;
+            } else if (parse_mqtt_automation_command(context->identity, message, &automation_kind,
                                               &enabled, &log_mode)) {
                 command.type = automation_kind == MqttAutomationCommandKind::kEnabled
                                    ? MqttCommandType::kSetEnabled
@@ -878,6 +886,8 @@ void service_commands(RuntimeContext *context)
         } else if (command.type == MqttCommandType::kSetLogMode) {
             error = rf_automation_set_log_mode(
                 static_cast<RfAutomationLogMode>(command.log_mode));
+        } else if (command.type == MqttCommandType::kSetHardware) {
+            error = bridge_control_set_rf_hardware(command.hardware, BridgeEventSource::kMqtt);
         }
         if (error != ESP_OK) {
             ESP_LOGE(kTag, "MQTT command failed: %s", esp_err_to_name(error));
@@ -1022,7 +1032,11 @@ esp_err_t publish_pending_states(RuntimeContext *context)
         context->state_pending.store(true, std::memory_order_release);
         return state_error;
     }
-    return ESP_OK;
+    const esp_err_t system_error = publish_system_state(context);
+    if (system_error != ESP_OK) {
+        context->state_pending.store(true, std::memory_order_release);
+    }
+    return system_error;
 }
 
 void discard_telemetry(RuntimeContext *context)
@@ -1105,6 +1119,7 @@ esp_err_t subscribe_topics(RuntimeContext *context)
         {kHomeAssistantStatusTopic, 0},
         {context->enabled_command_topic, 0},
         {context->log_command_topic, 0},
+        {context->hardware_command_topic, 0},
     };
     const int message_id = esp_mqtt_client_subscribe_multiple(context->client, topics,
                                                                sizeof(topics) / sizeof(topics[0]));
@@ -1230,6 +1245,7 @@ constexpr MqttDiscoveryEntityKind kFixedEntityKinds[] = {
     MqttDiscoveryEntityKind::kAutomationEvent,
     MqttDiscoveryEntityKind::kAutomationSwitch,
     MqttDiscoveryEntityKind::kAutomationLogSelect,
+    MqttDiscoveryEntityKind::kHardwareSelect,
     MqttDiscoveryEntityKind::kRuleCountSensor,
     MqttDiscoveryEntityKind::kEventDropsSensor,
     MqttDiscoveryEntityKind::kInternalFreeSensor,
@@ -1307,6 +1323,9 @@ esp_err_t publish_system_state(RuntimeContext *context)
     taskEXIT_CRITICAL(&s_status_lock);
 
     MqttSystemTelemetry system{};
+    RfRadioStatus radio{};
+    (void)get_rf_radio_status(&radio);
+    system.hardware = rf_hardware_name(radio.hardware);
     system.board_profile = board.profile_name;
     system.board_target = board.target_name;
     system.requested_services = network_service_mask_name(requested);
@@ -1843,6 +1862,9 @@ bool mqtt_bridge_sink(const BridgeEvent &event, void *context_pointer)
     if (event.type == BridgeEventType::kSignalCatalogChanged) {
         context->catalog_pending.store(true, std::memory_order_release);
         notify_worker(context, kWakeCatalog);
+    } else if (event.type == BridgeEventType::kHardwareSwitch) {
+        context->state_pending.store(true, std::memory_order_release);
+        notify_worker(context, kWakePublish);
     } else if (event.type == BridgeEventType::kRx) {
         MqttTelemetryMessage message{};
         message.type = MqttTelemetryType::kRx;
@@ -2082,6 +2104,9 @@ esp_err_t prepare_network_mqtt()
                                               MqttAutomationCommandKind::kLogMode,
                                               context->log_command_topic,
                                               sizeof(context->log_command_topic)) ||
+        !format_mqtt_hardware_command_topic(context->identity,
+                                            context->hardware_command_topic,
+                                            sizeof(context->hardware_command_topic)) ||
         !format_mqtt_availability_topic(context->identity, context->availability_topic,
                                         sizeof(context->availability_topic))) {
         std::memset(&service, 0, sizeof(service));

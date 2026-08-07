@@ -13,6 +13,10 @@ constexpr std::size_t kHeaderSize = 8;
 constexpr std::size_t kCrcSize = 4;
 constexpr std::size_t kDecodedPayloadSize = 13;
 constexpr std::size_t kRawPrefixSize = 3;
+constexpr uint8_t kHardwareMagic[] = {'R', 'F', 'H', 'W'};
+constexpr uint8_t kHardwareFormatVersion = 1;
+constexpr std::size_t kHardwareHeaderSize = 8;
+constexpr std::size_t kHardwareRecordSize = kHardwareHeaderSize + 1U + 4U;
 
 void write_u16(uint8_t *output, uint16_t value)
 {
@@ -81,6 +85,31 @@ bool ascii_digit(char character)
 }
 
 }  // namespace
+
+const char *rf_hardware_name(RfHardware hardware)
+{
+    switch (hardware) {
+        case RfHardware::kCc1101: return "cc1101";
+        case RfHardware::kGeneric: return "generic";
+    }
+    return "invalid";
+}
+
+bool rf_hardware_from_name(const char *name, RfHardware *hardware)
+{
+    if (name == nullptr || hardware == nullptr) {
+        return false;
+    }
+    if (std::strcmp(name, "cc1101") == 0) {
+        *hardware = RfHardware::kCc1101;
+        return true;
+    }
+    if (std::strcmp(name, "generic") == 0) {
+        *hardware = RfHardware::kGeneric;
+        return true;
+    }
+    return false;
+}
 
 bool rf_storage_name_is_valid(const char *name)
 {
@@ -221,6 +250,52 @@ RfStorageFormatResult decode_rf_storage_record(const uint8_t *record, std::size_
 
     *signal = decoded;
     return RfStorageFormatResult::kOk;
+}
+
+RfHardwareFormatResult encode_rf_hardware_record(RfHardware hardware, uint8_t *output,
+                                                 std::size_t capacity, std::size_t *output_size)
+{
+    if (output == nullptr || output_size == nullptr ||
+        (hardware != RfHardware::kCc1101 && hardware != RfHardware::kGeneric)) {
+        return RfHardwareFormatResult::kInvalidArgument;
+    }
+    if (capacity < kHardwareRecordSize) {
+        return RfHardwareFormatResult::kBufferTooSmall;
+    }
+    std::memcpy(output, kHardwareMagic, sizeof(kHardwareMagic));
+    output[4] = kHardwareFormatVersion;
+    output[5] = 1;
+    write_u16(output + 6, 1);
+    output[kHardwareHeaderSize] = static_cast<uint8_t>(hardware);
+    write_u32(output + kHardwareRecordSize - 4U, crc32(output, kHardwareRecordSize - 4U));
+    *output_size = kHardwareRecordSize;
+    return RfHardwareFormatResult::kOk;
+}
+
+RfHardwareFormatResult decode_rf_hardware_record(const uint8_t *record, std::size_t size,
+                                                 RfHardware *hardware)
+{
+    if (record == nullptr || hardware == nullptr) {
+        return RfHardwareFormatResult::kInvalidArgument;
+    }
+    if (size != kHardwareRecordSize || std::memcmp(record, kHardwareMagic, sizeof(kHardwareMagic)) != 0) {
+        return RfHardwareFormatResult::kInvalidRecord;
+    }
+    if (record[4] != kHardwareFormatVersion) {
+        return RfHardwareFormatResult::kInvalidVersion;
+    }
+    if (record[5] != 1 || read_u16(record + 6) != 1 ||
+        read_u32(record + size - 4U) != crc32(record, size - 4U)) {
+        return read_u32(record + size - 4U) != crc32(record, size - 4U)
+                   ? RfHardwareFormatResult::kInvalidCrc
+                   : RfHardwareFormatResult::kInvalidRecord;
+    }
+    const auto value = static_cast<RfHardware>(record[kHardwareHeaderSize]);
+    if (value != RfHardware::kCc1101 && value != RfHardware::kGeneric) {
+        return RfHardwareFormatResult::kInvalidRecord;
+    }
+    *hardware = value;
+    return RfHardwareFormatResult::kOk;
 }
 
 }  // namespace rfbridge

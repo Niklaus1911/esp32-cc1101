@@ -790,6 +790,11 @@ void test_platform_board_policy()
     for (const rfbridge::BoardInfo *board : {classic, n16r8, xiao, supermini}) {
         require(rfbridge::board_cc1101_gpio_map_is_valid(board->profile, board->cc1101),
                 "each profile's default CC1101 wiring is valid");
+        require(rfbridge::board_generic_gpio_map_is_valid(
+                    board->profile, board->cc1101, board->cc1101.generic_tx,
+                    board->cc1101.generic_rx,
+                    board->activity_led_enabled ? board->activity_led_gpio : -1),
+                "each profile's generic RF wiring is valid and separate");
         rfbridge::BoardGpioMap duplicate = board->cc1101;
         duplicate.gdo2 = duplicate.gdo0;
         require(!rfbridge::board_cc1101_gpio_map_is_valid(board->profile, duplicate),
@@ -824,6 +829,10 @@ void test_platform_board_policy()
     invalid.gdo2 = 3;
     require(!rfbridge::board_cc1101_gpio_map_is_valid(supermini->profile, invalid),
             "FH4R2 profile rejects its strapping GPIO");
+    require(!rfbridge::board_generic_gpio_map_is_valid(
+                classic->profile, classic->cc1101, classic->cc1101.gdo0,
+                classic->cc1101.generic_rx, classic->activity_led_gpio),
+            "generic RF validation rejects a CC1101 TX pin");
 
     rfbridge::RfActivityLedConfig led{.enabled = true, .gpio = 21,
                                       .active_high = false, .pulse_ms = 25};
@@ -981,6 +990,23 @@ void test_storage_format()
                 loaded.encoding == rfbridge::RfStoredEncoding::kRaw &&
                 rfbridge::raw_signals_match(raw.raw, loaded.raw),
             "maximum raw storage record round trips");
+
+    uint8_t hardware_record[32]{};
+    std::size_t hardware_size = 0;
+    require(rfbridge::encode_rf_hardware_record(rfbridge::RfHardware::kGeneric,
+                                                 hardware_record, sizeof(hardware_record),
+                                                 &hardware_size) ==
+                rfbridge::RfHardwareFormatResult::kOk && hardware_size == 13,
+            "RF hardware record encodes with a versioned CRC envelope");
+    rfbridge::RfHardware hardware = rfbridge::RfHardware::kCc1101;
+    require(rfbridge::decode_rf_hardware_record(hardware_record, hardware_size, &hardware) ==
+                rfbridge::RfHardwareFormatResult::kOk &&
+                hardware == rfbridge::RfHardware::kGeneric,
+            "RF hardware record decodes generic selection");
+    hardware_record[hardware_size - 1U] ^= 0x01U;
+    require(rfbridge::decode_rf_hardware_record(hardware_record, hardware_size, &hardware) ==
+                rfbridge::RfHardwareFormatResult::kInvalidCrc,
+            "RF hardware record rejects CRC corruption");
 }
 
 
@@ -1264,6 +1290,24 @@ void test_web_forms()
     require(rfbridge::parse_web_rule_patch_form("log_mode=verbose", 16, &patch) &&
                 patch.patch == rfbridge::WebRulePatch::kLogMode,
             "Web rule log patch accepts exact mode");
+
+    rfbridge::WebHardwareForm hardware{};
+    constexpr char cc1101_hardware_form[] = "hardware=cc1101";
+    constexpr char generic_hardware_form[] = "hardware=generic";
+    require(rfbridge::parse_web_hardware_form(
+                cc1101_hardware_form, sizeof(cc1101_hardware_form) - 1U, &hardware) &&
+                hardware.hardware == rfbridge::RfHardware::kCc1101,
+            "Web RF hardware form accepts the exact CC1101 value");
+    require(rfbridge::parse_web_hardware_form(
+                generic_hardware_form, sizeof(generic_hardware_form) - 1U, &hardware) &&
+                hardware.hardware == rfbridge::RfHardware::kGeneric,
+            "Web RF hardware form accepts the exact generic value");
+    constexpr char embedded_hardware[] = "hardware=cc1101\0junk";
+    require(!rfbridge::parse_web_hardware_form(
+                embedded_hardware, sizeof(embedded_hardware) - 1U, &hardware) &&
+                !rfbridge::parse_web_hardware_form("hardware=GENERIC", 16, &hardware) &&
+                !rfbridge::parse_web_hardware_form("hardware=generic&extra=1", 24, &hardware),
+            "Web RF hardware form rejects NUL suffixes, case changes, and extra fields");
 
     require(rfbridge::web_form_content_type_is_valid("application/x-www-form-urlencoded"),
             "Web form content type accepted");

@@ -6,6 +6,7 @@
 #include "cc1101.hpp"
 #include "esp_err.h"
 #include "rf_codec.hpp"
+#include "rf_storage_format.hpp"
 
 namespace rfbridge {
 
@@ -30,6 +31,7 @@ struct RfFrame {
 };
 
 struct RfRadioStatus {
+    RfHardware hardware = RfHardware::kCc1101;
     bool running;
     bool receive_enabled;
     bool receive_active;
@@ -44,6 +46,10 @@ struct RfRadioStatus {
     bool cc1101_info_valid;
     esp_err_t cc1101_error;
     Cc1101Info cc1101;
+    int generic_tx_gpio = -1;
+    int generic_rx_gpio = -1;
+    esp_err_t hardware_switch_error = ESP_OK;
+    uint32_t hardware_switches = 0;
 };
 
 using RfFrameCallback = void (*)(const RfFrame &frame, void *context);
@@ -55,6 +61,8 @@ esp_err_t transmit_rf_raw(const RawSignal &signal, uint16_t repeats);
 esp_err_t replay_last_rf_frame(uint16_t repeats);
 esp_err_t get_last_rf_frame(RfFrame *frame);
 esp_err_t get_rf_radio_status(RfRadioStatus *status);
+esp_err_t get_rf_hardware(RfHardware *hardware);
+esp_err_t set_rf_hardware(RfHardware hardware);
 esp_err_t reset_rf_radio();
 esp_err_t begin_rf_maintenance();
 esp_err_t end_rf_maintenance();

@@ -73,3 +73,6 @@ add_test(NAME web_asset_contract_tests
 add_test(NAME mqtt_runtime_source_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_network_mqtt_source.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME rf_hardware_switch_source_contract_tests
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_rf_hardware_switch_source.mjs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/..")

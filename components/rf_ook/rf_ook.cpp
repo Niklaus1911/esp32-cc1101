@@ -8,6 +8,7 @@
 #include <iterator>
 
 #include "driver/rmt_encoder.h"
+#include "driver/gpio.h"
 #include "driver/rmt_rx.h"
 #include "driver/rmt_tx.h"
 #include "esp_check.h"
@@ -20,6 +21,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "rf_activity_led_private.hpp"
+#include "rf_storage.hpp"
+#include "platform_board.hpp"
 #include "sdkconfig.h"
 
 namespace rfbridge {
@@ -134,6 +137,12 @@ portMUX_TYPE s_command_state_mux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t s_active_command_id = 0;
 CommandState s_active_command_state = CommandState::kIdle;
 std::atomic_flag s_lifecycle_busy = ATOMIC_FLAG_INIT;
+std::atomic<bool> s_hardware_switch_busy{false};
+std::atomic<RfHardware> s_hardware{RfHardware::kCc1101};
+std::atomic<bool> s_start_override_valid{false};
+std::atomic<RfHardware> s_start_override{RfHardware::kCc1101};
+std::atomic<esp_err_t> s_hardware_switch_error{ESP_OK};
+std::atomic<uint32_t> s_hardware_switches{0};
 rmt_receive_config_t s_receive_config{};
 Cc1101 s_radio{};
 std::atomic<bool> s_receive_active{false};
@@ -163,6 +172,31 @@ public:
 
 private:
     bool acquired_;
+};
+
+class HardwareSwitchGuard {
+public:
+    HardwareSwitchGuard()
+    {
+        bool expected = false;
+        acquired_ = s_hardware_switch_busy.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel);
+    }
+
+    ~HardwareSwitchGuard()
+    {
+        if (acquired_) {
+            s_hardware_switch_busy.store(false, std::memory_order_release);
+        }
+    }
+
+    bool acquired() const
+    {
+        return acquired_;
+    }
+
+private:
+    bool acquired_ = false;
 };
 
 bool duration_matches(uint32_t actual, uint32_t expected, uint8_t tolerance_percent = kDecodeTolerancePercent)
@@ -683,6 +717,37 @@ bool IRAM_ATTR rx_done_callback(rmt_channel_handle_t, const rmt_rx_done_event_da
     return high_priority_woken == pdTRUE;
 }
 
+bool using_generic_hardware()
+{
+    return s_hardware.load(std::memory_order_acquire) == RfHardware::kGeneric;
+}
+
+const BoardGpioMap &active_gpio_map()
+{
+    return current_board_info().cc1101;
+}
+
+int active_rx_gpio()
+{
+    return using_generic_hardware() ? active_gpio_map().generic_rx : active_gpio_map().gdo2;
+}
+
+int active_tx_gpio()
+{
+    return using_generic_hardware() ? active_gpio_map().generic_tx : active_gpio_map().gdo0;
+}
+
+void force_generic_tx_idle()
+{
+    const int gpio = active_gpio_map().generic_tx;
+    if (gpio < 0) {
+        return;
+    }
+    (void)gpio_reset_pin(static_cast<gpio_num_t>(gpio));
+    (void)gpio_set_direction(static_cast<gpio_num_t>(gpio), GPIO_MODE_OUTPUT);
+    (void)gpio_set_level(static_cast<gpio_num_t>(gpio), 0);
+}
+
 esp_err_t arm_receiver_owned()
 {
     if (s_rx_channel == nullptr || s_receive_active ||
@@ -722,9 +787,12 @@ esp_err_t stop_rmt_receive_owned()
 esp_err_t restore_receive_owned()
 {
     s_receive_active = false;
-    esp_err_t error = s_radio.enter_receive(50);
-    if (error != ESP_OK) {
-        error = s_radio.recover_receive();
+    esp_err_t error = ESP_OK;
+    if (!using_generic_hardware()) {
+        error = s_radio.enter_receive(50);
+        if (error != ESP_OK) {
+            error = s_radio.recover_receive();
+        }
     }
     if (error == ESP_OK) {
         error = rmt_enable(s_rx_channel);
@@ -738,7 +806,9 @@ esp_err_t restore_receive_owned()
     if (error != ESP_OK) {
         s_receive_active = false;
         rmt_disable(s_rx_channel);
-        s_radio.enter_idle(50);
+        if (!using_generic_hardware()) {
+            s_radio.enter_idle(50);
+        }
     }
     return error;
 }
@@ -846,7 +916,9 @@ esp_err_t transmit_symbols_owned(const rmt_symbol_word_t *symbols, std::size_t c
         return error;
     }
     s_transmitting.store(true, std::memory_order_release);
-    error = s_radio.enter_transmit(50);
+    if (!using_generic_hardware()) {
+        error = s_radio.enter_transmit(50);
+    }
 
     const uint64_t total_duration_us = frame_duration_us * repeats;
     const int wait_timeout_ms =
@@ -862,12 +934,17 @@ esp_err_t transmit_symbols_owned(const rmt_symbol_word_t *symbols, std::size_t c
         error = rmt_tx_wait_all_done(s_tx_channel, wait_timeout_ms);
     }
     if (error == ESP_ERR_TIMEOUT) {
-        const esp_err_t idle_error = s_radio.enter_idle(50);
-        const esp_err_t reset_error = idle_error == ESP_OK ? ESP_OK : s_radio.reset_and_configure();
+        const esp_err_t idle_error = using_generic_hardware() ? ESP_OK : s_radio.enter_idle(50);
+        const esp_err_t reset_error = idle_error == ESP_OK || using_generic_hardware()
+                                          ? ESP_OK
+                                          : s_radio.reset_and_configure();
         s_transmitting.store(false, std::memory_order_release);
         s_rmt_tx_faulted.store(true, std::memory_order_release);
         s_service_state.store(ServiceState::kStopping, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
+        if (using_generic_hardware()) {
+            force_generic_tx_idle();
+        }
         if (idle_error == ESP_OK || reset_error == ESP_OK) {
             ESP_LOGE(kTag, "RMT TX did not stop on time; RF was forced idle and service restart requires a reboot");
         } else {
@@ -877,13 +954,13 @@ esp_err_t transmit_symbols_owned(const rmt_symbol_word_t *symbols, std::size_t c
     }
 
     esp_rom_delay_us(3000);
-    const esp_err_t idle_error = s_radio.enter_idle(50);
+    const esp_err_t idle_error = using_generic_hardware() ? ESP_OK : s_radio.enter_idle(50);
     s_transmitting.store(false, std::memory_order_release);
     if (error == ESP_OK && idle_error != ESP_OK) {
         error = idle_error;
     }
     if (idle_error != ESP_OK) {
-        const esp_err_t recovery_error = s_radio.reset_and_configure();
+        const esp_err_t recovery_error = using_generic_hardware() ? ESP_OK : s_radio.reset_and_configure();
         if (error == ESP_OK) {
             error = recovery_error;
         }
@@ -987,6 +1064,11 @@ void process_receive_item(const RxQueueItem &item)
 void fill_software_status(RfRadioStatus *status)
 {
     *status = {};
+    status->hardware = s_hardware.load(std::memory_order_acquire);
+    status->generic_tx_gpio = active_gpio_map().generic_tx;
+    status->generic_rx_gpio = active_gpio_map().generic_rx;
+    status->hardware_switch_error = s_hardware_switch_error.load(std::memory_order_relaxed);
+    status->hardware_switches = s_hardware_switches.load(std::memory_order_relaxed);
     status->running = s_service_state.load(std::memory_order_acquire) == ServiceState::kRunning;
     status->receive_enabled = true;
     status->receive_active = s_receive_active.load(std::memory_order_relaxed);
@@ -1006,8 +1088,13 @@ esp_err_t fill_status_owned(RfRadioStatus *status)
         return ESP_ERR_INVALID_ARG;
     }
     fill_software_status(status);
-    status->cc1101_error = s_radio.read_info(&status->cc1101);
-    status->cc1101_info_valid = status->cc1101_error == ESP_OK;
+    if (using_generic_hardware()) {
+        status->cc1101_error = ESP_ERR_NOT_SUPPORTED;
+        status->cc1101_info_valid = false;
+    } else {
+        status->cc1101_error = s_radio.read_info(&status->cc1101);
+        status->cc1101_info_valid = status->cc1101_error == ESP_OK;
+    }
     return ESP_OK;
 }
 
@@ -1068,7 +1155,9 @@ bool execute_command(const RadioCommand &command)
             break;
         case RadioCommandType::kReset: {
             const esp_err_t stop_error = stop_rmt_receive_owned();
-            reply.result = stop_error == ESP_OK ? s_radio.reset_and_configure() : stop_error;
+            reply.result = stop_error == ESP_OK
+                               ? (using_generic_hardware() ? ESP_OK : s_radio.reset_and_configure())
+                               : stop_error;
             if (reply.result == ESP_OK) {
                 reply.result = restore_receive_owned();
             }
@@ -1080,7 +1169,7 @@ bool execute_command(const RadioCommand &command)
                 break;
             }
             const esp_err_t receive_error = stop_rmt_receive_owned();
-            const esp_err_t idle_error = s_radio.enter_idle(50);
+            const esp_err_t idle_error = using_generic_hardware() ? ESP_OK : s_radio.enter_idle(50);
             reply.result = receive_error != ESP_OK ? receive_error : idle_error;
             if (reply.result != ESP_OK) {
                 s_maintenance_active.store(false, std::memory_order_release);
@@ -1101,7 +1190,7 @@ bool execute_command(const RadioCommand &command)
             break;
         case RadioCommandType::kStop: {
             const esp_err_t receive_error = stop_rmt_receive_owned();
-            const esp_err_t idle_error = s_radio.enter_idle(50);
+            const esp_err_t idle_error = using_generic_hardware() ? ESP_OK : s_radio.enter_idle(50);
             reply.result = receive_error != ESP_OK ? receive_error : idle_error;
             break;
         }
@@ -1172,7 +1261,15 @@ bool wait_for_radio_task_exit(TickType_t timeout)
 esp_err_t initialize_rmt()
 {
     rmt_rx_channel_config_t rx_config{};
-    rx_config.gpio_num = static_cast<gpio_num_t>(CONFIG_CC1101_GDO2_GPIO);
+    rx_config.gpio_num = static_cast<gpio_num_t>(active_rx_gpio());
+    if (using_generic_hardware()) {
+        ESP_RETURN_ON_ERROR(
+            gpio_set_direction(static_cast<gpio_num_t>(active_gpio_map().generic_rx), GPIO_MODE_INPUT),
+            kTag, "configure generic RX input");
+        ESP_RETURN_ON_ERROR(
+            gpio_set_pull_mode(static_cast<gpio_num_t>(active_gpio_map().generic_rx), GPIO_PULLDOWN_ONLY),
+            kTag, "configure generic RX pull-down");
+    }
     rx_config.clk_src = RMT_CLK_SRC_DEFAULT;
     rx_config.resolution_hz = kResolutionHz;
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -1182,12 +1279,12 @@ esp_err_t initialize_rmt()
     rx_config.mem_block_symbols = kRxSymbolCapacity;
 #endif
 #ifdef CONFIG_CC1101_RX_INVERT
-    rx_config.flags.invert_in = true;
+    rx_config.flags.invert_in = !using_generic_hardware();
 #endif
     ESP_RETURN_ON_ERROR(rmt_new_rx_channel(&rx_config, &s_rx_channel), kTag, "create RMT RX");
 
     rmt_tx_channel_config_t tx_config{};
-    tx_config.gpio_num = static_cast<gpio_num_t>(CONFIG_CC1101_GDO0_GPIO);
+    tx_config.gpio_num = static_cast<gpio_num_t>(active_tx_gpio());
     tx_config.clk_src = RMT_CLK_SRC_DEFAULT;
     tx_config.resolution_hz = kResolutionHz;
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -1288,6 +1385,7 @@ esp_err_t cleanup_resources()
             remember_error(delete_error, "delete RMT encoder");
         }
     }
+    force_generic_tx_idle();
     if (s_rx_channel != nullptr || s_tx_channel != nullptr || s_copy_encoder != nullptr) {
         s_service_state.store(ServiceState::kStopping, std::memory_order_release);
         return cleanup_error == ESP_OK ? ESP_FAIL : cleanup_error;
@@ -1495,12 +1593,8 @@ uint32_t rf_frame_fingerprint(const RfFrame &frame)
                                                    : raw_signal_fingerprint(frame.raw);
 }
 
-esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
+esp_err_t start_rf_ook_owned(RfFrameCallback callback, void *context)
 {
-    LifecycleGuard lifecycle;
-    if (!lifecycle.acquired()) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (callback == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1510,6 +1604,29 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
         s_radio_task.load(std::memory_order_acquire) != nullptr || s_rx_queue != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
+    RfHardware selected_hardware = RfHardware::kCc1101;
+    if (s_start_override_valid.load(std::memory_order_acquire)) {
+        selected_hardware = s_start_override.load(std::memory_order_acquire);
+    } else {
+        const esp_err_t hardware_load_error = rf_storage_hardware_get(&selected_hardware);
+        if (hardware_load_error != ESP_OK) {
+            ESP_LOGW(kTag, "RF hardware selection unavailable (%s); defaulting to CC1101",
+                     esp_err_to_name(hardware_load_error));
+            selected_hardware = RfHardware::kCc1101;
+        }
+    }
+    const BoardInfo &board = current_board_info();
+    if (!board_generic_gpio_map_is_valid(
+            configured_board_profile(), board.cc1101, board.cc1101.generic_tx,
+            board.cc1101.generic_rx)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_hardware.store(selected_hardware, std::memory_order_release);
+    ESP_RETURN_ON_ERROR(
+        gpio_set_direction(static_cast<gpio_num_t>(board.cc1101.generic_tx), GPIO_MODE_OUTPUT),
+        kTag, "configure generic TX idle");
+    ESP_RETURN_ON_ERROR(gpio_set_level(static_cast<gpio_num_t>(board.cc1101.generic_tx), 0),
+                        kTag, "drive generic TX idle");
     s_service_state.store(ServiceState::kStarting, std::memory_order_release);
 
     s_rx_queue = xQueueCreate(4, sizeof(RxQueueItem));
@@ -1564,7 +1681,7 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
         .tx_power_dbm = CONFIG_CC1101_TX_POWER_DBM,
     };
     esp_err_t error = allocate_rx_symbol_buffers();
-    if (error == ESP_OK) {
+    if (error == ESP_OK && selected_hardware == RfHardware::kCc1101) {
         error = s_radio.initialize(radio_config);
     }
     if (error == ESP_OK) {
@@ -1608,34 +1725,36 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
         return startup_result;
     }
     s_service_state.store(ServiceState::kRunning, std::memory_order_release);
-    ESP_LOGI(kTag, "RX GPIO%d, TX GPIO%d; listening at %lu Hz", CONFIG_CC1101_GDO2_GPIO,
-             CONFIG_CC1101_GDO0_GPIO, static_cast<unsigned long>(CONFIG_CC1101_FREQUENCY_HZ));
+    ESP_LOGI(kTag, "RF hardware=%s RX GPIO%d, TX GPIO%d; listening at %lu Hz",
+             rf_hardware_name(selected_hardware), active_rx_gpio(), active_tx_gpio(),
+             static_cast<unsigned long>(CONFIG_CC1101_FREQUENCY_HZ));
     return ESP_OK;
 }
 
-void stop_rf_ook()
+esp_err_t start_rf_ook(RfFrameCallback callback, void *context)
+{
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired() || s_hardware_switch_busy.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return start_rf_ook_owned(callback, context);
+}
+
+esp_err_t stop_rf_ook_owned()
 {
     const TaskHandle_t task = s_radio_task.load(std::memory_order_acquire);
     if (task != nullptr && xTaskGetCurrentTaskHandle() == task) {
         ESP_LOGE(kTag, "stop_rf_ook cannot be called from the radio callback task");
-        return;
-    }
-    LifecycleGuard lifecycle;
-    if (!lifecycle.acquired()) {
-        ESP_LOGW(kTag, "Radio lifecycle operation already in progress");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     if (task == nullptr) {
         if (s_service_state.load(std::memory_order_acquire) != ServiceState::kStopped &&
             !wait_for_radio_task_exit(kShutdownTimeoutTicks)) {
             ESP_LOGE(kTag, "Radio task exit was not confirmed; resources retained");
-            return;
+            return ESP_ERR_TIMEOUT;
         }
         const esp_err_t cleanup_error = cleanup_resources();
-        if (cleanup_error != ESP_OK) {
-            ESP_LOGE(kTag, "Radio cleanup remains incomplete: %s", esp_err_to_name(cleanup_error));
-        }
-        return;
+        return cleanup_error;
     }
     s_service_state.store(ServiceState::kStopping, std::memory_order_release);
     if (s_running.load(std::memory_order_acquire)) {
@@ -1648,11 +1767,21 @@ void stop_rf_ook()
     }
     if (!wait_for_radio_task_exit(kShutdownTimeoutTicks)) {
         ESP_LOGE(kTag, "Radio task did not stop safely; resources retained");
+        return ESP_ERR_TIMEOUT;
+    }
+    return cleanup_resources();
+}
+
+void stop_rf_ook()
+{
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired() || s_hardware_switch_busy.load(std::memory_order_acquire)) {
+        ESP_LOGW(kTag, "Radio lifecycle operation already in progress");
         return;
     }
-    const esp_err_t cleanup_error = cleanup_resources();
-    if (cleanup_error != ESP_OK) {
-        ESP_LOGE(kTag, "Radio cleanup remains incomplete: %s", esp_err_to_name(cleanup_error));
+    const esp_err_t error = stop_rf_ook_owned();
+    if (error != ESP_OK) {
+        ESP_LOGE(kTag, "Radio cleanup remains incomplete: %s", esp_err_to_name(error));
     }
 }
 
@@ -1711,9 +1840,124 @@ esp_err_t get_rf_radio_status(RfRadioStatus *status)
         return ESP_OK;
     }
 
+    if (s_service_state.load(std::memory_order_acquire) == ServiceState::kStopped &&
+        !s_start_override_valid.load(std::memory_order_acquire)) {
+        RfHardware stored_hardware = RfHardware::kCc1101;
+        if (rf_storage_hardware_get(&stored_hardware) == ESP_OK) {
+            status->hardware = stored_hardware;
+        }
+    }
     fill_software_status(status);
     status->cc1101_info_valid = false;
     status->cc1101_error = error;
+    return ESP_OK;
+}
+
+esp_err_t get_rf_hardware(RfHardware *hardware)
+{
+    if (hardware == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *hardware = s_hardware.load(std::memory_order_acquire);
+    if (s_service_state.load(std::memory_order_acquire) == ServiceState::kStopped &&
+        !s_start_override_valid.load(std::memory_order_acquire)) {
+        RfHardware stored_hardware = *hardware;
+        if (rf_storage_hardware_get(&stored_hardware) == ESP_OK) {
+            *hardware = stored_hardware;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t set_rf_hardware(RfHardware hardware)
+{
+    if (hardware != RfHardware::kCc1101 && hardware != RfHardware::kGeneric) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    HardwareSwitchGuard switch_guard;
+    LifecycleGuard lifecycle;
+    if (!switch_guard.acquired() || !lifecycle.acquired() ||
+        s_maintenance_requested.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const ServiceState state = s_service_state.load(std::memory_order_acquire);
+    if (state != ServiceState::kStopped && state != ServiceState::kRunning) {
+        s_hardware_switch_error.store(ESP_ERR_INVALID_STATE, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const RfHardware previous = s_hardware.load(std::memory_order_acquire);
+    if (previous == hardware) {
+        const esp_err_t persist_error = rf_storage_hardware_set(hardware);
+        s_hardware_switch_error.store(persist_error, std::memory_order_release);
+        return persist_error;
+    }
+    const BoardInfo &board = current_board_info();
+    if (hardware == RfHardware::kGeneric &&
+        !board_generic_gpio_map_is_valid(configured_board_profile(), board.cc1101,
+                                         board.cc1101.generic_tx, board.cc1101.generic_rx)) {
+        s_hardware_switch_error.store(ESP_ERR_INVALID_ARG, std::memory_order_release);
+        return ESP_ERR_INVALID_ARG;
+    }
+    const bool was_running = s_service_state.load(std::memory_order_acquire) == ServiceState::kRunning;
+    const RfFrameCallback callback = s_frame_callback;
+    void *context = s_callback_context;
+    const auto restart_with = [&](RfHardware selected) {
+        s_hardware.store(selected, std::memory_order_release);
+        s_start_override.store(selected, std::memory_order_release);
+        s_start_override_valid.store(true, std::memory_order_release);
+        const esp_err_t error = start_rf_ook_owned(callback, context);
+        s_start_override_valid.store(false, std::memory_order_release);
+        return error;
+    };
+    if (was_running) {
+        const esp_err_t stop_error = stop_rf_ook_owned();
+        if (stop_error != ESP_OK) {
+            s_hardware_switch_error.store(stop_error, std::memory_order_release);
+            return stop_error;
+        }
+        if (s_service_state.load(std::memory_order_acquire) != ServiceState::kStopped) {
+            s_hardware_switch_error.store(ESP_ERR_INVALID_STATE, std::memory_order_release);
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    s_hardware.store(hardware, std::memory_order_release);
+    if (was_running) {
+        const esp_err_t start_error = restart_with(hardware);
+        if (start_error != ESP_OK) {
+            const esp_err_t rollback_error = restart_with(previous);
+            if (rollback_error != ESP_OK) {
+                ESP_LOGE(kTag, "RF hardware rollback to %s failed: %s",
+                         rf_hardware_name(previous), esp_err_to_name(rollback_error));
+                s_hardware_switch_error.store(rollback_error, std::memory_order_release);
+                return rollback_error;
+            }
+            s_hardware_switch_error.store(start_error, std::memory_order_release);
+            return start_error;
+        }
+    }
+    const esp_err_t persist_error = rf_storage_hardware_set(hardware);
+    if (persist_error != ESP_OK) {
+        if (was_running) {
+            const esp_err_t stop_error = stop_rf_ook_owned();
+            if (stop_error != ESP_OK) {
+                s_hardware_switch_error.store(stop_error, std::memory_order_release);
+                return stop_error;
+            }
+            const esp_err_t rollback_error = restart_with(previous);
+            if (rollback_error != ESP_OK) {
+                ESP_LOGE(kTag, "RF hardware rollback to %s failed after persistence error: %s",
+                         rf_hardware_name(previous), esp_err_to_name(rollback_error));
+                s_hardware_switch_error.store(rollback_error, std::memory_order_release);
+                return rollback_error;
+            }
+        } else {
+            s_hardware.store(previous, std::memory_order_release);
+        }
+        s_hardware_switch_error.store(persist_error, std::memory_order_release);
+        return persist_error;
+    }
+    s_hardware_switch_error.store(ESP_OK, std::memory_order_release);
+    s_hardware_switches.fetch_add(1, std::memory_order_relaxed);
     return ESP_OK;
 }
 
@@ -1726,13 +1970,12 @@ esp_err_t reset_rf_radio()
 
 esp_err_t begin_rf_maintenance()
 {
-    bool expected = false;
-    if (!s_maintenance_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired() || s_hardware_switch_busy.load(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    LifecycleGuard lifecycle;
-    if (!lifecycle.acquired()) {
-        s_maintenance_requested.store(false, std::memory_order_release);
+    bool expected = false;
+    if (!s_maintenance_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return ESP_ERR_INVALID_STATE;
     }
     const ServiceState state = s_service_state.load(std::memory_order_acquire);
@@ -1754,11 +1997,11 @@ esp_err_t begin_rf_maintenance()
 
 esp_err_t end_rf_maintenance()
 {
-    if (!s_maintenance_requested.load(std::memory_order_acquire)) {
+    LifecycleGuard lifecycle;
+    if (!lifecycle.acquired() || s_hardware_switch_busy.load(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    LifecycleGuard lifecycle;
-    if (!lifecycle.acquired()) {
+    if (!s_maintenance_requested.load(std::memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
     const ServiceState state = s_service_state.load(std::memory_order_acquire);

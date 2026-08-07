@@ -27,6 +27,7 @@ assert(fixedStart >= 0 && fixedEnd > fixedStart, "fixed discovery entity catalog
 const fixedEntities = source.slice(fixedStart, fixedEnd);
 for (const entity of [
   "kInternalFreeSensor", "kInternalMinimumSensor", "kInternalLargestSensor", "kPsramFreeSensor",
+  "kHardwareSelect",
 ]) {
   assert(fixedEntities.includes(`MqttDiscoveryEntityKind::${entity}`),
          `fixed system discovery entity missing: ${entity}`);
@@ -52,5 +53,14 @@ assert(retirement.includes("for (const MqttDiscoveryEntityKind kind : kFixedEnti
 assert(retirement.includes("MqttStateTopicKind::kSystem") &&
        retirement.includes('wait_for_publish(context, topic, "", 0)'),
        "retirement must tombstone retained system state");
+
+const subscriptions = compact(functionSource("subscribe_topics"));
+assert(subscriptions.includes("context->hardware_command_topic") &&
+       subscriptions.includes("esp_mqtt_client_subscribe_multiple"),
+       "RF hardware commands must be part of the acknowledged subscription set");
+const commands = compact(functionSource("service_commands"));
+assert(commands.includes("MqttCommandType::kSetHardware") &&
+       commands.includes("bridge_control_set_rf_hardware(command.hardware, BridgeEventSource::kMqtt)"),
+       "RF hardware MQTT commands must use the shared switching transaction");
 
 console.log("MQTT runtime source contracts passed");

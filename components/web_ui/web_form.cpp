@@ -438,6 +438,30 @@ bool parse_web_rule_patch_form(const char *body, std::size_t length, WebRulePatc
            std::strcmp(output->log_mode, "verbose") == 0;
 }
 
+bool parse_web_hardware_form(const char *body, std::size_t length, WebHardwareForm *output)
+{
+    if (output == nullptr) {
+        return false;
+    }
+    Field fields[2]{};
+    std::size_t count = 0;
+    constexpr const char *keys[] = {"hardware"};
+    if (!parse_fields(body, length, fields, std::size(fields), &count) ||
+        !exact_fields(fields, count, keys, std::size(keys))) {
+        return false;
+    }
+    const Field *field = find_field(fields, count, "hardware");
+    if (field != nullptr && slice_equals(field->value, field->value_length, "cc1101")) {
+        output->hardware = RfHardware::kCc1101;
+        return true;
+    }
+    if (field != nullptr && slice_equals(field->value, field->value_length, "generic")) {
+        output->hardware = RfHardware::kGeneric;
+        return true;
+    }
+    return false;
+}
+
 bool web_form_content_type_is_valid(const char *content_type)
 {
     constexpr char expected[] = "application/x-www-form-urlencoded";

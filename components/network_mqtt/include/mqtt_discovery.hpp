@@ -45,6 +45,7 @@ enum class MqttDiscoveryEntityKind : uint8_t {
     kInternalMinimumSensor,
     kInternalLargestSensor,
     kPsramFreeSensor,
+    kHardwareSelect,
 };
 
 struct MqttDeviceIdentity {
@@ -82,6 +83,8 @@ bool format_mqtt_state_topic(const MqttDeviceIdentity &identity, MqttStateTopicK
 bool format_mqtt_automation_command_topic(const MqttDeviceIdentity &identity,
                                            MqttAutomationCommandKind kind, char *output,
                                            std::size_t capacity);
+bool format_mqtt_hardware_command_topic(const MqttDeviceIdentity &identity, char *output,
+                                         std::size_t capacity);
 bool format_mqtt_entity_discovery_topic(const MqttDeviceIdentity &identity,
                                         MqttDiscoveryEntityKind kind, const char *rule_name,
                                         char *output, std::size_t capacity);
@@ -100,6 +103,8 @@ bool parse_mqtt_automation_command(const MqttDeviceIdentity &identity,
                                    const MqttIncomingMessage &message,
                                    MqttAutomationCommandKind *kind, bool *enabled,
                                    uint8_t *log_mode);
+bool parse_mqtt_hardware_command(const MqttDeviceIdentity &identity,
+                                 const MqttIncomingMessage &message, RfHardware *hardware);
 bool mqtt_message_is_home_assistant_birth(const MqttIncomingMessage &message);
 
 }  // namespace rfbridge

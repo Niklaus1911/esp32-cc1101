@@ -77,6 +77,7 @@ std::atomic<bool> s_initialization_finished{false};
 std::atomic<bool> s_available{false};
 std::atomic<bool> s_enabled{false};
 std::atomic<bool> s_runtime_paused{false};
+uint8_t s_runtime_pause_reasons = 0;
 std::atomic<uint32_t> s_generation{0};
 std::atomic<int64_t> s_generation_changed_us{0};
 std::atomic<uint32_t> s_queue_drops{0};
@@ -455,6 +456,7 @@ esp_err_t initialize_rf_automation()
         s_next_action_id = 0;
         s_enabled.store(enabled, std::memory_order_release);
         s_runtime_paused.store(false, std::memory_order_release);
+        s_runtime_pause_reasons = 0;
         s_log_mode = static_cast<RfAutomationLogMode>(persisted_log_mode);
         s_generation.store(1, std::memory_order_release);
         s_generation_changed_us.store(esp_timer_get_time(), std::memory_order_release);
@@ -769,7 +771,7 @@ esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode)
     return ESP_OK;
 }
 
-esp_err_t rf_automation_set_runtime_paused(bool paused)
+esp_err_t rf_automation_set_runtime_paused(RfAutomationPauseReason reason, bool paused)
 {
     if (!s_available.load(std::memory_order_acquire)) {
         return ESP_OK;
@@ -778,9 +780,21 @@ esp_err_t rf_automation_set_runtime_paused(bool paused)
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;
     }
-    const bool changed = s_runtime_paused.load(std::memory_order_relaxed) != paused;
-    s_runtime_paused.store(paused, std::memory_order_release);
-    s_status.runtime_paused = paused;
+    const uint8_t reason_bit = static_cast<uint8_t>(reason);
+    if (reason_bit != static_cast<uint8_t>(RfAutomationPauseReason::kOtaMaintenance) &&
+        reason_bit != static_cast<uint8_t>(RfAutomationPauseReason::kHardwareSwitch)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const bool was_paused = s_runtime_paused.load(std::memory_order_relaxed);
+    if (paused) {
+        s_runtime_pause_reasons |= reason_bit;
+    } else {
+        s_runtime_pause_reasons &= static_cast<uint8_t>(~reason_bit);
+    }
+    const bool now_paused = s_runtime_pause_reasons != 0;
+    const bool changed = was_paused != now_paused;
+    s_runtime_paused.store(now_paused, std::memory_order_release);
+    s_status.runtime_paused = now_paused;
     if (changed) {
         advance_generation();
     }

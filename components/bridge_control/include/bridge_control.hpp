@@ -45,6 +45,7 @@ bool bridge_control_decoded_request_is_valid(const DecodedTransmitRequest &reque
 bool bridge_control_raw_request_is_valid(const RawTransmitRequest &request);
 esp_err_t bridge_control_get_status(BridgeStatusSnapshot *status);
 esp_err_t bridge_control_start_radio();
+esp_err_t bridge_control_set_rf_hardware(RfHardware hardware, BridgeEventSource source);
 esp_err_t bridge_control_reset_radio();
 esp_err_t bridge_control_transmit_decoded(const DecodedTransmitRequest &request,
                                           BridgeEventSource source,

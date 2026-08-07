@@ -29,6 +29,7 @@ enum class BridgeEventType : uint8_t {
     kWebStarted,
     kWebStopped,
     kSignalCatalogChanged,
+    kHardwareSwitch,
 };
 
 enum class BridgeEventSource : uint8_t {

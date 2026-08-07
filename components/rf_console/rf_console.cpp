@@ -794,6 +794,16 @@ void process_bridge_event(const ConsoleSystemEvent &event)
             tag = "WEB";
             tone = ConsoleTone::kMuted;
             break;
+        case BridgeEventType::kHardwareSwitch:
+            std::snprintf(plain, sizeof(plain), "RF HARDWARE hardware=%s result=%s",
+                          rf_hardware_name(static_cast<RfHardware>(event.value)),
+                          esp_err_to_name(event.result));
+            std::snprintf(pretty, sizeof(pretty), "RF hardware %s: %s",
+                          rf_hardware_name(static_cast<RfHardware>(event.value)),
+                          event.result == ESP_OK ? "active" : esp_err_to_name(event.result));
+            tag = "RF";
+            tone = event.result == ESP_OK ? ConsoleTone::kSuccess : ConsoleTone::kError;
+            break;
         default:
             return;
     }
@@ -830,7 +840,8 @@ bool enqueue_bridge_event(const BridgeEvent &event, void *)
         case BridgeEventType::kTxStarted:
         case BridgeEventType::kTxCompleted:
         case BridgeEventType::kWebStarted:
-        case BridgeEventType::kWebStopped: {
+        case BridgeEventType::kWebStopped:
+        case BridgeEventType::kHardwareSwitch: {
             ConsoleSystemEvent system_event{};
             system_event.type = event.type;
             system_event.source = event.source;
@@ -1012,6 +1023,10 @@ void format_half_dbm(int16_t value_x2, char *output, std::size_t capacity)
 
 void print_plain_radio_status(const RfRadioStatus &status, bool include_summary)
 {
+    std::printf("RADIO hardware=%s generic_tx_gpio=%d generic_rx_gpio=%d switch_error=%s switches=%lu\n",
+                rf_hardware_name(status.hardware), status.generic_tx_gpio, status.generic_rx_gpio,
+                esp_err_to_name(status.hardware_switch_error),
+                static_cast<unsigned long>(status.hardware_switches));
     if (include_summary) {
         std::printf("STATUS running=%u rx_enabled=%u rx_active=%u tx=%u maintenance=%u has_last=%u accepted=%lu duplicates=%lu rx_drops=%lu truncated=%lu command_timeouts=%lu console_drops=%lu\n",
                     status.running, status.receive_enabled, status.receive_active, status.transmitting,
@@ -1023,7 +1038,10 @@ void print_plain_radio_status(const RfRadioStatus &status, bool include_summary)
                     static_cast<unsigned long>(status.command_timeouts),
                     static_cast<unsigned long>(s_frame_queue_drops.load(std::memory_order_relaxed)));
     }
-    if (status.cc1101_info_valid) {
+    if (status.hardware == RfHardware::kGeneric) {
+        std::printf("RADIO_GENERIC tx_gpio=%d rx_gpio=%d carrier=module_defined power=module_defined\n",
+                    status.generic_tx_gpio, status.generic_rx_gpio);
+    } else if (status.cc1101_info_valid) {
         std::printf("RADIO part=0x%02X version=0x%02X state=0x%02X rssi_x2=%d cs=%u cca=%u resets=%lu recoveries=%lu ready_timeouts=%lu state_timeouts=%lu frequency_hz=%d power_dbm=%d\n",
                     status.cc1101.part_number, status.cc1101.version, status.cc1101.marc_state,
                     status.cc1101.rssi_dbm_x2, status.cc1101.carrier_sense,
@@ -1059,7 +1077,10 @@ void print_pretty_radio_status(const RfRadioStatus &status, bool include_summary
         print_dashboard_footer();
     }
 
-    print_dashboard_header("RF / CC1101");
+    print_dashboard_header("RF hardware");
+    print_dashboard_value("Backend", rf_hardware_name(status.hardware),
+                          status.hardware == RfHardware::kGeneric ? ConsoleTone::kAction
+                                                                     : ConsoleTone::kInfo);
     const char *receive = status.receive_active
                               ? "ACTIVE"
                               : (status.receive_enabled ? "ENABLED" : "OFF");
@@ -1071,12 +1092,23 @@ void print_pretty_radio_status(const RfRadioStatus &status, bool include_summary
                         status.transmitting ? ConsoleTone::kAction : ConsoleTone::kMuted,
                         "Maintenance", status.maintenance_active ? "ACTIVE" : "no",
                         status.maintenance_active ? ConsoleTone::kWarning : ConsoleTone::kMuted);
-    std::snprintf(left, sizeof(left), "%d.%03d MHz", CONFIG_CC1101_FREQUENCY_HZ / 1000000,
-                  (CONFIG_CC1101_FREQUENCY_HZ % 1000000) / 1000);
-    std::snprintf(right, sizeof(right), "%+d dBm", CONFIG_CC1101_TX_POWER_DBM);
-    print_dashboard_row("Frequency", left, ConsoleTone::kInfo, "TX power", right,
-                        ConsoleTone::kAction);
-    if (status.cc1101_info_valid) {
+    if (status.hardware == RfHardware::kGeneric) {
+        std::snprintf(left, sizeof(left), "GPIO%d", status.generic_rx_gpio);
+        std::snprintf(right, sizeof(right), "GPIO%d", status.generic_tx_gpio);
+        print_dashboard_row("Generic RX", left, ConsoleTone::kInfo, "Generic TX", right,
+                            ConsoleTone::kAction);
+        print_dashboard_row("Carrier", "module-defined", ConsoleTone::kMuted, "TX power",
+                            "module-defined", ConsoleTone::kMuted);
+        print_dashboard_value("CC1101 diagnostics", "unavailable in generic mode",
+                              ConsoleTone::kMuted);
+    } else {
+        std::snprintf(left, sizeof(left), "%d.%03d MHz", CONFIG_CC1101_FREQUENCY_HZ / 1000000,
+                      (CONFIG_CC1101_FREQUENCY_HZ % 1000000) / 1000);
+        std::snprintf(right, sizeof(right), "%+d dBm", CONFIG_CC1101_TX_POWER_DBM);
+        print_dashboard_row("Frequency", left, ConsoleTone::kInfo, "TX power", right,
+                            ConsoleTone::kAction);
+    }
+    if (status.hardware == RfHardware::kCc1101 && status.cc1101_info_valid) {
         std::snprintf(left, sizeof(left), "part 0x%02X / ver 0x%02X", status.cc1101.part_number,
                       status.cc1101.version);
         std::snprintf(right, sizeof(right), "0x%02X", status.cc1101.marc_state);
@@ -1099,11 +1131,17 @@ void print_pretty_radio_status(const RfRadioStatus &status, bool include_summary
                                status.cc1101.state_timeout_count == 0)
                                   ? ConsoleTone::kMuted
                                   : ConsoleTone::kError);
-    } else {
+    } else if (status.hardware == RfHardware::kCc1101) {
         std::snprintf(left, sizeof(left), "%s (0x%x)", esp_err_to_name(status.cc1101_error),
                       static_cast<unsigned>(status.cc1101_error));
         print_dashboard_value("Hardware", left, ConsoleTone::kError);
     }
+    std::snprintf(left, sizeof(left), "%s", esp_err_to_name(status.hardware_switch_error));
+    std::snprintf(right, sizeof(right), "%lu", static_cast<unsigned long>(status.hardware_switches));
+    print_dashboard_row("Switch error", left,
+                        status.hardware_switch_error == ESP_OK ? ConsoleTone::kMuted
+                                                               : ConsoleTone::kError,
+                        "Switches", right, ConsoleTone::kInfo);
     std::snprintf(left, sizeof(left), "accepted %lu / duplicate %lu",
                   static_cast<unsigned long>(status.accepted_frames),
                   static_cast<unsigned long>(status.suppressed_duplicates));
@@ -1472,6 +1510,8 @@ int render_board_status()
         std::printf("BOARD_CC1101 sclk=%d miso=%d mosi=%d cs=%d gdo0_tx=%d gdo2_rx=%d\n",
                     board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi,
                     board.cc1101.cs, board.cc1101.gdo0, board.cc1101.gdo2);
+        std::printf("BOARD_GENERIC tx_data=%d rx_data=%d\n", board.cc1101.generic_tx,
+                    board.cc1101.generic_rx);
         return 0;
     }
     print_dashboard_header("Board profile");
@@ -1496,6 +1536,9 @@ int render_board_status()
     std::snprintf(left, sizeof(left), "TX GDO0 %d / RX GDO2 %d", board.cc1101.gdo0,
                   board.cc1101.gdo2);
     print_dashboard_value("CC1101 RMT", left, ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d", board.cc1101.generic_tx,
+                  board.cc1101.generic_rx);
+    print_dashboard_value("Generic RF", left, ConsoleTone::kInfo);
     print_dashboard_footer();
     return 0;
 }
@@ -2044,7 +2087,28 @@ int radio_command(int argc, char **argv)
     if (argc == 2 && std::strcmp(argv[1], "start") == 0) {
         return print_result("radio start", bridge_control_start_radio());
     }
-    return print_usage("usage: radio <info|reset|start>");
+    if (argc == 2 && std::strcmp(argv[1], "hardware") == 0) {
+        OutputGuard guard;
+        if (!guard.locked()) {
+            return 1;
+        }
+        RfHardware hardware{};
+        const esp_err_t error = get_rf_hardware(&hardware);
+        if (error != ESP_OK) {
+            return print_result("radio hardware", error);
+        }
+        std::printf("RADIO hardware=%s\n", rf_hardware_name(hardware));
+        return 0;
+    }
+    if (argc == 3 && std::strcmp(argv[1], "hardware") == 0) {
+        RfHardware hardware{};
+        if (!rf_hardware_from_name(argv[2], &hardware)) {
+            return print_usage("usage: radio hardware [cc1101|generic]");
+        }
+        return print_result("radio hardware",
+                            bridge_control_set_rf_hardware(hardware, BridgeEventSource::kUart));
+    }
+    return print_usage("usage: radio <info|reset|start|hardware [cc1101|generic]>");
 }
 
 int last_command(int argc, char **)
@@ -2522,7 +2586,7 @@ constexpr CommandDefinition kCommands[] = {
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
     {"web", "Inspect or rotate the legacy Web authentication record",
      "auth <status|rotate>", web_command},
-    {"radio", "Start, show, or reset the CC1101", "<start|info|reset>", radio_command},
+    {"radio", "Start, inspect, reset, or select RF hardware", "<start|info|reset|hardware>", radio_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
@@ -2890,13 +2954,13 @@ esp_err_t start_rf_console()
         OutputGuard output_guard;
         if (current_console_style() == ConsoleStyle::kPretty) {
             std::printf("\n");
-            print_dashboard_header("ESP32 + CC1101 RF Bridge");
+            print_dashboard_header("ESP32 RF Bridge");
             print_dashboard_row("Console", "READY", ConsoleTone::kSuccess, "Style", "pretty",
                                 ConsoleTone::kInfo);
             print_dashboard_value("Hint", "Type help to list commands", ConsoleTone::kMuted);
             print_dashboard_footer();
         } else {
-            std::printf("\nNative ESP32 + CC1101 RF console ready. Type 'help'.\n");
+            std::printf("\nNative ESP32 RF console ready. Type 'help'.\n");
         }
     }
     print_persistent_configuration_summary();

@@ -127,20 +127,25 @@
     <section id="system-status" class="view" data-panel="system" hidden>
       <div class="metric-grid system-summary" aria-label="System health summary">
         <div class="metric"><span>RF service</span><strong id="system-radio-summary">Loading</strong></div>
-        <div class="metric"><span>CC1101</span><strong id="system-cc1101-summary">Loading</strong></div>
+        <div class="metric"><span>RF backend</span><strong id="system-cc1101-summary">Loading</strong></div>
         <div class="metric"><span>Wi-Fi</span><strong id="system-wifi-summary">Loading</strong></div>
         <div class="metric"><span>Free memory</span><strong id="system-memory-summary">Loading</strong></div>
       </div>
 
       <section class="band system-status-band">
-        <div class="section-heading"><h2>RF and CC1101</h2><span id="system-radio-badge" class="state">Loading</span></div>
+        <div class="section-heading"><h2>RF hardware</h2><span id="system-radio-badge" class="state">Loading</span></div>
+        <div class="settings-row">
+          <label>RF backend<select id="radio-hardware"><option value="cc1101">CC1101</option><option value="generic">Generic ASK/OOK</option></select></label>
+          <button id="apply-radio-hardware" type="button" class="primary">Apply</button>
+          <span id="radio-hardware-feedback" class="subtle" role="status"></span>
+        </div>
         <div class="system-grid">
           <div class="system-group">
             <h3>RF service</h3>
             <dl id="system-radio-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
           </div>
           <div class="system-group">
-            <h3>CC1101</h3>
+            <h3>Backend diagnostics</h3>
             <dl id="system-cc1101-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
           </div>
         </div>

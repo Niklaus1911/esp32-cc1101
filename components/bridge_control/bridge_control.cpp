@@ -1,11 +1,39 @@
 #include "bridge_control.hpp"
 
+#include <atomic>
 #include <cstring>
 
 #include "rf_storage.hpp"
 
 namespace rfbridge {
 namespace {
+
+std::atomic<bool> s_rf_hardware_switch_busy{false};
+
+class HardwareSwitchGuard {
+public:
+    HardwareSwitchGuard()
+    {
+        bool expected = false;
+        acquired_ = s_rf_hardware_switch_busy.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel);
+    }
+
+    ~HardwareSwitchGuard()
+    {
+        if (acquired_) {
+            s_rf_hardware_switch_busy.store(false, std::memory_order_release);
+        }
+    }
+
+    bool acquired() const
+    {
+        return acquired_;
+    }
+
+private:
+    bool acquired_ = false;
+};
 
 void publish_tx_event(BridgeEventType type, BridgeEventSource source, uint32_t operation_id,
                       uint16_t repeats, const RfFrame *frame, const char *name,
@@ -97,6 +125,27 @@ esp_err_t bridge_control_get_status(BridgeStatusSnapshot *status)
 esp_err_t bridge_control_start_radio()
 {
     return start_rf_ook(rf_signals_on_frame, nullptr);
+}
+
+esp_err_t bridge_control_set_rf_hardware(RfHardware hardware, BridgeEventSource source)
+{
+    HardwareSwitchGuard switch_guard;
+    BridgeEvent event{};
+    event.type = BridgeEventType::kHardwareSwitch;
+    event.source = source;
+    event.value = static_cast<uint32_t>(hardware);
+    const esp_err_t pause_error = switch_guard.acquired()
+                                      ? rf_automation_set_runtime_paused(
+                                            RfAutomationPauseReason::kHardwareSwitch, true)
+                                      : ESP_ERR_INVALID_STATE;
+    const esp_err_t switch_error = pause_error == ESP_OK ? set_rf_hardware(hardware) : pause_error;
+    const esp_err_t resume_error = pause_error == ESP_OK
+                                       ? rf_automation_set_runtime_paused(
+                                             RfAutomationPauseReason::kHardwareSwitch, false)
+                                       : ESP_OK;
+    event.result = switch_error != ESP_OK ? switch_error : resume_error;
+    bridge_events_publish(event);
+    return event.result;
 }
 
 esp_err_t bridge_control_reset_radio()
