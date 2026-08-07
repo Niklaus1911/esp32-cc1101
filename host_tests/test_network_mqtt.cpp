@@ -468,6 +468,8 @@ void test_discovery_contract()
          "ESP32-S3 DevKitC N16R8 + CC1101", "esp32s3-devkitc-n16r8"},
         {rfbridge::BoardProfile::kXiaoEsp32s3,
          "Seeed Studio XIAO ESP32-S3 + CC1101", "xiao-esp32s3"},
+        {rfbridge::BoardProfile::kEsp32s3SuperminiFh4r2,
+         "ESP32-S3 SuperMini FH4R2 + CC1101", "esp32s3-supermini-fh4r2"},
     };
     for (const auto &expected_board : boards) {
         require(rfbridge::format_mqtt_discovery_payload(

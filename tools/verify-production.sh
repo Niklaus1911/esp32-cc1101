@@ -131,7 +131,16 @@ run_profile() {
         require_exact_line "$sdkconfig" 'CONFIG_ESPTOOLPY_FLASHFREQ_40M=y' \
             'S3 40 MHz flash frequency'
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM=y' 'required S3 PSRAM'
-        require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_MODE_OCT=y' 'Octal S3 PSRAM'
+        case "$profile" in
+            esp32s3-supermini-fh4r2)
+                require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_MODE_QUAD=y' 'Quad FH4R2 PSRAM'
+                require_exact_line "$sdkconfig" '# CONFIG_SPIRAM_MODE_OCT is not set' \
+                    'disabled FH4R2 Octal PSRAM';;
+            *)
+                require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_MODE_OCT=y' 'Octal S3 PSRAM'
+                require_exact_line "$sdkconfig" '# CONFIG_SPIRAM_MODE_QUAD is not set' \
+                    'disabled S3 Quad PSRAM';;
+        esac
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_SPEED_80M=y' '80 MHz S3 PSRAM'
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_BOOT_HW_INIT=y' \
             'S3 boot PSRAM initialization'
@@ -190,6 +199,21 @@ run_profile() {
             require_exact_line "$sdkconfig" 'CONFIG_RF_ACTIVITY_LED_PULSE_MS=25' 'XIAO LED pulse duration';
             require_exact_line "$sdkconfig" 'CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y' 'XIAO native USB console';
             require_exact_line "$sdkconfig" 'CONFIG_ESP_CONSOLE_UART_NUM=-1' 'disabled XIAO UART console';;
+        esp32s3-supermini-fh4r2)
+            require_exact_line "$sdkconfig" 'CONFIG_PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2=y' \
+                'FH4R2 board profile';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_SPI_SCLK_GPIO=12' 'FH4R2 CC1101 SCK';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_SPI_MISO_GPIO=13' 'FH4R2 CC1101 MISO';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_SPI_MOSI_GPIO=11' 'FH4R2 CC1101 MOSI';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_SPI_CS_GPIO=10' 'FH4R2 CC1101 CSN';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_GDO0_GPIO=4' 'FH4R2 CC1101 GDO0';
+            require_exact_line "$sdkconfig" 'CONFIG_CC1101_GDO2_GPIO=5' 'FH4R2 CC1101 GDO2';
+            require_exact_line "$sdkconfig" '# CONFIG_RF_ACTIVITY_LED_ENABLE is not set' \
+                'disabled FH4R2 LED';
+            require_exact_line "$sdkconfig" 'CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y' \
+                'FH4R2 native USB console';
+            require_exact_line "$sdkconfig" 'CONFIG_ESP_CONSOLE_UART_NUM=-1' \
+                'disabled FH4R2 UART console';;
     esac
     printf '%s passed: image=0x%x bytes, slot=0x%x, free_margin=0x%x\n' "$profile" "$image_size" "$slot_size" "$((slot_size - image_size))"
 }
@@ -210,4 +234,6 @@ run_profile xiao-esp32s3 esp32s3 8 2 $((0x3e0000)) "$S3_LOCK" \
     '52464244 01100302 08020000 00000000'
 run_profile esp32s3-devkitc-n16r8 esp32s3 16 3 $((0x7e0000)) "$S3_LOCK" \
     '52464244 01100202 10030000 00000000'
-printf '\nThree-profile production verification passed. Logs: %s\n' "$OUTPUT_ROOT"
+run_profile esp32s3-supermini-fh4r2 esp32s3 4 1 $((0x1e0000)) "$S3_LOCK" \
+    '52464244 01100402 04010000 00000000'
+printf '\nFour-profile production verification passed. Logs: %s\n' "$OUTPUT_ROOT"

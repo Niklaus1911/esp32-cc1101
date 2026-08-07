@@ -1475,17 +1475,21 @@ int render_board_status()
         return 0;
     }
     print_dashboard_header("Board profile");
-    print_dashboard_row("Profile", board.profile_name, ConsoleTone::kInfo,
-                        "Target", board.target_name, ConsoleTone::kInfo);
+    // Profile identifiers are part of the machine-readable board contract and can exceed
+    // the two-column value width; render this identity on the full-width dashboard row.
+    print_dashboard_value("Profile", board.profile_name, ConsoleTone::kInfo);
     char left[64]{};
     char right[64]{};
     std::snprintf(left, sizeof(left), "%u MiB", board.flash_mib);
     std::snprintf(right, sizeof(right), "%u MiB", board.psram_mib);
-    print_dashboard_row("Flash", left, ConsoleTone::kInfo, "PSRAM", right,
-                        board.psram_mib == 0 ? ConsoleTone::kMuted : ConsoleTone::kSuccess);
-    print_dashboard_row("Console", console_transport_name(board.console), ConsoleTone::kInfo,
-                        "Web + MQTT", board.combined_services ? "supported" : "unsupported",
-                        board.combined_services ? ConsoleTone::kSuccess : ConsoleTone::kMuted);
+    print_dashboard_row("Target", board.target_name, ConsoleTone::kInfo, "Flash", left,
+                        ConsoleTone::kInfo);
+    print_dashboard_row("PSRAM", right,
+                        board.psram_mib == 0 ? ConsoleTone::kMuted : ConsoleTone::kSuccess,
+                        "Console", console_transport_name(board.console), ConsoleTone::kInfo);
+    print_dashboard_value("Web + MQTT",
+                          board.combined_services ? "supported" : "unsupported",
+                          board.combined_services ? ConsoleTone::kSuccess : ConsoleTone::kMuted);
     std::snprintf(left, sizeof(left), "SCK %d / MISO %d / MOSI %d / CS %d",
                   board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi, board.cc1101.cs);
     print_dashboard_value("CC1101 SPI", left, ConsoleTone::kInfo);

@@ -10,8 +10,10 @@ readonly MOCK_BIN="$test_dir/bin"
 readonly CLASSIC_IMAGE="$test_dir/classic.bin"
 readonly XIAO_IMAGE="$test_dir/xiao.bin"
 readonly N16R8_IMAGE="$test_dir/n16r8.bin"
+readonly SUPERMINI_IMAGE="$test_dir/supermini.bin"
 readonly INVALID_IMAGE="$test_dir/invalid.bin"
 readonly OVERSIZED_IMAGE="$test_dir/oversized.bin"
+readonly OVERSIZED_SUPERMINI_IMAGE="$test_dir/oversized-supermini.bin"
 readonly TINY_IMAGE="$test_dir/tiny.bin"
 readonly CURL_LOG="$test_dir/curl.log"
 readonly OUTPUT="$test_dir/output.log"
@@ -31,6 +33,9 @@ make_image() {
         n16r8)
             printf '\x52\x46\x42\x44\x01\x10\x02\x02\x10\x03\x00\x00\x00\x00\x00\x00'
             ;;
+        fh4r2)
+            printf '\x52\x46\x42\x44\x01\x10\x04\x02\x04\x01\x00\x00\x00\x00\x00\x00'
+            ;;
         invalid)
             printf '\x00\x46\x42\x44\x01\x10\x02\x02\x10\x03\x00\x00\x00\x00\x00\x00'
             ;;
@@ -40,9 +45,12 @@ make_image() {
 make_image "$CLASSIC_IMAGE" classic
 make_image "$XIAO_IMAGE" xiao
 make_image "$N16R8_IMAGE" n16r8
+make_image "$SUPERMINI_IMAGE" fh4r2
 make_image "$INVALID_IMAGE" invalid
 cp -- "$N16R8_IMAGE" "$OVERSIZED_IMAGE"
 truncate -s $((0x7e0001)) "$OVERSIZED_IMAGE"
+cp -- "$SUPERMINI_IMAGE" "$OVERSIZED_SUPERMINI_IMAGE"
+truncate -s $((0x1e0001)) "$OVERSIZED_SUPERMINI_IMAGE"
 printf 'tiny' >"$TINY_IMAGE"
 
 cat >"$MOCK_BIN/esptool" <<'MOCK_ESPTOOL'
@@ -58,6 +66,10 @@ case "${MOCK_IMAGE_METADATA:-classic}" in
         ;;
     n16r8)
         flash='Flash size: 16MB'
+        chip='Chip ID: 9 (ESP32-S3)'
+        ;;
+    fh4r2)
+        flash='Flash size: 4MB'
         chip='Chip ID: 9 (ESP32-S3)'
         ;;
 esac
@@ -138,6 +150,11 @@ run_push success 192.168.1.17 "$N16R8_IMAGE" n16r8 >"$OUTPUT" 2>&1
 grep -q 'Image profile: esp32s3-devkitc-n16r8; OTA slot limit: 0x7e0000 bytes' "$OUTPUT"
 grep -qx -- "UPLOAD:@$N16R8_IMAGE" "$CURL_LOG"
 
+: >"$CURL_LOG"
+run_push success 192.168.1.17 "$SUPERMINI_IMAGE" fh4r2 >"$OUTPUT" 2>&1
+grep -q 'Image profile: esp32s3-supermini-fh4r2; OTA slot limit: 0x1e0000 bytes' "$OUTPUT"
+grep -qx -- "UPLOAD:@$SUPERMINI_IMAGE" "$CURL_LOG"
+
 if run_push success 192.168.1.17 "$INVALID_IMAGE" n16r8 >"$OUTPUT" 2>&1; then
     printf 'Expected an unsupported board descriptor to fail\n' >&2
     exit 1
@@ -155,6 +172,12 @@ if run_push success 192.168.1.17 "$OVERSIZED_IMAGE" n16r8 >"$OUTPUT" 2>&1; then
     exit 1
 fi
 grep -q 'outside the esp32s3-devkitc-n16r8 OTA slot limit' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$OVERSIZED_SUPERMINI_IMAGE" fh4r2 >"$OUTPUT" 2>&1; then
+    printf 'Expected an oversized FH4R2 image to fail\n' >&2
+    exit 1
+fi
+grep -q 'outside the esp32s3-supermini-fh4r2 OTA slot limit' "$OUTPUT"
 
 if run_push success 192.168.1.17 "$TINY_IMAGE" n16r8 >"$OUTPUT" 2>&1; then
     printf 'Expected an image without a descriptor to fail\n' >&2

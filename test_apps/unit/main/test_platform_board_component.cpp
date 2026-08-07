@@ -27,3 +27,15 @@ TEST_CASE("running board metadata reflects compiled GPIO configuration", "[platf
     TEST_ASSERT_EQUAL(-1, board.activity_led_gpio);
 #endif
 }
+
+TEST_CASE("FH4R2 board policy is available to the Unity image", "[platform_board]")
+{
+    const BoardInfo *board = board_info(BoardProfile::kEsp32s3SuperminiFh4r2);
+    TEST_ASSERT_NOT_NULL(board);
+    TEST_ASSERT_EQUAL_UINT8(4, board->flash_mib);
+    TEST_ASSERT_EQUAL_UINT8(2, board->psram_mib);
+    TEST_ASSERT_TRUE(board->combined_services);
+    TEST_ASSERT_EQUAL(ConsoleTransport::kUsbSerialJtag, board->console);
+    TEST_ASSERT_TRUE(board_cc1101_gpio_map_is_valid(board->profile, board->cc1101));
+    TEST_ASSERT_FALSE(board_activity_led_gpio_is_valid(board->profile, 48, nullptr, 0));
+}

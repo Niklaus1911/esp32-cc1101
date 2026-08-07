@@ -13,6 +13,7 @@ menu "OOK service configuration"
     config RF_ACTIVITY_LED_ENABLE
         bool "Enable the startup and RF activity LED"
         default n if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
+        default n if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default y
         help
             Blinks a GPIO three times during application startup, with fixed 150 ms dark

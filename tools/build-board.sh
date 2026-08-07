@@ -7,9 +7,10 @@ readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly IDF_EXPORT="$HOME/.espressif/v6.0.2/esp-idf/export.sh"
 readonly CLASSIC_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00"
 readonly N16R8_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_N16R8-if00"
+readonly SUPERMINI_FH4R2_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00"
 
 usage() {
-    printf 'usage: %s <esp32-devkit|esp32s3-devkitc-n16r8|xiao-esp32s3> <build|size|flash|monitor> [--port <path>]\n' "$0" >&2
+    printf 'usage: %s <esp32-devkit|esp32s3-devkitc-n16r8|xiao-esp32s3|esp32s3-supermini-fh4r2> <build|size|flash|monitor> [--port <path>]\n' "$0" >&2
     exit 2
 }
 
@@ -51,6 +52,15 @@ case "$profile" in
         expected_chip_info="Chip ID: 9 (ESP32-S3)"
         expected_profile_define="CONFIG_PLATFORM_BOARD_XIAO_ESP32S3=y"
         expected_descriptor='52464244 01100302 08020000 00000000'
+        ;;
+    esp32s3-supermini-fh4r2)
+        target="esp32s3"
+        approved_port="$SUPERMINI_FH4R2_APPROVED_PORT"
+        expected_flash_define="CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y"
+        expected_flash_info="Flash size: 4MB"
+        expected_chip_info="Chip ID: 9 (ESP32-S3)"
+        expected_profile_define="CONFIG_PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2=y"
+        expected_descriptor='52464244 01100402 04010000 00000000'
         ;;
     *) usage ;;
 esac

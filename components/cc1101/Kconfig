@@ -8,6 +8,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 12 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 7 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 12 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 18
 
     config CC1101_SPI_MISO_GPIO
@@ -16,6 +17,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 13 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 8 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 13 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 19
 
     config CC1101_SPI_MOSI_GPIO
@@ -24,6 +26,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 11 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 9 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 11 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 23
 
     config CC1101_SPI_CS_GPIO
@@ -32,6 +35,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 10 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 4 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 10 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 27
 
     config CC1101_GDO0_GPIO
@@ -40,6 +44,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 4 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 2 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 4 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 26
 
     config CC1101_GDO2_GPIO
@@ -48,6 +53,7 @@ menu "CC1101 radio configuration"
         range 0 48 if IDF_TARGET_ESP32S3
         default 5 if PLATFORM_BOARD_ESP32S3_DEVKITC_N16R8
         default 1 if PLATFORM_BOARD_XIAO_ESP32S3
+        default 5 if PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
         default 25
 
     config CC1101_XTAL_HZ

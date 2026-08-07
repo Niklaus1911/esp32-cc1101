@@ -9,6 +9,7 @@ enum class BoardProfile : uint8_t {
     kEsp32Devkit = 1,
     kEsp32s3DevkitcN16r8 = 2,
     kXiaoEsp32s3 = 3,
+    kEsp32s3SuperminiFh4r2 = 4,
 };
 
 enum class BoardTarget : uint8_t {

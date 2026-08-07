@@ -16,6 +16,10 @@ menu "RF bridge board profile"
         config PLATFORM_BOARD_XIAO_ESP32S3
             bool "Seeed Studio XIAO ESP32-S3"
             depends on IDF_TARGET_ESP32S3
+
+        config PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
+            bool "ESP32-S3FH4R2 SuperMini"
+            depends on IDF_TARGET_ESP32S3
     endchoice
 
 endmenu

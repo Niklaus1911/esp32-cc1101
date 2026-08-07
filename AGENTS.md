@@ -32,7 +32,13 @@ cmake --build /tmp/esp32-cc1101-host-tests
 ctest --test-dir /tmp/esp32-cc1101-host-tests --output-on-failure
 ```
 
-The production verifier activates the installed ESP-IDF 6.0.2 environment itself:
+`tools/verify-production.sh` is an expensive clean, four-profile gate. Do not run it as a routine or iterative check. During development, prefer focused host tests, syntax checks, the ESP-IDF Tools MCP `build_project` operation, or `tools/build-board.sh <affected-profile> build`.
+
+Run the production verifier only once on the final unchanged candidate when a tracked change can alter production firmware output or its verification contracts. This includes firmware source and embedded assets, component/build metadata, board profiles, partition tables, defaults, dependency locks, flash/PSRAM configuration, and image-size or descriptor checks. Also run it before flashing, OTA, or releasing a new binary that has not already passed at the same revision.
+
+Skip the verifier for plans, documentation, comments, Git cleanup, local editor configuration, and test-only changes that cannot alter production output. Reuse a successful result for the same unchanged revision; rerun only after a relevant production input changes or when the previous run failed or did not complete. Before invoking it, state the concrete reason it is required.
+
+When these criteria require the verifier, it activates the installed ESP-IDF 6.0.2 environment itself:
 
 ```bash
 tools/verify-production.sh
@@ -46,7 +52,7 @@ cd test_apps/unit
 idf.py -B build build
 ```
 
-The production verifier runs a clean out-of-tree firmware build, size report, and image inspection under `/tmp`. It does not access hardware. `idf.py build` is the authoritative compiler gate.
+The production verifier runs a clean out-of-tree firmware build, size report, and image inspection under `/tmp`. It does not access hardware. `idf.py build` remains the authoritative compiler gate.
 
 ## Diagnostics
 
@@ -62,7 +68,7 @@ Use targeted Web search whenever it can materially improve a design or debugging
 
 The active Codex CLI setup provides the Espressif Documentation, ESP-IDF Tools, and Playwright MCP servers. Start Codex from the repository root so the ESP-IDF Tools server operates on this project. Use the Espressif Documentation MCP before generic Web search for ESP-IDF APIs, version-specific behavior, hardware constraints, release notes, and official examples; confirm results apply to ESP-IDF 6.0.2 and classic ESP32. Use broader Web research for upstream defects and implementation patterns not resolved by official material.
 
-Use the ESP-IDF Tools MCP `build_project` operation as a fast iterative compiler check. It writes the normal in-tree build output and does not replace host tests, Unity compilation, or `tools/verify-production.sh`; the production verifier remains the final clean build, size, image, and partition gate. MCP success does not prove RF timing, range, recovery, NVS persistence, browser behavior, or hardware behavior.
+Use the ESP-IDF Tools MCP `build_project` operation as a fast iterative compiler check. It writes the normal in-tree build output and does not replace applicable host tests or Unity compilation. When the risk-based criteria above require `tools/verify-production.sh`, the production verifier remains the final clean build, size, image, and partition gate. MCP success does not prove RF timing, range, recovery, NVS persistence, browser behavior, or hardware behavior.
 
 Do not call `set_target` without approval because it can regenerate project configuration. Do not call `clean_project` without approval because it removes build artifacts. Never call `flash_project` without explicit approval and a confirmed port and board. An MCP startup failure is not permission to modify, reinstall, repair, or delete anything under `~/.espressif`; fall back to the documented shell commands and report the failure.
 

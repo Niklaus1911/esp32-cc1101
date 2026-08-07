@@ -141,6 +141,12 @@ case "$descriptor_hex" in
         expected_flash='Flash size: 16MB'
         expected_chip='Chip ID: 9 (ESP32-S3)'
         ;;
+    52464244011004020401000000000000)
+        image_profile="esp32s3-supermini-fh4r2"
+        ota_slot_size=$((0x1e0000))
+        expected_flash='Flash size: 4MB'
+        expected_chip='Chip ID: 9 (ESP32-S3)'
+        ;;
     *)
         printf 'Image validation failed: missing or unsupported RFBD board descriptor\n' >&2
         exit 1

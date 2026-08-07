@@ -42,6 +42,18 @@ constexpr RfBoardImageDescriptor kConfiguredDescriptor = {
     .partition_layout_id = 2,
     .reserved = {},
 };
+#elif CONFIG_PLATFORM_BOARD_ESP32S3_SUPERMINI_FH4R2
+constexpr BoardProfile kConfiguredProfile = BoardProfile::kEsp32s3SuperminiFh4r2;
+constexpr RfBoardImageDescriptor kConfiguredDescriptor = {
+    .magic = {'R', 'F', 'B', 'D'},
+    .version = kBoardImageDescriptorVersion,
+    .size = sizeof(RfBoardImageDescriptor),
+    .board_id = 4,
+    .target_id = 2,
+    .flash_mib = 4,
+    .partition_layout_id = 1,
+    .reserved = {},
+};
 #else
 #error "A supported RF bridge board profile must be selected"
 #endif

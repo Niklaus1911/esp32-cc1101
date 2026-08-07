@@ -55,6 +55,22 @@ constexpr BoardInfo kBoards[] = {
         .activity_led_gpio = 21,
         .activity_led_active_high = false,
     },
+    {
+        .profile = BoardProfile::kEsp32s3SuperminiFh4r2,
+        .target = BoardTarget::kEsp32s3,
+        .console = ConsoleTransport::kUsbSerialJtag,
+        .partition_layout = PartitionLayout::kFlash4Mb,
+        .profile_name = "esp32s3-supermini-fh4r2",
+        .model_name = "ESP32-S3 SuperMini FH4R2 + CC1101",
+        .target_name = "esp32s3",
+        .flash_mib = 4,
+        .psram_mib = 2,
+        .combined_services = true,
+        .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5},
+        .activity_led_enabled = false,
+        .activity_led_gpio = -1,
+        .activity_led_active_high = true,
+    },
 };
 
 bool classic_gpio_is_valid(int gpio, bool output)
@@ -93,6 +109,11 @@ bool xiao_gpio_is_exposed(int gpio)
     return false;
 }
 
+bool supermini_gpio_is_exposed(int gpio)
+{
+    return (gpio >= 1 && gpio <= 13) || gpio == 43 || gpio == 44;
+}
+
 bool gpio_is_valid_for_role(BoardProfile profile, int gpio, bool output)
 {
     if (profile == BoardProfile::kEsp32Devkit) {
@@ -106,6 +127,9 @@ bool gpio_is_valid_for_role(BoardProfile profile, int gpio, bool output)
     }
     if (profile == BoardProfile::kXiaoEsp32s3) {
         return xiao_gpio_is_exposed(gpio) && gpio != 21;
+    }
+    if (profile == BoardProfile::kEsp32s3SuperminiFh4r2) {
+        return supermini_gpio_is_exposed(gpio) && gpio != 48;
     }
     return false;
 }
@@ -160,7 +184,9 @@ bool board_activity_led_gpio_is_valid(BoardProfile profile, int gpio,
                                  ((profile == BoardProfile::kEsp32s3DevkitcN16r8 &&
                                    gpio != 43 && gpio != 44 && gpio != 48) ||
                                   (profile == BoardProfile::kXiaoEsp32s3 &&
-                                   (gpio == 21 || xiao_gpio_is_exposed(gpio))));
+                                   (gpio == 21 || xiao_gpio_is_exposed(gpio))) ||
+                                  (profile == BoardProfile::kEsp32s3SuperminiFh4r2 &&
+                                   supermini_gpio_is_exposed(gpio) && gpio != 48));
     if (!valid && !(profile == BoardProfile::kEsp32Devkit && gpio == 2)) {
         return false;
     }

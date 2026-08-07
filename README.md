@@ -1,6 +1,6 @@
 # Native ESP32 + CC1101 433 MHz RF Tool
 
-Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals with three board-specific images: a classic ESP32 DevKit, an ESP32-S3 N16R8 DevKitC-compatible board, and a Seeed Studio XIAO ESP32-S3.
+Native ESP-IDF 6.0.2 firmware for receiving and transmitting fixed-code 433.92 MHz ASK/OOK remote-control signals with four board-specific images: a classic ESP32 DevKit, an ESP32-S3 N16R8 DevKitC-compatible board, a Seeed Studio XIAO ESP32-S3, and an ESP32-S3FH4R2 SuperMini.
 
 It provides:
 
@@ -10,21 +10,22 @@ It provides:
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
 - Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
-- Optional runtime Wi-Fi station mode with reboot-selected Web, MQTT, or (on either ESP32-S3 profile) simultaneous Web+MQTT operation. Web provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; MQTT provides native Home Assistant MQTT Discovery, learned-signal buttons, RF/automation activity, retained snapshots, and automation controls. RF, storage, automation, and the physical console remain shared by every mode.
+- Optional runtime Wi-Fi station mode with reboot-selected Web, MQTT, or (on any ESP32-S3 profile) simultaneous Web+MQTT operation. Web provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; MQTT provides native Home Assistant MQTT Discovery, learned-signal buttons, RF/automation activity, retained snapshots, and automation controls. RF, storage, automation, and the physical console remain shared by every mode.
 
 ## Hardware
 
 The pictured “CC1101 V2.0” module is a generic board; its connector order is not standardized. Wire by the module's **printed signal names**, not by physical header position.
 
-The firmware is one codebase with three explicit profiles. Flash the image matching the physical board; images are not interchangeable.
+The firmware is one codebase with four explicit profiles. Flash the image matching the physical board; images are not interchangeable.
 
 | Profile | Target | Flash / PSRAM | Console | Activity LED | LAN modes |
 |---|---|---|---|---|---|
 | `esp32-devkit` | ESP32 | 4 MB / none | UART0 GPIO1/3 | GPIO2 active-high | `web`, `mqtt` |
 | `esp32s3-devkitc-n16r8` | ESP32-S3 | 16 MB / 8 MB Octal | UART0 GPIO43/44 through USB-UART | Disabled by default; GPIO48 reserved | `web`, `mqtt`, `both` |
 | `xiao-esp32s3` | ESP32-S3 | 8 MB / 8 MB Octal | Native USB Serial/JTAG | GPIO21 active-low | `web`, `mqtt`, `both` |
+| `esp32s3-supermini-fh4r2` | ESP32-S3FH4R2 | 4 MB / 2 MB Quad | Native USB Serial/JTAG | Disabled; GPIO48 reserved | `web`, `mqtt`, `both` |
 
-The classic ESP32 has no PSRAM and deliberately rejects `service mode both`; it keeps the memory-safe Web-or-MQTT behavior. Both S3 profiles place MQTT's cold catalogs, ledgers, rule snapshots, and discovery scratch in PSRAM while keeping control state, credentials, queues, task stacks, OTA buffers, and RF/RMT state in internal RAM. A missing or failed S3 MQTT allocation leaves Web available when it was requested, and a failed frontend never stops the other frontend in `both` mode.
+The classic ESP32 has no PSRAM and deliberately rejects `service mode both`; it keeps the memory-safe Web-or-MQTT behavior. All three S3 profiles place MQTT's cold catalogs, ledgers, rule snapshots, and discovery scratch in PSRAM while keeping control state, credentials, queues, task stacks, OTA buffers, and RF/RMT state in internal RAM. A missing or failed S3 MQTT allocation leaves Web available when it was requested, and a failed frontend never stops the other frontend in `both` mode.
 
 ### CC1101 wiring
 
@@ -65,7 +66,18 @@ Seeed Studio XIAO ESP32-S3:
 | `GDO0` | D1 / GPIO2 | RMT TX into CC1101 asynchronous TX input |
 | `GDO2` | D0 / GPIO1 | CC1101 asynchronous RX output into RMT RX |
 
-The XIAO's native USB connector carries the Serial/JTAG console and must remain accessible while the CC1101 is wired. The N16R8 profile expects a USB-UART connection on UART0 GPIO43/44. Do not use GPIO19/20 (USB), GPIO26-37 (flash/PSRAM), or the profile-reserved console/LED pins for CC1101 wiring.
+ESP32-S3FH4R2 SuperMini:
+
+| CC1101 signal | SuperMini GPIO | Direction / purpose |
+|---|---:|---|
+| `SCK` | GPIO12 | SPI clock |
+| `SO` / `GDO1` / `MISO` | GPIO13 | SPI data from CC1101 and `CHIP_RDYn` |
+| `SI` / `MOSI` | GPIO11 | SPI data to CC1101 |
+| `CSN` | GPIO10 | Manual active-low chip select |
+| `GDO0` | GPIO4 | RMT TX into CC1101 asynchronous TX input |
+| `GDO2` | GPIO5 | CC1101 asynchronous RX output into ESP32 RMT RX |
+
+The XIAO and SuperMini native USB connectors carry the Serial/JTAG console and must remain accessible while the CC1101 is wired. The N16R8 profile expects a USB-UART connection on UART0 GPIO43/44. On the SuperMini, GPIO48 is reserved for its onboard LED and is never driven by this firmware. Do not use GPIO19/20 (USB), GPIO26-37 (flash/PSRAM), strapping pins, or profile-reserved LED pins for CC1101 wiring.
 
 Recommended hardware details:
 
@@ -97,9 +109,10 @@ tools/build-board.sh esp32-devkit build
 tools/build-board.sh esp32-devkit size
 tools/build-board.sh esp32s3-devkitc-n16r8 build
 tools/build-board.sh xiao-esp32s3 build
+tools/build-board.sh esp32s3-supermini-fh4r2 build
 ```
 
-`tools/build-board.sh` accepts `esp32-devkit`, `esp32s3-devkitc-n16r8`, or `xiao-esp32s3`, plus `build`, `size`, `flash`, or `monitor`. It selects `IDF_TARGET`, the board defaults, the matching dependency lock, and `build/<profile>` without invoking `set-target` or sharing target-contaminated configuration. The N16R8 is available for hardware validation without a connected CC1101; the XIAO image remains build-verified only.
+`tools/build-board.sh` accepts `esp32-devkit`, `esp32s3-devkitc-n16r8`, `xiao-esp32s3`, or `esp32s3-supermini-fh4r2`, plus `build`, `size`, `flash`, or `monitor`. It selects `IDF_TARGET`, the board defaults, the matching dependency lock, and `build/<profile>` without invoking `set-target` or sharing target-contaminated configuration. The classic ESP32, N16R8, and FH4R2 have approved hardware paths; the XIAO image remains build-verified only.
 
 For a clean, no-flash production build with size and image metadata checks, run:
 
@@ -116,7 +129,7 @@ idf.py menuconfig
 # CC1101 RF configuration
 ```
 
-Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. Each profile has a two-slot OTA table with preserved NVS/OTA metadata offsets. The classic slot is `0x1e0000` bytes, the XIAO slot is `0x3e0000`, and the N16R8 slot is `0x7e0000`. The verifier enforces at least 25% free space in each slot.
+Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. Each profile has a two-slot OTA table with preserved NVS/OTA metadata offsets. The classic ESP32 and FH4R2 slots are `0x1e0000` bytes, the XIAO slot is `0x3e0000`, and the N16R8 slot is `0x7e0000`. The verifier enforces at least 25% free space in each slot.
 
 The classic ESP32 and N16R8 each have one authorized persistent by-id path:
 
@@ -125,9 +138,11 @@ tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLA
 tools/build-board.sh esp32-devkit monitor --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
 tools/build-board.sh esp32s3-devkitc-n16r8 flash --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
 tools/build-board.sh esp32s3-devkitc-n16r8 monitor --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
+tools/build-board.sh esp32s3-supermini-fh4r2 flash --port /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
+tools/build-board.sh esp32s3-supermini-fh4r2 monitor --port /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
 ```
 
-The script verifies that the profile's exact symlink resolves to a character device and rejects every other port. Never substitute `/dev/ttyUSB*`, `/dev/ttyACM*`, port auto-detection, or one board's path for another. XIAO flash and monitor actions remain blocked until that board has a separately approved by-id path. Exit the monitor with `Ctrl+]`. The N16R8 currently has no connected CC1101, so its RF behavior remains hardware-unverified even after its console, PSRAM, network, OTA, and service tests pass.
+The script verifies that the profile's exact symlink resolves to a character device and rejects every other port. Never substitute `/dev/ttyUSB*`, `/dev/ttyACM*`, port auto-detection, or one board's path for another. The FH4R2 uses native USB Serial-JTAG; the device may disappear briefly during reset, but the persistent by-id symlink must remain selected. XIAO hardware access remains blocked until it has its own approved path. Exit the monitor with `Ctrl+]`. Network-dependent Web, MQTT, mDNS, and OTA validation requires Wi-Fi and is separate from offline FH4R2 boot/console validation.
 
 ### One-time OTA partition migration
 
@@ -140,7 +155,7 @@ tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLA
 
 The new table deliberately preserves NVS at offset `0x9000` with size `0x6000`, so learned signals, automation rules, logging mode, and other existing NVS records remain in place. It adds `otadata` at `0xf000`, `phy_init` at `0x11000`, and `ota_0`/`ota_1` at `0x20000`/`0x200000`. Do not run `erase-flash` for this migration. Confirm the port, board, backup file, and no-erase procedure before accessing hardware.
 
-The first installation on either ESP32-S3 profile must be a wired flash of that exact profile. OTA images carry an `RFBD` board/layout descriptor and reject a different S3 profile, flash layout, or legacy image without the descriptor. A legacy downgrade therefore requires wired flashing. Never erase NVS during a profile migration; learned signals, automation rules, Wi-Fi, and MQTT persistence are intentionally retained.
+The first installation on any ESP32-S3 profile must be a wired flash of that exact profile. OTA images carry an `RFBD` board/layout descriptor and reject a different S3 profile, flash layout, or legacy image without the descriptor. A legacy downgrade therefore requires wired flashing. Never erase NVS during a profile migration; learned signals, automation rules, Wi-Fi, and MQTT persistence are intentionally retained.
 
 ## Serial console
 
@@ -283,7 +298,7 @@ rfbridge/<12hex>/automation/log_mode/set
 
 `state/system` contains the board profile, target, flash and PSRAM sizes; requested/effective services and reboot requirement; uptime; and total, free, minimum-free, and largest-block values for internal RAM and PSRAM. It is republished during connection reconciliation, Home Assistant birth recovery, OTA-maintenance recovery, and the 60-second audit.
 
-Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. Four `data_size` diagnostic sensors use `state/system`: internal free, internal minimum free, largest internal block, and PSRAM free. The first three exist on every board; PSRAM free is advertised only on PSRAM-equipped S3 profiles. All four use bytes and expire after 180 seconds without a fresh snapshot. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so both profiles share one bounded administrative interface.
+Discovery additionally creates RF activity and automation activity Event entities, an automation enabled switch, an automation log-mode select (`off`, `actions`, or `verbose`), a rule-count diagnostic sensor, an event-drop diagnostic sensor, and one diagnostic sensor for each persisted rule. Four `data_size` diagnostic sensors use `state/system`: internal free, internal minimum free, largest internal block, and PSRAM free. The first three exist on every board; PSRAM free is advertised only on PSRAM-equipped S3 profiles. All four use bytes and expire after 180 seconds without a fresh snapshot. The `enabled/set` and `log_mode/set` commands accept only exact, non-retained QoS 0 `ON`/`OFF` or `off`/`actions`/`verbose` payloads. The worker applies them through the same NVS-backed automation APIs as UART; state is republished only after the write succeeds. Rule CRUD intentionally remains a UART operation so all profiles share one bounded administrative interface.
 
 `mqtt forget` is a durable retirement transaction. While MQTT is connected it records `retiring`, tombstones every discovery, state, rule, and availability topic with acknowledgements, clears the ledger and credentials, then records Web/retired and stops MQTT. In `both`, Web stays available throughout and no reset is needed after completion; in MQTT-only mode, reset once after retirement to start Web. Power loss at any step resumes the retirement path on the next boot. If Web is active while a retained ledger exists, select MQTT, reboot, wait for connection, and retry `mqtt forget`. Broker IP/port changes are blocked until old retained entities are retired; credential changes for the same endpoint are allowed and take effect after reboot.
 
@@ -529,6 +544,6 @@ idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32s3 \
   -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.esp32s3" build
 ```
 
-The Unity image is compile-only in this workflow. Do not flash or run on-device Unity tests without separate approval and a board-specific approved by-id path. Production firmware hardware access is authorized only for the classic ESP32 and N16R8 paths documented above; this does not authorize flashing the Unity image.
+The Unity image is compile-only in this workflow. Do not flash or run on-device Unity tests without separate approval and a board-specific approved by-id path. Production firmware hardware access is authorized for the classic ESP32, N16R8, and FH4R2 paths documented above; this does not authorize flashing the Unity image.
 
 The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF, Wi-Fi, and MQTT records, MQTT topics/discovery/command rejection, owned-key NVS repair, OTA compatibility policy, frequency calculation, and PA selection. MQTT broker behavior, CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

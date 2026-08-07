@@ -94,6 +94,9 @@ TEST_CASE("console formatter resets ANSI and rejects dashboard truncation", "[rf
     TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_value(
         "Heap bytes", "123456 / 123456 / 123456", ConsoleTone::kInfo, line,
         sizeof(line)));
+    TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_value(
+        "Profile", "esp32s3-supermini-fh4r2", ConsoleTone::kInfo, line,
+        sizeof(line)));
     TEST_ASSERT_TRUE(rfbridge::format_console_dashboard_row(
         "MQTT stack", "6144", ConsoleTone::kInfo, "Worker stack", "4096",
         ConsoleTone::kInfo, line, sizeof(line)));

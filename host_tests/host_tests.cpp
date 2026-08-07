@@ -644,6 +644,10 @@ void test_console_formatter()
                 "Heap bytes", "123456 / 123456 / 123456", ConsoleTone::kInfo, line,
                 sizeof(line)),
             "MQTT heap telemetry fits the dashboard");
+    require(rfbridge::format_console_dashboard_value(
+                "Profile", "esp32s3-supermini-fh4r2", ConsoleTone::kInfo, line,
+                sizeof(line)),
+            "full-width board profile identifiers fit the dashboard");
     require(rfbridge::format_console_dashboard_row(
                 "MQTT stack", "6144", ConsoleTone::kInfo, "Worker stack", "4096",
                 ConsoleTone::kInfo, line, sizeof(line)),
@@ -767,19 +771,23 @@ void test_platform_board_policy()
     const rfbridge::BoardInfo *n16r8 =
         rfbridge::board_info(BoardProfile::kEsp32s3DevkitcN16r8);
     const rfbridge::BoardInfo *xiao = rfbridge::board_info(BoardProfile::kXiaoEsp32s3);
-    require(classic != nullptr && n16r8 != nullptr && xiao != nullptr &&
+    const rfbridge::BoardInfo *supermini =
+        rfbridge::board_info(BoardProfile::kEsp32s3SuperminiFh4r2);
+    require(classic != nullptr && n16r8 != nullptr && xiao != nullptr && supermini != nullptr &&
                 classic->flash_mib == 4 && classic->psram_mib == 0 &&
                 !classic->combined_services && n16r8->flash_mib == 16 &&
                 n16r8->psram_mib == 8 && n16r8->combined_services &&
                 xiao->flash_mib == 8 && xiao->psram_mib == 8 &&
-                xiao->combined_services,
+                xiao->combined_services && supermini->flash_mib == 4 &&
+                supermini->psram_mib == 2 && supermini->combined_services &&
+                supermini->console == rfbridge::ConsoleTransport::kUsbSerialJtag,
             "all supported board profiles expose their memory and service capabilities");
     require(rfbridge::board_info(static_cast<BoardProfile>(0)) == nullptr &&
                 !rfbridge::board_profile_supports_combined_services(
                     static_cast<BoardProfile>(0)),
             "unknown board profiles are rejected");
 
-    for (const rfbridge::BoardInfo *board : {classic, n16r8, xiao}) {
+    for (const rfbridge::BoardInfo *board : {classic, n16r8, xiao, supermini}) {
         require(rfbridge::board_cc1101_gpio_map_is_valid(board->profile, board->cc1101),
                 "each profile's default CC1101 wiring is valid");
         rfbridge::BoardGpioMap duplicate = board->cc1101;
@@ -808,6 +816,14 @@ void test_platform_board_policy()
     invalid.miso = 21;
     require(!rfbridge::board_cc1101_gpio_map_is_valid(xiao->profile, invalid),
             "XIAO profile reserves its onboard activity LED");
+    invalid = supermini->cc1101;
+    invalid.gdo0 = 48;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(supermini->profile, invalid),
+            "FH4R2 profile reserves its onboard LED GPIO");
+    invalid = supermini->cc1101;
+    invalid.gdo2 = 3;
+    require(!rfbridge::board_cc1101_gpio_map_is_valid(supermini->profile, invalid),
+            "FH4R2 profile rejects its strapping GPIO");
 
     rfbridge::RfActivityLedConfig led{.enabled = true, .gpio = 21,
                                       .active_high = false, .pulse_ms = 25};
@@ -827,6 +843,9 @@ void test_platform_board_policy()
     require(!rfbridge::rf_activity_led_config_is_valid(
                 BoardProfile::kEsp32s3DevkitcN16r8, led, nullptr, 0),
             "N16R8 profile reserves the board RGB LED GPIO");
+    require(!rfbridge::rf_activity_led_config_is_valid(
+                BoardProfile::kEsp32s3SuperminiFh4r2, led, nullptr, 0),
+            "FH4R2 profile reserves the onboard LED GPIO");
 
     const auto descriptor_for = [](const rfbridge::BoardInfo &board) {
         return rfbridge::RfBoardImageDescriptor{
@@ -842,11 +861,15 @@ void test_platform_board_policy()
     };
     const rfbridge::RfBoardImageDescriptor classic_descriptor = descriptor_for(*classic);
     const rfbridge::RfBoardImageDescriptor xiao_descriptor = descriptor_for(*xiao);
+    const rfbridge::RfBoardImageDescriptor supermini_descriptor = descriptor_for(*supermini);
     require(rfbridge::board_image_descriptor_is_valid(classic_descriptor) &&
                 rfbridge::board_image_descriptor_is_valid(xiao_descriptor) &&
+                rfbridge::board_image_descriptor_is_valid(supermini_descriptor) &&
                 rfbridge::board_image_descriptor_is_compatible(classic_descriptor,
                                                                 classic_descriptor) &&
                 !rfbridge::board_image_descriptor_is_compatible(classic_descriptor,
+                                                                 xiao_descriptor) &&
+                !rfbridge::board_image_descriptor_is_compatible(supermini_descriptor,
                                                                  xiao_descriptor),
             "OTA descriptors accept exact profiles and reject cross-board images");
     rfbridge::RfBoardImageDescriptor corrupted = classic_descriptor;
