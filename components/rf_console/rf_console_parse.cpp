@@ -58,6 +58,73 @@ bool parse_replay_arguments(int argc, const char *const *argv, uint16_t default_
     return true;
 }
 
+bool parse_recent_arguments(int argc, const char *const *argv, uint16_t default_repeats,
+                            RecentArguments *arguments)
+{
+    if (argv == nullptr || arguments == nullptr || default_repeats < 1 ||
+        default_repeats > 20 || argc < 2) {
+        return false;
+    }
+    RecentArguments parsed{};
+    if (argc == 2 && std::strcmp(argv[1], "list") == 0) {
+        parsed.action = RecentAction::kList;
+    } else if (argc == 2 && std::strcmp(argv[1], "clear") == 0) {
+        parsed.action = RecentAction::kClear;
+    } else if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "replay") == 0) {
+        uint64_t repeats = default_repeats;
+        if (!parse_unsigned_value(argv[2], UINT64_MAX, &parsed.id) || parsed.id == 0 ||
+            (argc == 4 && (!parse_unsigned_value(argv[3], 20, &repeats) || repeats == 0))) {
+            return false;
+        }
+        parsed.action = RecentAction::kReplay;
+        parsed.repeats = static_cast<uint16_t>(repeats);
+    } else if (argc == 4 && std::strcmp(argv[1], "save") == 0) {
+        if (!parse_unsigned_value(argv[2], UINT64_MAX, &parsed.id) || parsed.id == 0 ||
+            !rf_storage_name_is_valid(argv[3])) {
+            return false;
+        }
+        parsed.action = RecentAction::kSave;
+        parsed.name = argv[3];
+    } else {
+        return false;
+    }
+    *arguments = parsed;
+    return true;
+}
+
+bool parse_save_signal_arguments(int argc, const char *const *argv,
+                                 SaveSignalArguments *arguments)
+{
+    if (argv == nullptr || arguments == nullptr || (argc != 5 && argc != 6) ||
+        !rf_storage_name_is_valid(argv[1])) {
+        return false;
+    }
+    uint64_t code = 0;
+    uint64_t bits = 0;
+    uint64_t protocol = 0;
+    uint64_t pulse_us = 0;
+    if (!parse_unsigned_value(argv[2], UINT64_MAX, &code) ||
+        !parse_unsigned_value(argv[3], 64, &bits) || bits < 4 ||
+        !parse_unsigned_value(argv[4], kRfProtocolCount, &protocol) || protocol < 1 ||
+        (argc == 6 && !parse_unsigned_value(argv[5], UINT16_MAX, &pulse_us))) {
+        return false;
+    }
+    DecodedSignal decoded{};
+    if (!make_decoded_signal(code, static_cast<uint8_t>(bits),
+                             static_cast<uint8_t>(protocol),
+                             static_cast<uint16_t>(pulse_us), &decoded)) {
+        return false;
+    }
+    SaveSignalArguments parsed{};
+    parsed.name = argv[1];
+    parsed.code = decoded.code;
+    parsed.pulse_us = decoded.pulse_us;
+    parsed.bits = decoded.bits;
+    parsed.protocol = decoded.protocol;
+    *arguments = parsed;
+    return true;
+}
+
 
 bool parse_rule_add_arguments(int argc, const char *const *argv, uint8_t default_repeats, uint8_t *repeats)
 {

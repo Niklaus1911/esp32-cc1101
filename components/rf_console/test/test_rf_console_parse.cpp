@@ -166,6 +166,55 @@ TEST_CASE("replay parser preserves RAM forms and requires repeats for names", "[
     TEST_ASSERT_FALSE(rfbridge::parse_replay_arguments(3, bad_repeats, 8, &arguments));
 }
 
+TEST_CASE("recent parser accepts exact bounded ID actions", "[rf_console]")
+{
+    const char *list[] = {"recent", "list"};
+    const char *replay[] = {"recent", "replay", "18446744073709551614"};
+    const char *replay_repeats[] = {"recent", "replay", "42", "20"};
+    const char *save[] = {"recent", "save", "42", "gate"};
+    const char *clear[] = {"recent", "clear"};
+    const char *zero[] = {"recent", "replay", "0"};
+    const char *overflow[] = {"recent", "save", "18446744073709551616", "gate"};
+    rfbridge::RecentArguments arguments{};
+    TEST_ASSERT_TRUE(rfbridge::parse_recent_arguments(2, list, 8, &arguments));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RecentAction::kList),
+                      static_cast<int>(arguments.action));
+    TEST_ASSERT_TRUE(rfbridge::parse_recent_arguments(3, replay, 8, &arguments));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_MAX - 1U, arguments.id);
+    TEST_ASSERT_EQUAL_UINT16(8, arguments.repeats);
+    TEST_ASSERT_TRUE(rfbridge::parse_recent_arguments(4, replay_repeats, 8, &arguments));
+    TEST_ASSERT_EQUAL_UINT16(20, arguments.repeats);
+    TEST_ASSERT_TRUE(rfbridge::parse_recent_arguments(4, save, 8, &arguments));
+    TEST_ASSERT_EQUAL_STRING("gate", arguments.name);
+    TEST_ASSERT_TRUE(rfbridge::parse_recent_arguments(2, clear, 8, &arguments));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RecentAction::kClear),
+                      static_cast<int>(arguments.action));
+    TEST_ASSERT_FALSE(rfbridge::parse_recent_arguments(3, zero, 8, &arguments));
+    TEST_ASSERT_FALSE(rfbridge::parse_recent_arguments(4, overflow, 8, &arguments));
+}
+
+TEST_CASE("manual save parser normalizes exact bounded decoded values", "[rf_console]")
+{
+    const char *nominal[] = {"save", "gate", "13830801", "24", "1"};
+    const char *explicit_pulse[] = {"save", "gate_2", "0xD30A91", "24", "1", "199"};
+    const char *overflow[] = {"save", "gate", "0x1000000", "24", "1"};
+    const char *reserved[] = {"save", "list", "1", "24", "1"};
+    const char *bad_protocol[] = {"save", "gate", "1", "24", "13"};
+    const char *bad_pulse[] = {"save", "gate", "1", "24", "1", "9999"};
+    rfbridge::SaveSignalArguments arguments{};
+    TEST_ASSERT_TRUE(rfbridge::parse_save_signal_arguments(5, nominal, &arguments));
+    TEST_ASSERT_EQUAL_STRING("gate", arguments.name);
+    TEST_ASSERT_EQUAL_HEX64(0xD30A91, arguments.code);
+    TEST_ASSERT_EQUAL_UINT16(350, arguments.pulse_us);
+    TEST_ASSERT_TRUE(rfbridge::parse_save_signal_arguments(6, explicit_pulse, &arguments));
+    TEST_ASSERT_EQUAL_STRING("gate_2", arguments.name);
+    TEST_ASSERT_EQUAL_UINT16(199, arguments.pulse_us);
+    TEST_ASSERT_FALSE(rfbridge::parse_save_signal_arguments(5, overflow, &arguments));
+    TEST_ASSERT_FALSE(rfbridge::parse_save_signal_arguments(5, reserved, &arguments));
+    TEST_ASSERT_FALSE(rfbridge::parse_save_signal_arguments(5, bad_protocol, &arguments));
+    TEST_ASSERT_FALSE(rfbridge::parse_save_signal_arguments(6, bad_pulse, &arguments));
+}
+
 TEST_CASE("rule add parser validates names and repeats", "[rf_console][rf_automation]")
 {
     const char *default_rule[] = {"rule", "add", "B", "A"};

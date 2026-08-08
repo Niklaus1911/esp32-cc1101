@@ -292,6 +292,103 @@ bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *
     return true;
 }
 
+bool parse_web_recent_form(const char *body, std::size_t length, WebRecentForm *output)
+{
+    if (output == nullptr) {
+        return false;
+    }
+    Field fields[4]{};
+    std::size_t count = 0;
+    if (!parse_fields(body, length, fields, std::size(fields), &count)) {
+        return false;
+    }
+    const Field *action = find_field(fields, count, "action");
+    if (action == nullptr) {
+        return false;
+    }
+    WebRecentForm parsed{};
+    if (slice_equals(action->value, action->value_length, "clear")) {
+        constexpr const char *keys[] = {"action"};
+        if (!exact_fields(fields, count, keys, std::size(keys))) {
+            return false;
+        }
+        parsed.action = WebRecentAction::kClear;
+    } else if (slice_equals(action->value, action->value_length, "replay")) {
+        constexpr const char *keys[] = {"action", "id", "repeats"};
+        uint64_t repeats = 0;
+        if (!exact_fields(fields, count, keys, std::size(keys)) ||
+            !parse_bounded_field(find_field(fields, count, "id"), 1, UINT64_MAX, &parsed.id) ||
+            !parse_bounded_field(find_field(fields, count, "repeats"), 1, 20, &repeats)) {
+            return false;
+        }
+        parsed.action = WebRecentAction::kReplay;
+        parsed.repeats = static_cast<uint16_t>(repeats);
+    } else if (slice_equals(action->value, action->value_length, "save")) {
+        constexpr const char *keys[] = {"action", "id", "name"};
+        if (!exact_fields(fields, count, keys, std::size(keys)) ||
+            !parse_bounded_field(find_field(fields, count, "id"), 1, UINT64_MAX, &parsed.id) ||
+            !valid_name(*find_field(fields, count, "name"), parsed.name,
+                        sizeof(parsed.name)) ||
+            !rf_storage_name_is_valid(parsed.name)) {
+            return false;
+        }
+        parsed.action = WebRecentAction::kSave;
+    } else {
+        return false;
+    }
+    *output = parsed;
+    return true;
+}
+
+bool parse_web_signal_save_form(const char *body, std::size_t length,
+                                WebSignalSaveForm *output)
+{
+    if (output == nullptr) {
+        return false;
+    }
+    Field fields[6]{};
+    std::size_t count = 0;
+    if (!parse_fields(body, length, fields, std::size(fields), &count)) {
+        return false;
+    }
+    constexpr const char *required_keys[] = {"name", "code", "bits", "protocol"};
+    constexpr const char *all_keys[] = {"name", "code", "bits", "protocol", "pulse_us"};
+    const Field *pulse_field = find_field(fields, count, "pulse_us");
+    if (!(pulse_field == nullptr
+              ? exact_fields(fields, count, required_keys, std::size(required_keys))
+              : exact_fields(fields, count, all_keys, std::size(all_keys)))) {
+        return false;
+    }
+    WebSignalSaveForm parsed{};
+    const Field *name_field = find_field(fields, count, "name");
+    uint64_t code = 0;
+    uint64_t bits = 0;
+    uint64_t protocol = 0;
+    uint64_t pulse_us = 0;
+    if (name_field == nullptr ||
+        !valid_name(*name_field, parsed.name, sizeof(parsed.name)) ||
+        !rf_storage_name_is_valid(parsed.name) ||
+        !parse_bounded_field(find_field(fields, count, "code"), 0, UINT64_MAX, &code) ||
+        !parse_bounded_field(find_field(fields, count, "bits"), 4, 64, &bits) ||
+        !parse_bounded_field(find_field(fields, count, "protocol"), 1, kRfProtocolCount,
+                             &protocol) ||
+        (pulse_field != nullptr && !parse_bounded_field(pulse_field, 0, UINT16_MAX, &pulse_us))) {
+        return false;
+    }
+    DecodedSignal decoded{};
+    if (!make_decoded_signal(code, static_cast<uint8_t>(bits),
+                             static_cast<uint8_t>(protocol),
+                             static_cast<uint16_t>(pulse_us), &decoded)) {
+        return false;
+    }
+    parsed.code = decoded.code;
+    parsed.pulse_us = decoded.pulse_us;
+    parsed.bits = decoded.bits;
+    parsed.protocol = decoded.protocol;
+    *output = parsed;
+    return true;
+}
+
 bool parse_web_signal_name_form(const char *body, std::size_t length, char *name,
                                 std::size_t name_capacity)
 {

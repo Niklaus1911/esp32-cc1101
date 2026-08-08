@@ -21,6 +21,7 @@ add_executable(rf_host_tests
     ../components/rf_ook/rf_activity_led_policy.cpp
     ../components/rf_signals/rf_signals_match.cpp
     ../components/rf_storage/rf_storage_format.cpp
+    ../components/rf_storage/rf_storage_recent_format.cpp
     ../components/rf_storage/rf_storage_rule_format.cpp
     ../components/web_ui/web_form.cpp
 )

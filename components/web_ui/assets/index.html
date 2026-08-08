@@ -62,7 +62,7 @@
       </section>
 
       <section class="band">
-        <div class="section-heading"><h2>Observed activity</h2><button id="clear-activity" type="button" class="quiet">Clear</button></div>
+        <div class="section-heading"><h2>Observed activity (this tab)</h2><button id="clear-activity" type="button" class="quiet">Clear</button></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Received</th><th>Frame</th><th>Match</th></tr></thead>
@@ -74,7 +74,25 @@
 
     <section class="view" data-panel="signals" hidden>
       <section class="band first-band">
+        <div class="section-heading">
+          <div><h2>Recent decoded signals</h2><p id="recent-count" class="subtle">Loading</p></div>
+          <div class="inline-controls">
+            <button id="refresh-recent" type="button" class="quiet">Refresh</button>
+            <button id="clear-recent" type="button" class="danger">Clear history</button>
+          </div>
+        </div>
+        <div id="recent-list" class="item-list"><p class="empty">Loading recent signals.</p></div>
+      </section>
+      <section class="band">
         <div class="section-heading"><div><h2>Learned signals</h2><p id="signal-count" class="subtle">Loading</p></div><button id="refresh-signals" type="button" class="quiet">Refresh</button></div>
+        <form id="signal-save-form" class="form-grid signal-save-form" autocomplete="off">
+          <label>Name<input id="signal-save-name" name="name" maxlength="15" pattern="[A-Za-z][A-Za-z0-9_\-]{0,14}" required></label>
+          <label>Code<input id="signal-save-code" name="code" placeholder="0xD30A91" required></label>
+          <label>Bits<input name="bits" type="number" min="4" max="64" value="24" required></label>
+          <label>Protocol<input name="protocol" type="number" min="1" max="12" value="1" required></label>
+          <label>Pulse us<input name="pulse_us" type="number" min="0" max="29000" value="0" required></label>
+          <button type="submit" class="primary command">Save signal</button>
+        </form>
         <div id="signal-list" class="item-list"><p class="empty">Loading signals.</p></div>
       </section>
     </section>

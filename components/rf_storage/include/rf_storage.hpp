@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "rf_storage_format.hpp"
+#include "rf_storage_recent_format.hpp"
 
 namespace rfbridge {
 
@@ -17,5 +18,12 @@ esp_err_t rf_storage_list(RfStorageName *names, std::size_t capacity, std::size_
 esp_err_t rf_storage_forget(const char *name);
 esp_err_t rf_storage_hardware_get(RfHardware *hardware, bool *persisted = nullptr);
 esp_err_t rf_storage_hardware_set(RfHardware hardware);
+esp_err_t rf_storage_recent_initialization_error();
+esp_err_t rf_storage_recent_append(const DecodedSignal &decoded,
+                                   RfRecentSignal *appended = nullptr);
+esp_err_t rf_storage_recent_list(RfRecentSignal *entries, std::size_t capacity,
+                                 std::size_t *count);
+esp_err_t rf_storage_recent_load(uint64_t id, RfRecentSignal *entry);
+esp_err_t rf_storage_recent_clear();
 
 }  // namespace rfbridge

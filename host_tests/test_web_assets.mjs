@@ -34,7 +34,7 @@ const compactSource = (content) => content.replace(/\s+/g, " ");
 const occurrenceCount = (content, value) => content.split(value).length - 1;
 
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = 80;/);
-assert.match(lifecycle, /config\.max_uri_handlers = 20;/);
+assert.match(lifecycle, /config\.max_uri_handlers = 21;/);
 assert.match(lifecycle, /config\.max_open_sockets = 2;/);
 assert.match(api, /constexpr uint16_t kHttpPort = 80;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
@@ -45,11 +45,14 @@ assert.match(cmake, /EMBED_TXTFILES "assets\/index\.html" "assets\/app\.css" "as
 
 for (const route of [
   '"/api/live", HTTP_GET, live_handler',
+  '"/api/recent", HTTP_GET, recent_handler',
   '"/api/signals", HTTP_GET, signals_handler',
   '"/api/rules", HTTP_GET, rules_handler',
   '"/api/learn", HTTP_POST, learn_handler',
   '"/api/learn", HTTP_DELETE, cancel_learn_handler',
   '"/api/replay", HTTP_POST, replay_handler',
+  '"/api/recent", HTTP_POST, recent_action_handler',
+  '"/api/signals", HTTP_POST, create_signal_handler',
   '"/api/signals", HTTP_DELETE, delete_signal_handler',
   '"/api/transmit/decoded", HTTP_POST, decoded_transmit_handler',
   '"/api/transmit/raw", HTTP_POST, raw_transmit_handler',
@@ -62,6 +65,14 @@ for (const route of [
 assert(source.includes("register_ota_http_handlers"), "OTA must share the Web server");
 assert(source.includes("authorize_web_ota_request"), "OTA must use Host/origin authorization");
 assert(api.includes("bridge_control_replay_named"), "named replay route missing");
+assert(api.includes("bridge_control_save_decoded") &&
+       api.includes('"201 Created"') &&
+       forms.includes("parse_web_signal_save_form"),
+       "manual decoded signal save route missing");
+assert(api.includes("bridge_control_replay_recent") &&
+       api.includes("bridge_control_save_recent") &&
+       api.includes("bridge_control_clear_recent"),
+       "recent signal action routes missing");
 assert(api.includes("bridge_control_transmit_decoded"), "decoded transmit route missing");
 assert(api.includes("bridge_control_transmit_raw"), "raw transmit route missing");
 assert(api.includes("rf_automation_add_rule"), "rule add route missing");
@@ -78,6 +89,12 @@ assert(index.includes("/app.css") && index.includes("/app.js"), "static assets m
 assert(index.includes('rel="icon" href="data:,"'), "embedded favicon contract missing");
 assert(api.includes("img-src 'self' data:"), "favicon CSP contract missing");
 assert(index.includes("Replay"), "Replay control missing");
+assert(index.includes('id="recent-list"') && index.includes('id="refresh-recent"') &&
+       index.includes('id="clear-recent"'), "recent decoded signal controls missing");
+assert(index.includes('id="signal-save-form"') &&
+       index.includes('id="signal-save-name"') &&
+       index.includes('id="signal-save-code"'),
+       "manual decoded signal form missing");
 assert(index.includes("Install and reboot"), "OTA control missing");
 assert(index.includes('id="radio-hardware"') && index.includes('id="apply-radio-hardware"') &&
        js.includes('requestAction("/api/radio/hardware","POST"'),
@@ -98,6 +115,8 @@ const radioApi = sourceSection(liveApi, '"{\\"radio\\":{', '"\\"learning\\":{',
                                "live radio");
 const learningApi = sourceSection(liveApi, '"\\"learning\\":{',
                                   '"\\"last\\":null,', "live learning");
+const recentApi = sourceSection(liveApi, '"\\"recent\\":{',
+                                '"\\"last\\":null,', "live recent history");
 const automationApi = sourceSection(liveApi, '"\\"automation\\":{',
                                     '"\\"network\\":{', "live automation");
 const networkApi = sourceSection(liveApi, '"\\"network\\":{',
@@ -117,6 +136,8 @@ assertFields(learningApi, [
   "available", "state", "revision", "name", "result", "count", "catalog_available",
   "queue_drops", "catalog_errors", "initialization_error",
 ], "live learning");
+assertFields(recentApi, ["available", "count", "revision", "errors", "last_error"],
+             "live recent history");
 assertFields(automationApi, [
   "available", "enabled", "runtime_paused", "log_mode", "rules", "frames", "matches", "stale",
   "ambiguous", "actions", "suppressed", "tx_errors", "queue_drops", "log_events", "log_drops",
@@ -300,6 +321,18 @@ assert(css.includes(".system-runtime-grid { grid-template-columns: repeat(3, min
        "system hardware/runtime/services responsive grid missing");
 assert(!js.includes('byId("runtime-details")'), "stale runtime details renderer remains");
 assert(js.includes("document.hidden"), "visibility-aware polling missing");
+assert(js.includes('readJson("/api/recent")') &&
+       js.includes('requestAction("/api/recent", "POST"') &&
+       js.includes("dataset.recentId"),
+       "recent history load or ID-keyed actions missing");
+assert(js.includes('action: "replay"') && js.includes('action: "save"') &&
+       js.includes('action: "clear"') && js.includes("recentRevision"),
+       "recent action forms or revision refresh missing");
+assert(js.includes('bindPostForm("signal-save-form", "/api/signals"') &&
+       js.includes('byId("signal-save-name").value = ""') &&
+       js.includes('byId("signal-save-code").value = ""') &&
+       js.includes("Promise.all([refreshSignals(), refreshRules()])"),
+       "manual decoded signal save refresh flow missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(liveRenderer.includes("const incomingRadio=live.radio||{}") &&
        liveRenderer.includes("renderRadioHardware(incomingRadio)"),
@@ -348,6 +381,12 @@ assert.match(mobileCss,
              /#rule-list\s+\.item-actions\s*\{[^}]*\bgrid-template-columns\s*:\s*1fr\s*;/,
              "mobile rule actions must use a single grid column");
 assert.match(mobileCss,
+             /\.recent-actions\s*\{[^}]*\bgrid-template-columns\s*:\s*76px\s+minmax\(0,\s*1fr\)\s+72px\s*;/,
+             "mobile recent actions must use stable repeat name and save columns");
+assert.match(mobileCss,
+             /\.recent-actions\s+\.recent-name\s*\{[^}]*\bgrid-column\s*:\s*1\s*\/\s*3\s*;/,
+             "mobile recent name input must span the repeat and flexible columns");
+assert.match(mobileCss,
              /\.tabs-inner\s*\{[^}]*\bmin-width\s*:\s*100%\s*;[^}]*\bpadding\s*:\s*0\s*;/,
              "mobile navigation must fit the viewport without a scrolling inner width");
 assert.match(mobileCss,
@@ -371,7 +410,7 @@ for (const forbidden of [
          `forbidden or stale Web contract remains: ${forbidden}`);
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
-  const maximumSize = name === "app.js" ? 34 * 1024 : 20000;
+  const maximumSize = name === "app.js" ? 40 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

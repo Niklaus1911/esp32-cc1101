@@ -23,6 +23,7 @@
 #include "rf_console_parse.hpp"
 #include "rf_activity_led_policy.hpp"
 #include "rf_storage_format.hpp"
+#include "rf_storage_recent_format.hpp"
 #include "rf_signals_match.hpp"
 #include "web_form.hpp"
 
@@ -33,6 +34,27 @@ void require(bool condition, const char *message)
     if (!condition) {
         std::fprintf(stderr, "FAIL: %s\n", message);
         std::exit(1);
+    }
+}
+
+uint32_t test_crc32(const uint8_t *data, std::size_t size)
+{
+    uint32_t crc = UINT32_MAX;
+    for (std::size_t index = 0; index < size; ++index) {
+        crc ^= data[index];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            const uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+        }
+    }
+    return crc ^ UINT32_MAX;
+}
+
+void rewrite_test_crc(uint8_t *record, std::size_t size)
+{
+    const uint32_t crc = test_crc32(record, size - 4U);
+    for (std::size_t index = 0; index < 4; ++index) {
+        record[size - 4U + index] = static_cast<uint8_t>(crc >> (index * 8U));
     }
 }
 
@@ -439,6 +461,20 @@ void test_decoded_transport_boundaries()
         signal.pulse_us = static_cast<uint16_t>(maximum_unit + 1U);
         require(!rfbridge::decoded_signal_is_valid(signal), "decoded unit above transport ceiling rejected");
     }
+
+    rfbridge::DecodedSignal normalized{};
+    require(rfbridge::make_decoded_signal(13830801, 24, 1, 0, &normalized) &&
+                normalized.code == 0xD30A91 && normalized.pulse_us == 350 &&
+                normalized.inverted == 0,
+            "decoded construction normalizes nominal pulse and protocol inversion");
+    require(rfbridge::make_decoded_signal(0xD30A91, 24, 1, 199, &normalized) &&
+                normalized.pulse_us == 199,
+            "decoded construction preserves an explicit valid pulse");
+    require(!rfbridge::make_decoded_signal(0x1000000, 24, 1, 199, &normalized) &&
+                !rfbridge::make_decoded_signal(1, 24, 0, 199, &normalized) &&
+                !rfbridge::make_decoded_signal(1, 24, 1, 9999, &normalized) &&
+                !rfbridge::make_decoded_signal(1, 24, 1, 199, nullptr),
+            "decoded construction rejects width protocol pulse and output errors");
 }
 
 void test_raw_identity_rules()
@@ -515,6 +551,49 @@ void test_console_parser()
             "named replay parsed");
     require(!rfbridge::parse_replay_arguments(2, missing_named_repeats, 8, &replay),
             "named replay requires repeats");
+
+    const char *recent_list[] = {"recent", "list"};
+    const char *recent_replay[] = {"recent", "replay", "18446744073709551614"};
+    const char *recent_explicit[] = {"recent", "replay", "42", "20"};
+    const char *recent_save[] = {"recent", "save", "42", "gate"};
+    const char *recent_zero[] = {"recent", "replay", "0"};
+    const char *recent_overflow[] = {"recent", "replay", "18446744073709551616"};
+    rfbridge::RecentArguments recent{};
+    require(rfbridge::parse_recent_arguments(2, recent_list, 8, &recent) &&
+                recent.action == rfbridge::RecentAction::kList,
+            "recent list parsed");
+    require(rfbridge::parse_recent_arguments(3, recent_replay, 8, &recent) &&
+                recent.action == rfbridge::RecentAction::kReplay &&
+                recent.id == UINT64_MAX - 1U && recent.repeats == 8,
+            "recent replay accepts a persistent 64-bit ID and default repeats");
+    require(rfbridge::parse_recent_arguments(4, recent_explicit, 8, &recent) &&
+                recent.repeats == 20,
+            "recent replay accepts bounded explicit repeats");
+    require(rfbridge::parse_recent_arguments(4, recent_save, 8, &recent) &&
+                recent.action == rfbridge::RecentAction::kSave &&
+                std::strcmp(recent.name, "gate") == 0,
+            "recent save accepts a valid learned name");
+    require(!rfbridge::parse_recent_arguments(3, recent_zero, 8, &recent) &&
+                !rfbridge::parse_recent_arguments(3, recent_overflow, 8, &recent),
+            "recent parser rejects zero and overflowing IDs");
+
+    const char *save_nominal[] = {"save", "gate", "13830801", "24", "1"};
+    const char *save_explicit[] = {"save", "gate_2", "0xD30A91", "24", "1", "199"};
+    const char *save_overflow[] = {"save", "gate", "0x1000000", "24", "1"};
+    const char *save_reserved[] = {"save", "list", "1", "24", "1"};
+    const char *save_bad_pulse[] = {"save", "gate", "1", "24", "1", "9999"};
+    rfbridge::SaveSignalArguments save{};
+    require(rfbridge::parse_save_signal_arguments(5, save_nominal, &save) &&
+                std::strcmp(save.name, "gate") == 0 && save.code == 0xD30A91 &&
+                save.bits == 24 && save.protocol == 1 && save.pulse_us == 350,
+            "manual save parser accepts decimal code and nominal pulse");
+    require(rfbridge::parse_save_signal_arguments(6, save_explicit, &save) &&
+                std::strcmp(save.name, "gate_2") == 0 && save.pulse_us == 199,
+            "manual save parser accepts hexadecimal code and explicit pulse");
+    require(!rfbridge::parse_save_signal_arguments(5, save_overflow, &save) &&
+                !rfbridge::parse_save_signal_arguments(5, save_reserved, &save) &&
+                !rfbridge::parse_save_signal_arguments(6, save_bad_pulse, &save),
+            "manual save parser rejects code width reserved names and invalid pulses");
 
     const char *rule_default[] = {"rule", "add", "B", "A"};
     const char *rule_explicit[] = {"rule", "add", "B", "A", "12"};
@@ -1009,6 +1088,88 @@ void test_storage_format()
             "RF hardware record rejects CRC corruption");
 }
 
+void test_recent_storage_format()
+{
+    rfbridge::RfRecentHistory history{};
+    uint8_t record[rfbridge::kRfRecentMaxRecordSize]{};
+    std::size_t record_size = 0;
+    require(rfbridge::encode_rf_recent_record(history, record, sizeof(record), &record_size) ==
+                rfbridge::RfRecentFormatResult::kOk && record_size == 20,
+            "empty recent history record encodes");
+    rfbridge::RfRecentHistory loaded{};
+    require(rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                rfbridge::RfRecentFormatResult::kOk && loaded.count == 0 && loaded.next_id == 1,
+            "empty recent history record round trips");
+
+    rfbridge::DecodedSignal decoded{};
+    decoded.pulse_us = 386;
+    decoded.bits = 24;
+    decoded.protocol = 1;
+    decoded.code = 0xA88142;
+    rfbridge::RfRecentHistory single{};
+    require(rfbridge::append_rf_recent_history(&single, decoded) ==
+                rfbridge::RfRecentFormatResult::kOk &&
+                rfbridge::encode_rf_recent_record(single, record, sizeof(record), &record_size) ==
+                    rfbridge::RfRecentFormatResult::kOk &&
+                rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                    rfbridge::RfRecentFormatResult::kOk &&
+                loaded.count == 1 && loaded.next_id == 2 && loaded.entries[0].id == 1,
+            "one-entry recent history round trips with its next persistent ID");
+
+    for (uint64_t code = 1; code <= 6; ++code) {
+        decoded.code = code == 2 ? 1 : code;
+        require(rfbridge::append_rf_recent_history(&history, decoded) ==
+                    rfbridge::RfRecentFormatResult::kOk,
+                "recent history accepts each decoded reception");
+    }
+    require(history.count == rfbridge::kRfRecentSignalCapacity && history.next_id == 7 &&
+                history.entries[0].id == 6 && history.entries[4].id == 2 &&
+                history.entries[4].decoded.code == 1,
+            "recent history keeps duplicates and evicts only the oldest reception");
+    require(rfbridge::encode_rf_recent_record(history, record, sizeof(record), &record_size) ==
+                rfbridge::RfRecentFormatResult::kOk &&
+                record_size == rfbridge::kRfRecentMaxRecordSize,
+            "full recent history record reaches its fixed bound");
+    require(rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                rfbridge::RfRecentFormatResult::kOk && loaded.count == history.count &&
+                loaded.next_id == history.next_id &&
+                loaded.entries[0].id == 6 && loaded.entries[4].id == 2,
+            "full recent history record round trips newest first");
+
+    record[12] ^= 1U;
+    require(rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                rfbridge::RfRecentFormatResult::kInvalidCrc,
+            "recent history rejects CRC corruption");
+    record[12] ^= 1U;
+    record[5] = static_cast<uint8_t>(rfbridge::kRfRecentSignalCapacity + 1U);
+    rewrite_test_crc(record, record_size);
+    require(rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                rfbridge::RfRecentFormatResult::kInvalidRecord,
+            "recent history rejects count metadata above its fixed capacity");
+    require(rfbridge::encode_rf_recent_record(history, record, sizeof(record), &record_size) ==
+                rfbridge::RfRecentFormatResult::kOk,
+            "recent history re-encodes after count corruption test");
+    record[4] = 2;
+    rewrite_test_crc(record, record_size);
+    require(rfbridge::decode_rf_recent_record(record, record_size, &loaded) ==
+                rfbridge::RfRecentFormatResult::kInvalidVersion,
+            "recent history rejects unsupported versions");
+
+    rfbridge::DecodedSignal invalid = decoded;
+    invalid.protocol = 0;
+    require(rfbridge::append_rf_recent_history(&history, invalid) ==
+                rfbridge::RfRecentFormatResult::kInvalidArgument,
+            "recent history rejects invalid decoded payloads");
+    history.next_id = UINT64_MAX;
+    require(rfbridge::append_rf_recent_history(&history, decoded) ==
+                rfbridge::RfRecentFormatResult::kInvalidArgument,
+            "recent history fails closed before ID overflow");
+    history.next_id = 7;
+    history.entries[1].id = history.entries[0].id;
+    require(!rfbridge::rf_recent_history_is_valid(history),
+            "recent history rejects duplicate or unordered IDs");
+}
+
 
 rfbridge::RfStorageRuleEntry make_rule(const char *trigger, const char *target)
 {
@@ -1261,6 +1422,68 @@ void test_web_forms()
     require(!rfbridge::parse_web_replay_form("name=gate_1&repeats=7&extra=1", 29, &replay),
             "Web replay form rejects extra fields");
 
+    rfbridge::WebSignalSaveForm signal_save{};
+    constexpr char signal_save_nominal[] =
+        "name=gate&code=13830801&bits=24&protocol=1";
+    constexpr char signal_save_explicit[] =
+        "name=gate_2&code=0xD30A91&bits=24&protocol=1&pulse_us=199";
+    require(rfbridge::parse_web_signal_save_form(
+                signal_save_nominal, sizeof(signal_save_nominal) - 1U, &signal_save) &&
+                std::strcmp(signal_save.name, "gate") == 0 &&
+                signal_save.code == 0xD30A91 && signal_save.pulse_us == 350,
+            "Web manual save accepts required fields and normalizes nominal pulse");
+    require(rfbridge::parse_web_signal_save_form(
+                signal_save_explicit, sizeof(signal_save_explicit) - 1U, &signal_save) &&
+                std::strcmp(signal_save.name, "gate_2") == 0 &&
+                signal_save.pulse_us == 199,
+            "Web manual save accepts an explicit pulse");
+    constexpr char signal_save_overflow[] =
+        "name=gate&code=0x1000000&bits=24&protocol=1";
+    constexpr char signal_save_reserved[] =
+        "name=list&code=1&bits=24&protocol=1";
+    constexpr char signal_save_extra[] =
+        "name=gate&code=1&bits=24&protocol=1&extra=1";
+    constexpr char signal_save_duplicate[] =
+        "name=gate&code=1&code=2&bits=24&protocol=1";
+    require(!rfbridge::parse_web_signal_save_form(
+                signal_save_overflow, sizeof(signal_save_overflow) - 1U, &signal_save) &&
+                !rfbridge::parse_web_signal_save_form(
+                    signal_save_reserved, sizeof(signal_save_reserved) - 1U, &signal_save) &&
+                !rfbridge::parse_web_signal_save_form(
+                    signal_save_extra, sizeof(signal_save_extra) - 1U, &signal_save) &&
+                !rfbridge::parse_web_signal_save_form(
+                    signal_save_duplicate, sizeof(signal_save_duplicate) - 1U, &signal_save),
+            "Web manual save rejects overflow reserved names extra and duplicate fields");
+
+    rfbridge::WebRecentForm recent{};
+    constexpr char recent_replay[] = "action=replay&id=18446744073709551614&repeats=20";
+    constexpr char recent_save[] = "action=save&id=42&name=gate_1";
+    require(rfbridge::parse_web_recent_form(recent_replay, sizeof(recent_replay) - 1U,
+                                            &recent) &&
+                recent.action == rfbridge::WebRecentAction::kReplay &&
+                recent.id == UINT64_MAX - 1U && recent.repeats == 20,
+            "Web recent replay accepts string-safe 64-bit IDs");
+    require(rfbridge::parse_web_recent_form(recent_save, sizeof(recent_save) - 1U, &recent) &&
+                recent.action == rfbridge::WebRecentAction::kSave &&
+                std::strcmp(recent.name, "gate_1") == 0,
+            "Web recent save accepts exact fields");
+    require(rfbridge::parse_web_recent_form("action=clear", 12, &recent) &&
+                recent.action == rfbridge::WebRecentAction::kClear,
+            "Web recent clear accepts its exact action");
+    constexpr char recent_zero[] = "action=replay&id=0&repeats=8";
+    constexpr char recent_reserved[] = "action=save&id=42&name=list";
+    constexpr char recent_extra[] = "action=clear&extra=1";
+    constexpr char recent_embedded_nul[] = "action=replay&id=42\0&repeats=8";
+    require(!rfbridge::parse_web_recent_form(
+                    recent_zero, sizeof(recent_zero) - 1U, &recent) &&
+                !rfbridge::parse_web_recent_form(
+                    recent_reserved, sizeof(recent_reserved) - 1U, &recent) &&
+                !rfbridge::parse_web_recent_form(
+                    recent_extra, sizeof(recent_extra) - 1U, &recent) &&
+                !rfbridge::parse_web_recent_form(
+                    recent_embedded_nul, sizeof(recent_embedded_nul) - 1U, &recent),
+            "Web recent forms reject zero IDs reserved names extra fields and embedded NULs");
+
     rfbridge::WebDecodedForm decoded{};
     require(rfbridge::parse_web_decoded_form(
                 "code=0xA88142&bits=24&protocol=1&pulse_us=0&repeats=8", 53, &decoded) &&
@@ -1452,6 +1675,7 @@ int main()
     test_platform_board_policy();
     test_learned_signal_matching();
     test_storage_format();
+    test_recent_storage_format();
     test_wifi_config();
     test_network_hostname_config();
     test_network_mdns_policy();

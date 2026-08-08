@@ -416,6 +416,17 @@ esp_err_t live_handler(httpd_req_t *request)
             esp_err_to_name(signals.initialization_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "\"recent\":{\"available\":%s,\"count\":%u,\"revision\":%lu,"
+            "\"errors\":%lu,\"last_error\":\"%s\"},",
+            signals.recent_available ? "true" : "false", signals.recent_count,
+            static_cast<unsigned long>(signals.recent_revision),
+            static_cast<unsigned long>(signals.recent_errors),
+            esp_err_to_name(signals.recent_last_error));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
     if (error == ESP_OK && frame_error == ESP_ERR_NOT_FOUND) {
         error = send_chunk(request, "\"last\":null,");
     } else if (error == ESP_OK && frame_error != ESP_OK) {
@@ -678,6 +689,61 @@ esp_err_t signals_handler(httpd_req_t *request)
     return httpd_resp_send_chunk(request, nullptr, 0);
 }
 
+esp_err_t recent_handler(httpd_req_t *request)
+{
+    const esp_err_t validation = require_empty_get(request);
+    if (validation != ESP_OK) {
+        return validation;
+    }
+    RfSignalsStatus status{};
+    const esp_err_t status_error = get_rf_signals_status(&status);
+    if (status_error != ESP_OK) {
+        return send_api_error(request, status_for_error(status_error),
+                              esp_err_to_name(status_error), status_error);
+    }
+    RfRecentSignal entries[kRfRecentSignalCapacity]{};
+    std::size_t count = 0;
+    const esp_err_t list_error =
+        rf_storage_recent_list(entries, std::size(entries), &count);
+    if (list_error != ESP_OK) {
+        return send_api_error(request, status_for_error(list_error), esp_err_to_name(list_error),
+                              list_error);
+    }
+    esp_err_t error = start_chunked_json(request);
+    char scratch[kScratchSize]{};
+    if (error == ESP_OK) {
+        const int length = std::snprintf(
+            scratch, sizeof(scratch), "{\"revision\":%lu,\"entries\":[",
+            static_cast<unsigned long>(status.recent_revision));
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    for (std::size_t index = 0; error == ESP_OK && index < count; ++index) {
+        RfFrame frame{};
+        frame.encoding = RfEncoding::kDecoded;
+        frame.decoded = entries[index].decoded;
+        const LearnedMatch match = rf_signals_match_frame(frame);
+        const int length = std::snprintf(
+            scratch, sizeof(scratch),
+            "%s{\"id\":\"%llu\",\"code\":\"0x%llX\",\"code_decimal\":\"%llu\","
+            "\"bits\":%u,\"protocol\":%u,\"pulse_us\":%u,\"match\":\"%s\","
+            "\"match_name\":\"%s\",\"match_count\":%u}",
+            index == 0 ? "" : ",", static_cast<unsigned long long>(entries[index].id),
+            static_cast<unsigned long long>(entries[index].decoded.code),
+            static_cast<unsigned long long>(entries[index].decoded.code),
+            entries[index].decoded.bits, entries[index].decoded.protocol,
+            entries[index].decoded.pulse_us, match_kind_name(match.kind), match.name,
+            match.count);
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        error = send_chunk(request, "]}");
+    }
+    if (error != ESP_OK) {
+        return error;
+    }
+    return httpd_resp_send_chunk(request, nullptr, 0);
+}
+
 esp_err_t rules_handler(httpd_req_t *request)
 {
     const esp_err_t validation = require_empty_get(request);
@@ -782,6 +848,57 @@ esp_err_t replay_handler(httpd_req_t *request)
                 ? bridge_control_replay_last(form.repeats, BridgeEventSource::kWeb)
                 : bridge_control_replay_named(form.name, form.repeats, BridgeEventSource::kWeb);
     return send_operation_result(request, error);
+}
+
+esp_err_t recent_action_handler(httpd_req_t *request)
+{
+    std::unique_ptr<char[]> body;
+    std::size_t length = 0;
+    esp_err_t error = receive_action_form(request, &body, &length);
+    if (error != ESP_OK) {
+        return error;
+    }
+    WebRecentForm form{};
+    if (!parse_web_recent_form(body.get(), length, &form)) {
+        return send_api_error(request, "400 Bad Request", "invalid_recent_request",
+                              ESP_ERR_INVALID_ARG);
+    }
+    switch (form.action) {
+        case WebRecentAction::kReplay:
+            error = bridge_control_replay_recent(form.id, form.repeats,
+                                                 BridgeEventSource::kWeb);
+            break;
+        case WebRecentAction::kSave:
+            error = bridge_control_save_recent(form.id, form.name, BridgeEventSource::kWeb);
+            break;
+        case WebRecentAction::kClear:
+            error = bridge_control_clear_recent();
+            break;
+    }
+    return send_operation_result(request, error);
+}
+
+esp_err_t create_signal_handler(httpd_req_t *request)
+{
+    std::unique_ptr<char[]> body;
+    std::size_t length = 0;
+    esp_err_t error = receive_action_form(request, &body, &length);
+    if (error != ESP_OK) {
+        return error;
+    }
+    WebSignalSaveForm form{};
+    if (!parse_web_signal_save_form(body.get(), length, &form)) {
+        return send_api_error(request, "400 Bad Request", "invalid_signal_request",
+                              ESP_ERR_INVALID_ARG);
+    }
+    DecodedSignalSaveRequest save{};
+    save.code = form.code;
+    save.pulse_us = form.pulse_us;
+    save.bits = form.bits;
+    save.protocol = form.protocol;
+    return send_operation_result(
+        request, bridge_control_save_decoded(form.name, save, BridgeEventSource::kWeb),
+        "201 Created");
 }
 
 esp_err_t delete_signal_handler(httpd_req_t *request)
@@ -980,11 +1097,14 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/app.css", HTTP_GET, static_asset_handler, const_cast<StaticAsset *>(&kCssAsset)},
         {"/app.js", HTTP_GET, static_asset_handler, const_cast<StaticAsset *>(&kJsAsset)},
         {"/api/live", HTTP_GET, live_handler, nullptr},
+        {"/api/recent", HTTP_GET, recent_handler, nullptr},
         {"/api/signals", HTTP_GET, signals_handler, nullptr},
         {"/api/rules", HTTP_GET, rules_handler, nullptr},
         {"/api/learn", HTTP_POST, learn_handler, nullptr},
         {"/api/learn", HTTP_DELETE, cancel_learn_handler, nullptr},
         {"/api/replay", HTTP_POST, replay_handler, nullptr},
+        {"/api/recent", HTTP_POST, recent_action_handler, nullptr},
+        {"/api/signals", HTTP_POST, create_signal_handler, nullptr},
         {"/api/signals", HTTP_DELETE, delete_signal_handler, nullptr},
         {"/api/transmit/decoded", HTTP_POST, decoded_transmit_handler, nullptr},
         {"/api/transmit/raw", HTTP_POST, raw_transmit_handler, nullptr},

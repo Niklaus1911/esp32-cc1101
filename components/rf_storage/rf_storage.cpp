@@ -19,7 +19,9 @@ constexpr char kCodeNamespace[] = "rf_codes";
 constexpr char kRuleNamespace[] = "rf_rules";
 constexpr char kRuleMetaNamespace[] = "rf_rule_meta";
 constexpr char kHardwareNamespace[] = "rf_hw";
+constexpr char kRecentNamespace[] = "rf_recent";
 constexpr char kHardwareKey[] = "selection";
+constexpr char kRecentKey[] = "history";
 constexpr char kRuleEnabledKey[] = "enabled";
 constexpr char kRuleLogModeKey[] = "log_mode";
 constexpr TickType_t kMutexTimeout = pdMS_TO_TICKS(1000);
@@ -30,6 +32,7 @@ std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_rule_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_rule_meta_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_hardware_initialization_error{ESP_ERR_INVALID_STATE};
+std::atomic<esp_err_t> s_recent_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<bool> s_rule_namespace_known_absent{false};
 
 class StorageLock {
@@ -198,6 +201,19 @@ esp_err_t map_hardware_format_result(RfHardwareFormatResult result)
     return ESP_ERR_INVALID_RESPONSE;
 }
 
+esp_err_t map_recent_format_result(RfRecentFormatResult result)
+{
+    switch (result) {
+        case RfRecentFormatResult::kOk: return ESP_OK;
+        case RfRecentFormatResult::kInvalidArgument: return ESP_ERR_INVALID_ARG;
+        case RfRecentFormatResult::kInvalidVersion: return ESP_ERR_INVALID_VERSION;
+        case RfRecentFormatResult::kInvalidCrc: return ESP_ERR_INVALID_CRC;
+        case RfRecentFormatResult::kBufferTooSmall: return ESP_ERR_INVALID_SIZE;
+        case RfRecentFormatResult::kInvalidRecord: return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_ERR_INVALID_RESPONSE;
+}
+
 esp_err_t load_signal_owned(const char *name, RfStoredSignal *signal)
 {
     NvsHandle handle;
@@ -216,6 +232,31 @@ esp_err_t load_signal_owned(const char *name, RfStoredSignal *signal)
         return map_load_error(error);
     }
     return map_format_result(decode_rf_storage_record(record, record_size, signal));
+}
+
+esp_err_t load_recent_history_owned(RfRecentHistory *history)
+{
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READONLY, &handle), "rf_storage",
+                        "open recent history");
+    std::size_t record_size = 0;
+    esp_err_t error = nvs_get_blob(handle.get(), kRecentKey, nullptr, &record_size);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        *history = {};
+        return ESP_OK;
+    }
+    if (error != ESP_OK) {
+        return map_load_error(error);
+    }
+    if (record_size > kRfRecentMaxRecordSize) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    uint8_t record[kRfRecentMaxRecordSize]{};
+    error = nvs_get_blob(handle.get(), kRecentKey, record, &record_size);
+    if (error != ESP_OK) {
+        return map_load_error(error);
+    }
+    return map_recent_format_result(decode_rf_recent_record(record, record_size, history));
 }
 
 esp_err_t load_rule_owned(nvs_handle_t handle, const char *trigger_name, RfStoredRule *rule)
@@ -286,6 +327,7 @@ esp_err_t initialize_rf_storage()
         s_rule_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_rule_meta_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_hardware_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
+        s_recent_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
 
@@ -294,6 +336,7 @@ esp_err_t initialize_rf_storage()
     esp_err_t rule_error = nvs_error;
     esp_err_t meta_error = nvs_error;
     esp_err_t hardware_error = nvs_error;
+    esp_err_t recent_error = nvs_error;
     if (nvs_error == ESP_OK) {
         bool code_absent = false;
         code_error = initialize_namespace(kCodeNamespace, &code_absent);
@@ -304,11 +347,14 @@ esp_err_t initialize_rf_storage()
         meta_error = initialize_namespace(kRuleMetaNamespace, &meta_absent);
         bool hardware_absent = false;
         hardware_error = initialize_namespace(kHardwareNamespace, &hardware_absent);
+        bool recent_absent = false;
+        recent_error = initialize_namespace(kRecentNamespace, &recent_absent);
     }
 
     s_rule_initialization_error.store(rule_error, std::memory_order_release);
     s_rule_meta_initialization_error.store(meta_error, std::memory_order_release);
     s_hardware_initialization_error.store(hardware_error, std::memory_order_release);
+    s_recent_initialization_error.store(recent_error, std::memory_order_release);
     s_initialization_error.store(code_error, std::memory_order_release);
     return code_error;
 }
@@ -570,6 +616,128 @@ esp_err_t rf_storage_hardware_set(RfHardware hardware)
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kHardwareKey, record, size), "rf_storage", "set hardware");
+    return nvs_commit(handle.get());
+}
+
+esp_err_t rf_storage_recent_initialization_error()
+{
+    return s_recent_initialization_error.load(std::memory_order_acquire);
+}
+
+esp_err_t rf_storage_recent_append(const DecodedSignal &decoded, RfRecentSignal *appended)
+{
+    const esp_err_t ready = rf_storage_recent_initialization_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    RfRecentHistory history{};
+    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    RfRecentSignal candidate{};
+    ESP_RETURN_ON_ERROR(map_recent_format_result(
+                            append_rf_recent_history(&history, decoded, &candidate)),
+                        "rf_storage", "append recent history");
+    uint8_t record[kRfRecentMaxRecordSize]{};
+    std::size_t record_size = 0;
+    ESP_RETURN_ON_ERROR(map_recent_format_result(
+                            encode_rf_recent_record(history, record, sizeof(record), &record_size)),
+                        "rf_storage", "encode recent history");
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READWRITE, &handle), "rf_storage",
+                        "open recent history");
+    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kRecentKey, record, record_size), "rf_storage",
+                        "set recent history");
+    ESP_RETURN_ON_ERROR(nvs_commit(handle.get()), "rf_storage", "commit recent history");
+    if (appended != nullptr) {
+        *appended = candidate;
+    }
+    return ESP_OK;
+}
+
+esp_err_t rf_storage_recent_list(RfRecentSignal *entries, std::size_t capacity,
+                                 std::size_t *count)
+{
+    if (count == nullptr || (entries == nullptr && capacity != 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t ready = rf_storage_recent_initialization_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    RfRecentHistory history{};
+    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    *count = history.count;
+    if (entries == nullptr && capacity == 0) {
+        return ESP_OK;
+    }
+    if (capacity < history.count) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    std::copy(history.entries, history.entries + history.count, entries);
+    return ESP_OK;
+}
+
+esp_err_t rf_storage_recent_load(uint64_t id, RfRecentSignal *entry)
+{
+    if (id == 0 || entry == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t ready = rf_storage_recent_initialization_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    RfRecentHistory history{};
+    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    for (std::size_t index = 0; index < history.count; ++index) {
+        if (history.entries[index].id == id) {
+            *entry = history.entries[index];
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t rf_storage_recent_clear()
+{
+    const esp_err_t ready = rf_storage_recent_initialization_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    RfRecentHistory history{};
+    const esp_err_t load_error = load_recent_history_owned(&history);
+    if (load_error == ESP_ERR_INVALID_RESPONSE || load_error == ESP_ERR_INVALID_VERSION ||
+        load_error == ESP_ERR_INVALID_CRC) {
+        history = {};
+    } else if (load_error != ESP_OK) {
+        return load_error;
+    }
+    history.count = 0;
+    std::fill(history.entries, history.entries + kRfRecentSignalCapacity, RfRecentSignal{});
+    uint8_t record[kRfRecentMaxRecordSize]{};
+    std::size_t record_size = 0;
+    ESP_RETURN_ON_ERROR(map_recent_format_result(
+                            encode_rf_recent_record(history, record, sizeof(record), &record_size)),
+                        "rf_storage", "encode empty recent history");
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READWRITE, &handle), "rf_storage",
+                        "open recent history");
+    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kRecentKey, record, record_size), "rf_storage",
+                        "clear recent history");
     return nvs_commit(handle.get());
 }
 

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "esp_check.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -53,6 +54,7 @@ struct PendingLearn {
 
 SemaphoreHandle_t s_mutex = nullptr;
 SemaphoreHandle_t s_catalog_mutex = nullptr;
+SemaphoreHandle_t s_recent_mutex = nullptr;
 QueueHandle_t s_queue = nullptr;
 TaskHandle_t s_task = nullptr;
 std::atomic_flag s_initializing = ATOMIC_FLAG_INIT;
@@ -146,6 +148,21 @@ void publish_catalog_changed(const char *name, BridgeEventSource source)
     bridge_events_publish(event);
 }
 
+esp_err_t save_stored_signal(const char *name, const RfStoredSignal &stored,
+                             BridgeEventSource source)
+{
+    if (!rf_storage_name_is_valid(name)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t error = rf_storage_create(name, stored);
+    if (error != ESP_OK) {
+        return error;
+    }
+    (void)rf_signals_refresh_catalog();
+    publish_catalog_changed(name, source);
+    return ESP_OK;
+}
+
 LearnedMatch match_stored_signal(const RfStoredSignal &stored)
 {
     Lock lock(s_catalog_mutex);
@@ -166,6 +183,47 @@ void publish_frame(const RfFrame &frame, int64_t occurred_us)
     event.payload.rf.frame = frame;
     event.payload.rf.learned = match_stored_signal(stored_signal_from_frame(frame));
     bridge_events_publish(event);
+}
+
+void update_recent_status(esp_err_t error, bool changed, std::size_t count)
+{
+    Lock lock(s_mutex);
+    if (!lock.locked()) {
+        return;
+    }
+    s_status.recent_available = rf_storage_recent_initialization_error() == ESP_OK;
+    s_status.recent_last_error = error;
+    if (error == ESP_OK) {
+        s_status.recent_count = static_cast<uint8_t>(
+            std::min<std::size_t>(count, kRfRecentSignalCapacity));
+        if (changed) {
+            ++s_status.recent_revision;
+        }
+    } else {
+        ++s_status.recent_errors;
+    }
+}
+
+void record_recent_decoded(const RfFrame &frame)
+{
+    if (frame.encoding != RfEncoding::kDecoded) {
+        return;
+    }
+    Lock recent_lock(s_recent_mutex);
+    if (!recent_lock.locked()) {
+        update_recent_status(ESP_ERR_TIMEOUT, false, 0);
+        return;
+    }
+    const esp_err_t error = rf_storage_recent_append(frame.decoded);
+    std::size_t count = 0;
+    if (error == ESP_OK) {
+        const esp_err_t list_error = rf_storage_recent_list(nullptr, 0, &count);
+        if (list_error != ESP_OK) {
+            update_recent_status(list_error, false, 0);
+            return;
+        }
+    }
+    update_recent_status(error, error == ESP_OK, count);
 }
 
 void clear_pending(PendingLearn *pending, RfLearningState state, esp_err_t result)
@@ -244,12 +302,8 @@ void process_frame(const Message &message, PendingLearn *pending)
 
     const PendingLearn captured = *pending;
     *pending = {};
-    const esp_err_t create_error = rf_storage_create(
-        captured.name, stored_signal_from_frame(message.frame));
-    if (create_error == ESP_OK) {
-        (void)rf_signals_refresh_catalog();
-        publish_catalog_changed(captured.name, captured.source);
-    }
+    const esp_err_t create_error = save_stored_signal(
+        captured.name, stored_signal_from_frame(message.frame), captured.source);
     publish_frame(message.frame, message.occurred_us);
     if (create_error == ESP_OK) {
         set_learning_status(RfLearningState::kCompleted, captured.name, ESP_OK);
@@ -287,6 +341,7 @@ void service_task(void *)
         if (xQueueReceive(s_queue, &message, next_wait(pending)) == pdTRUE) {
             if (message.type == MessageType::kFrame) {
                 process_frame(message, &pending);
+                record_recent_decoded(message.frame);
             } else if (message.type == MessageType::kArm) {
                 process_arm(message, &pending);
             } else if (pending.active) {
@@ -314,6 +369,10 @@ void destroy_initialization_resources()
         vSemaphoreDelete(s_catalog_mutex);
         s_catalog_mutex = nullptr;
     }
+    if (s_recent_mutex != nullptr) {
+        vSemaphoreDelete(s_recent_mutex);
+        s_recent_mutex = nullptr;
+    }
     if (s_mutex != nullptr) {
         vSemaphoreDelete(s_mutex);
         s_mutex = nullptr;
@@ -334,14 +393,19 @@ esp_err_t initialize_rf_signals()
     }
     s_mutex = xSemaphoreCreateMutex();
     s_catalog_mutex = xSemaphoreCreateMutex();
+    s_recent_mutex = xSemaphoreCreateMutex();
     s_queue = xQueueCreate(kQueueDepth, sizeof(Message));
-    if (s_mutex == nullptr || s_catalog_mutex == nullptr || s_queue == nullptr) {
+    if (s_mutex == nullptr || s_catalog_mutex == nullptr || s_recent_mutex == nullptr ||
+        s_queue == nullptr) {
         destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_initializing.clear(std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
     (void)rf_signals_refresh_catalog();
+    std::size_t recent_count = 0;
+    const esp_err_t recent_error = rf_storage_recent_list(nullptr, 0, &recent_count);
+    update_recent_status(recent_error, false, recent_count);
     if (xTaskCreate(service_task, "rf_signals", kTaskStackSize, nullptr, kTaskPriority, &s_task) !=
         pdPASS) {
         destroy_initialization_resources();
@@ -414,6 +478,44 @@ esp_err_t rf_signals_forget(const char *name)
     const esp_err_t refresh_error = rf_signals_refresh_catalog();
     publish_catalog_changed(name, BridgeEventSource::kSystem);
     return refresh_error;
+}
+
+esp_err_t rf_signals_save_decoded(const char *name, const DecodedSignal &decoded,
+                                  BridgeEventSource source)
+{
+    RfStoredSignal stored{};
+    stored.encoding = RfStoredEncoding::kDecoded;
+    stored.decoded = decoded;
+    return save_stored_signal(name, stored, source);
+}
+
+esp_err_t rf_signals_save_recent(uint64_t id, const char *name, BridgeEventSource source)
+{
+    if (id == 0 || !rf_storage_name_is_valid(name)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    RfRecentSignal recent{};
+    ESP_RETURN_ON_ERROR(rf_storage_recent_load(id, &recent), "rf_signals",
+                        "load recent signal");
+    RfStoredSignal stored{};
+    stored.encoding = RfStoredEncoding::kDecoded;
+    stored.decoded = recent.decoded;
+    return save_stored_signal(name, stored, source);
+}
+
+esp_err_t rf_signals_clear_recent()
+{
+    if (!s_available.load(std::memory_order_acquire)) {
+        return s_initialization_error.load(std::memory_order_acquire);
+    }
+    Lock recent_lock(s_recent_mutex);
+    if (!recent_lock.locked()) {
+        update_recent_status(ESP_ERR_TIMEOUT, false, 0);
+        return ESP_ERR_TIMEOUT;
+    }
+    const esp_err_t error = rf_storage_recent_clear();
+    update_recent_status(error, error == ESP_OK, 0);
+    return error;
 }
 
 esp_err_t rf_signals_refresh_catalog()

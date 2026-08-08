@@ -18,6 +18,43 @@ TEST_CASE("responsive Web forms accept only exact bounded fields", "[web_ui]")
     TEST_ASSERT_FALSE(replay.latest);
     TEST_ASSERT_EQUAL_UINT16(7, replay.repeats);
 
+    rfbridge::WebSignalSaveForm signal_save{};
+    constexpr char signal_save_nominal[] =
+        "name=gate&code=13830801&bits=24&protocol=1";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_signal_save_form(
+        signal_save_nominal, sizeof(signal_save_nominal) - 1U, &signal_save));
+    TEST_ASSERT_EQUAL_STRING("gate", signal_save.name);
+    TEST_ASSERT_EQUAL_HEX64(0xD30A91, signal_save.code);
+    TEST_ASSERT_EQUAL_UINT16(350, signal_save.pulse_us);
+    constexpr char signal_save_explicit[] =
+        "name=gate_2&code=0xD30A91&bits=24&protocol=1&pulse_us=199";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_signal_save_form(
+        signal_save_explicit, sizeof(signal_save_explicit) - 1U, &signal_save));
+    TEST_ASSERT_EQUAL_UINT16(199, signal_save.pulse_us);
+    constexpr char signal_save_overflow[] =
+        "name=gate&code=0x1000000&bits=24&protocol=1";
+    TEST_ASSERT_FALSE(rfbridge::parse_web_signal_save_form(
+        signal_save_overflow, sizeof(signal_save_overflow) - 1U, &signal_save));
+
+    rfbridge::WebRecentForm recent{};
+    constexpr char recent_replay[] =
+        "action=replay&id=18446744073709551614&repeats=20";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_recent_form(
+        recent_replay, sizeof(recent_replay) - 1U, &recent));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::WebRecentAction::kReplay),
+                      static_cast<int>(recent.action));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_MAX - 1U, recent.id);
+    constexpr char recent_save[] = "action=save&id=42&name=gate_1";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_recent_form(
+        recent_save, sizeof(recent_save) - 1U, &recent));
+    TEST_ASSERT_EQUAL_STRING("gate_1", recent.name);
+    constexpr char recent_clear[] = "action=clear";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_recent_form(
+        recent_clear, sizeof(recent_clear) - 1U, &recent));
+    constexpr char recent_extra[] = "action=clear&extra=1";
+    TEST_ASSERT_FALSE(rfbridge::parse_web_recent_form(
+        recent_extra, sizeof(recent_extra) - 1U, &recent));
+
     rfbridge::WebDecodedForm decoded{};
     constexpr char decoded_body[] =
         "code=0xA88142&bits=24&protocol=1&pulse_us=0&repeats=8";

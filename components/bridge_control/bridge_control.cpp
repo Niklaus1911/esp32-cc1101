@@ -80,24 +80,10 @@ esp_err_t transmit_stored(const RfStoredSignal &stored, uint16_t repeats,
 
 bool bridge_control_decoded_request_is_valid(const DecodedTransmitRequest &request)
 {
-    if (request.bits < 4 || request.bits > 64 || request.protocol < 1 ||
-        request.protocol > kRfProtocolCount || request.repeats < 1 || request.repeats > 20) {
-        return false;
-    }
-    if (request.bits < 64 && (request.code >> request.bits) != 0) {
-        return false;
-    }
-    const RfProtocol *protocol = rf_protocol(request.protocol);
-    if (protocol == nullptr) {
-        return false;
-    }
-    const uint8_t minimum_factor = rf_protocol_min_factor(request.protocol);
-    const uint16_t minimum_unit =
-        static_cast<uint16_t>((kMinimumRawPulseUs + minimum_factor - 1U) / minimum_factor);
-    const uint16_t maximum_unit = static_cast<uint16_t>(
-        kMaximumPulseDurationUs / rf_protocol_max_factor(request.protocol));
-    const uint16_t pulse_us = request.pulse_us == 0 ? protocol->pulse_us : request.pulse_us;
-    return pulse_us >= minimum_unit && pulse_us <= maximum_unit;
+    DecodedSignal decoded{};
+    return request.repeats >= 1 && request.repeats <= 20 &&
+           make_decoded_signal(request.code, request.bits, request.protocol, request.pulse_us,
+                               &decoded);
 }
 
 bool bridge_control_raw_request_is_valid(const RawTransmitRequest &request)
@@ -156,20 +142,29 @@ esp_err_t bridge_control_reset_radio()
 esp_err_t bridge_control_transmit_decoded(const DecodedTransmitRequest &request,
                                           BridgeEventSource source, uint32_t operation_id)
 {
-    if (!bridge_control_decoded_request_is_valid(request)) {
+    DecodedSignal decoded{};
+    if (request.repeats < 1 || request.repeats > 20 ||
+        !make_decoded_signal(request.code, request.bits, request.protocol, request.pulse_us,
+                             &decoded)) {
         return ESP_ERR_INVALID_ARG;
     }
-    const RfProtocol *protocol = rf_protocol(request.protocol);
-    DecodedSignal decoded{};
-    decoded.code = request.code;
-    decoded.bits = request.bits;
-    decoded.protocol = request.protocol;
-    decoded.pulse_us = request.pulse_us == 0 ? protocol->pulse_us : request.pulse_us;
-    decoded.inverted = protocol->inverted;
     RfStoredSignal stored{};
     stored.encoding = RfStoredEncoding::kDecoded;
     stored.decoded = decoded;
     return transmit_stored(stored, request.repeats, source, operation_id, nullptr);
+}
+
+esp_err_t bridge_control_save_decoded(const char *name,
+                                      const DecodedSignalSaveRequest &request,
+                                      BridgeEventSource source)
+{
+    DecodedSignal decoded{};
+    if (!rf_storage_name_is_valid(name) ||
+        !make_decoded_signal(request.code, request.bits, request.protocol, request.pulse_us,
+                             &decoded)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return rf_signals_save_decoded(name, decoded, source);
 }
 
 esp_err_t bridge_control_transmit_raw(const RawTransmitRequest &request,
@@ -212,6 +207,34 @@ esp_err_t bridge_control_replay_named(const char *name, uint16_t repeats,
     RfStoredSignal stored{};
     const esp_err_t error = rf_storage_load(name, &stored);
     return error == ESP_OK ? transmit_stored(stored, repeats, source, operation_id, name) : error;
+}
+
+esp_err_t bridge_control_replay_recent(uint64_t id, uint16_t repeats,
+                                      BridgeEventSource source, uint32_t operation_id)
+{
+    if (id == 0 || repeats < 1 || repeats > 20) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    RfRecentSignal recent{};
+    const esp_err_t error = rf_storage_recent_load(id, &recent);
+    if (error != ESP_OK) {
+        return error;
+    }
+    RfStoredSignal stored{};
+    stored.encoding = RfStoredEncoding::kDecoded;
+    stored.decoded = recent.decoded;
+    return transmit_stored(stored, repeats, source, operation_id, nullptr);
+}
+
+esp_err_t bridge_control_save_recent(uint64_t id, const char *name,
+                                    BridgeEventSource source)
+{
+    return rf_signals_save_recent(id, name, source);
+}
+
+esp_err_t bridge_control_clear_recent()
+{
+    return rf_signals_clear_recent();
 }
 
 esp_err_t bridge_control_forget_signal(const char *name)

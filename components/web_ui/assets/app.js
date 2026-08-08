@@ -14,6 +14,9 @@ rulePulseItem:null,
 learningRevision:null,
 live:null,
 signals:[],
+recent:[],
+recentRevision:null,
+recentLoading:false,
 rules:[],
 activity:[],
 radioDirty:false,
@@ -215,6 +218,7 @@ target.textContent = v; target.className = badge ? `state state-${tone}` : `valu
 function renderSystem(live) {
 if (!live||byId("system-status").classList.contains("is-stale")) return;
 const { radio: r,learning: l,automation: a,network: w,mdns: m,system: s=null,errors: e={} }=live;
+const recent=live.recent||{};
 const b=live.board||null;
 const v=live.services||null;
 const E=formatError,T=formatState,B=formatBoolean,H=hasError,A=formatAddress,Z=formatBytes,
@@ -313,6 +317,7 @@ D("system-runtime-details",hLim?[["State",Q+"."]]:[
 ]);
 D("system-services-details",[
 ["Learned signals",l.available?`${l.count} / catalog ${l.catalog_available === undefined?"-":l.catalog_available?"ready":"unavailable"}`:"Unavailable"],
+["Recent decoded",recent.available?`${recent.count} / NVS`:"Unavailable"],
 ["Automation",a.available?`${a.enabled?"Enabled":"Disabled"}${a.runtime_paused?" / paused":""} / ${a.rules} rules`:"Unavailable"],
 ["mDNS",!m?Q:m.effective_known?`${T(m.state)} / http://${m.effective_hostname}.local/`:T(m.state)],
 ["LAN services",v?`${v.effective} / requested ${v.requested}`:Q],
@@ -336,6 +341,8 @@ D("system-wifi-diagnostics",[
 ]);
 D("system-services-diagnostics",[
 ...rows(l,"Learning queue drops:queue_drops|Catalog errors:catalog_errors"),
+["Recent history error",E(recent.last_error)],
+["Recent history errors",recent.errors],
 ["Learning initialization error",E(l.initialization_error)],
 ...rows(a,"Frames:frames|Stale frames:stale|Ambiguous frames:ambiguous|Matches:matches|Actions:actions|Cooldown suppressed:suppressed|TX errors:tx_errors|Queue drops:queue_drops|Log events:log_events|Log drops:log_drops"),
 ["Initialization error",E(a.initialization_error)],
@@ -527,6 +534,10 @@ pulseTriggeredRule(live.automation.last_trigger);
 if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
 live.learning.state !== "armed") refreshSignals();
 state.learningRevision = live.learning.revision;
+const recentRevision=live.recent?.revision;
+const signalsView=document.querySelector('[data-panel="signals"]');
+if (Number.isInteger(recentRevision) && recentRevision !== state.recentRevision &&
+!signalsView.hidden && !state.busy) refreshRecent();
 
 byId("radio-state").textContent = live.radio.running ? "Running" : "Faulted";
 byId("radio-state").className = live.radio.running ? "value-ok" : "value-bad";
@@ -546,6 +557,64 @@ if (signal.error) return signal.error;
 return signal.encoding === "decoded"
 ? `${signal.code} / ${signal.bits} bit / protocol ${signal.protocol} / ${signal.pulse_us} us`
 : `${signal.pulses} pulses / start ${signal.start_level}`;
+}
+
+function renderRecent() {
+byId("recent-count").textContent = `${state.recent.length} stored / 5 maximum`;
+const target = byId("recent-list");
+if (state.recent.length === 0) {
+target.replaceChildren(element("p", "empty", "No decoded signals stored."));
+return;
+}
+const fragment = document.createDocumentFragment();
+state.recent.forEach((entry) => {
+const item = element("div", "item");
+item.dataset.recentId = entry.id;
+item.append(element("div", "item-title", `#${entry.id} / ${entry.code}`),
+element("div", "item-meta", `${entry.code_decimal} decimal / ${entry.bits} bit / protocol ${entry.protocol} / ${entry.pulse_us} us / ${frameMatch(entry)}`));
+const actions = element("div", "item-actions recent-actions");
+const repeats = document.createElement("input");
+repeats.type = "number";
+repeats.min = "1";
+repeats.max = "20";
+repeats.value = "8";
+repeats.dataset.role = "repeats";
+repeats.setAttribute("aria-label", `Repeats for recent signal ${entry.id}`);
+const replay = element("button", "primary", "Replay");
+replay.type = "button";
+replay.dataset.action = "replay-recent";
+const name = document.createElement("input");
+name.className = "recent-name";
+name.maxLength = 15;
+name.pattern = "[A-Za-z][A-Za-z0-9_\\-]{0,14}";
+name.required = true;
+name.placeholder = "Learned name";
+name.dataset.role = "name";
+name.setAttribute("aria-label", `Learned name for recent signal ${entry.id}`);
+const save = element("button", "", "Save");
+save.type = "button";
+save.dataset.action = "save-recent";
+actions.append(repeats, replay, name, save);
+item.append(actions);
+fragment.append(item);
+});
+target.replaceChildren(fragment);
+}
+
+async function refreshRecent() {
+if (state.recentLoading) return;
+state.recentLoading = true;
+try {
+const payload = await readJson("/api/recent");
+state.recent = payload.entries || [];
+state.recentRevision = payload.revision;
+renderRecent();
+} catch (error) {
+byId("recent-count").textContent = "Unavailable";
+showNotice(error.message || "Could not load recent signals", "error");
+} finally {
+state.recentLoading = false;
+}
 }
 
 function renderSignals() {
@@ -663,7 +732,7 @@ const active = panel.dataset.panel === name;
 panel.hidden = !active;
 panel.classList.toggle("active", active);
 });
-if (name === "signals") refreshSignals();
+if (name === "signals") Promise.all([refreshRecent(),refreshSignals()]);
 if (name === "rules") refreshRules();
 if (name === "system") refreshOta();
 }
@@ -685,12 +754,29 @@ if (tab) activateView(tab.dataset.view);
 
 bindPostForm("learn-form", "/api/learn", (data) => ({ name: data.name.trim() }),
 () => { byId("learn-name").value = ""; });
+bindPostForm("signal-save-form", "/api/signals", (data) => ({
+name: data.name.trim(),
+code: data.code.trim(),
+bits: data.bits,
+protocol: data.protocol,
+pulse_us: data.pulse_us || "0",
+}), async () => {
+byId("signal-save-name").value = "";
+byId("signal-save-code").value = "";
+await Promise.all([refreshSignals(), refreshRules()]);
+});
 byId("cancel-learning").addEventListener("click", () => requestAction("/api/learn", "DELETE"));
 byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: byId("last-repeats").value })));
 byId("clear-activity").addEventListener("click", () => {
 state.activity = [];
 removeStoredActivity();
 renderActivity();
+});
+byId("refresh-recent").addEventListener("click", refreshRecent);
+byId("clear-recent").addEventListener("click", async () => {
+if (!confirm("Clear all recent decoded signals from the device?")) return;
+await requestAction("/api/recent", "POST", formBody({ action: "clear" }));
+await refreshRecent();
 });
 byId("refresh-signals").addEventListener("click", refreshSignals);
 byId("refresh-rules").addEventListener("click", refreshRules);
@@ -719,6 +805,25 @@ await requestAction("/api/replay", "POST", formBody({ name, repeats }));
 if (await requestAction("/api/signals", "DELETE", formBody({ name }))) {
 await Promise.all([refreshSignals(), refreshRules()]);
 }
+}
+});
+
+byId("recent-list").addEventListener("click", async (event) => {
+const button = event.target.closest("[data-action]");
+const item = event.target.closest("[data-recent-id]");
+if (!button || !item) return;
+const id = item.dataset.recentId;
+if (button.dataset.action === "replay-recent") {
+const repeats = item.querySelector("[data-role=repeats]").value;
+await requestAction("/api/recent", "POST", formBody({ action: "replay", id, repeats }));
+await refreshRecent();
+} else if (button.dataset.action === "save-recent") {
+const name = item.querySelector("[data-role=name]");
+name.value = name.value.trim();
+if (!name.reportValidity()) return;
+const saved = await requestAction("/api/recent", "POST", formBody({ action: "save", id, name: name.value }));
+await refreshRecent();
+if (saved) await refreshSignals();
 }
 });
 
@@ -796,4 +901,4 @@ if (!matchMedia("(max-width: 560px)").matches) byId("firmware-disclosure").open 
 restoreActivity()
 bindActions()
 renderActivity()
-Promise.all([refreshSignals(),refreshRules(),refreshOta()]).finally(()=>schedulePoll(0))
+Promise.all([refreshRecent(),refreshSignals(),refreshRules(),refreshOta()]).finally(()=>schedulePoll(0))

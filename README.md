@@ -308,7 +308,7 @@ rfbridge/<12hex>/availability
 homeassistant/status
 ```
 
-Discovery and availability are retained at QoS 1. Every discovery entity keeps the stable bridge identifier and name, reports `RF Bridge` as its manufacturer, uses the running board's human-readable model, and exposes the exact profile slug as its hardware version. Button commands are exact, non-retained QoS 0 `PRESS` messages so broker redelivery cannot cause a second RF action. A valid command replays the named signal using `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8). Retained, duplicate, fragmented, malformed, wrong-topic, and wrong-QoS commands are rejected. Learning or deleting a signal reconciles discovery automatically; a 60-second audit and `homeassistant/status` birth messages recover dropped events and Home Assistant restarts.
+Discovery and availability are retained at QoS 1. Every discovery entity keeps the stable bridge identifier and name, reports `RF Bridge` as its manufacturer, uses the running board's human-readable model, and exposes the exact profile slug as its hardware version. Button commands are exact, non-retained QoS 0 `PRESS` messages so broker redelivery cannot cause a second RF action. A valid command replays the named signal using `CONFIG_RF_DEFAULT_TX_REPEATS` (default 8). Retained, duplicate, fragmented, malformed, wrong-topic, and wrong-QoS commands are rejected. Learning, manually saving, or deleting a signal reconciles discovery automatically; a 60-second audit and `homeassistant/status` birth messages recover dropped events and Home Assistant restarts.
 
 For a dedicated Mosquitto user, replace `<12hex>` with the bridge's full lowercase STA MAC and grant only the bridge-side topics:
 
@@ -355,7 +355,9 @@ The retained ledger keeps the broker endpoint even when the signal and rule list
 
 ### Web UI
 
-The Web UI is available whenever the boot mask includes Web (`web` or `both`). It is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The browser keeps the latest 50 observed frames in tab-scoped session storage, so the activity list survives page refreshes. Clear or closing the tab session removes that browser-local history. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
+The Web UI is available whenever the boot mask includes Web (`web` or `both`). It is a compact static HTML/CSS/JavaScript application served on port `80`. It polls one bounded live snapshot at a time while the page is visible, so accepted RF frames and learning results appear without a manual reload. The Overview tab keeps the latest 50 decoded or raw observations in browser tab-scoped session storage, so that activity list survives page refreshes. Clear or closing the tab session removes the browser-local list. It is not shared with other browsers, does not follow a changed device IP, and is not a guaranteed event history.
+
+The separate **Signals > Recent decoded signals** list comes from the device, not the browser. It contains the five newest decoded receptions committed to NVS, survives browser and bridge restarts, and is shared by every Web client and the UART `recent` command. Each entry has a persistent ID and controls for bounded replay or copying it into the named learned-signal catalog. Raw captures never enter this five-entry list.
 
 The Web surface calls typed services directly and provides:
 
@@ -365,7 +367,9 @@ The Web surface calls typed services directly and provides:
   and PSRAM watermarks, and learning/automation/LAN service health.
 - Explicit live selection of CC1101 or generic ASK/OOK hardware.
 - Learning and cancellation.
+- Structured manual saving of decoded signals without receiving or transmitting them.
 - Latest-frame and named learned-signal replay with bounded repeats.
+- Persistent recent-decoded listing, replay, save-as-learned, refresh, and confirmed clear.
 - Learned-signal metadata and deletion with rule-reference protection.
 - Decoded and raw RF transmission forms.
 - Automation rule add/remove/enable/disable and log-mode controls.
@@ -437,6 +441,46 @@ replay
 replay 10
 ```
 
+The five newest decoded receptions are also stored automatically in NVS. List them newest first, replay one by its persistent ID, or copy one into the named learned catalog:
+
+```text
+recent list
+recent replay 42
+recent replay 42 10
+recent save 42 gate
+recent clear
+```
+
+Recent-history rules:
+
+- Only accepted decoded frames that print a readable `code=` are stored. Raw captures are ignored.
+- Every logical reception is retained, including a later reception of the same code. The normal 350 ms button-hold suppression runs before history capture.
+- The list is fixed at five entries. Adding a sixth atomically evicts the oldest committed entry.
+- IDs are nonzero 64-bit decimal values stored with the history and remain stable across reboot. A rotated or cleared ID returns not found and is never redirected to another entry.
+- `recent replay <id> [repeats]` uses the configured default when repeats are omitted; the explicit range is 1-20.
+- `recent save <id> <name>` copies the decoded payload without removing the history entry. Existing learned names are never overwritten, and normal name validation and catalog-change reporting apply.
+- `recent clear` immediately empties the list while preserving the next valid ID. The Web UI requires confirmation before issuing the same mutation.
+- History uses its own versioned, checksummed NVS record. A corrupt record fails closed until explicitly cleared. Initialization or commit failures are reported but never stop receive, learning, automation, or RAM replay.
+
+Save a decoded signal directly without receiving or transmitting it:
+
+```text
+save gate 13830801 24 1 199
+save gate_default 0xD30A91 24 1
+```
+
+The same operation is available under **Signals > Learned signals** in the Web UI. Enter a persistent name, code, bit count, protocol, and pulse width, then select **Save signal**. The Web form uses `0` for the selected protocol's nominal pulse width.
+
+Manual-save rules:
+
+- `save <name> <code> <bits> <protocol> [pulse_us]` accepts decimal or `0x` hexadecimal codes. Bits must be 4-64, the code must fit, and the protocol must be 1-12.
+- Omitted or zero `pulse_us` uses the selected protocol's nominal timing. A nonzero value must fit that protocol's transport limits.
+- The name uses the normal learned-signal rules: 1-15 characters, starts with a letter, and then contains only letters, digits, `_`, or `-`; `list` is reserved.
+- Saving is create-only. An existing name is never overwritten, and a failed save does not change its record.
+- Confidence, observed repeat count, and fingerprint text from an `RX` line are reception metadata and are not stored. Home Assistant replay continues to use `CONFIG_RF_DEFAULT_TX_REPEATS`.
+- A committed manual signal appears in the existing learned list and automation selectors. When MQTT is configured, the catalog-change event creates its Home Assistant button immediately when connected or during the next normal reconciliation.
+- Manual saving does not transmit RF, replace the latest RAM frame, change learning state, or add an entry to recent history.
+
 Learn the next accepted decoded or raw signal under a persistent name:
 
 ```text
@@ -506,7 +550,7 @@ Raw rules:
 - Start level is 0 or 1.
 - Durations are 100–29000 µs. This keeps pulses above the supported asynchronous sampling floor and below the 30 ms RMT frame-stop threshold.
 - A frame must contain an even 8–256 alternating pulses.
-- The staged frame and unnamed last received frame are not persistent; only frames captured by `learn <name>` are stored in NVS.
+- The staged frame and unnamed last received frame are not persistent. Named learning stores decoded or raw frames, while the automatic five-entry recent history stores decoded frames only.
 
 ### Diagnostics and recovery
 
@@ -598,4 +642,4 @@ idf.py -C test_apps/unit -B /tmp/esp32-cc1101-unit-esp32s3 \
 
 The Unity image is compile-only in this workflow. Do not flash or run on-device Unity tests without separate approval and a board-specific approved by-id path. Production firmware hardware access is authorized for the classic ESP32, N16R8, and FH4R2 paths documented above; this does not authorize flashing the Unity image.
 
-The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF, Wi-Fi, and MQTT records, MQTT topics/discovery/command rejection, owned-key NVS repair, OTA compatibility policy, frequency calculation, and PA selection. MQTT broker behavior, CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.
+The Unity image uses an interactive menu; enter `*` and press Enter to run all tests. Building it does not mean its tests passed, only the on-device `0 Failures` summary does. The host and Unity sources cover the hardened decoder vectors, raw and learned matching, ambiguity and learning-window bounds, recent-history rotation/IDs/corruption, parser bounds, console style/ANSI bounds, bounded Web form parsing, same-origin checks, HTML escaping, server-rendered route contracts, versioned RF, Wi-Fi, and MQTT records, MQTT topics/discovery/command rejection, owned-key NVS repair, OTA compatibility policy, frequency calculation, and PA selection. MQTT broker behavior, CC1101 SPI/RMT lifecycle, NVS persistence across reboot, DHCP/reconnection, browser behavior on a device, RF timing, range, and recovery still require explicit hardware testing; compilation alone proves none of those behaviors.

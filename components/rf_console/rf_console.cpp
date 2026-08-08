@@ -401,15 +401,21 @@ void print_persistent_configuration_summary()
     const esp_err_t storage_error = rf_storage_initialization_error();
     const bool healthy = signals_error == ESP_OK && automation_error == ESP_OK &&
                          storage_error == ESP_OK && signals.available &&
+                         signals.recent_available && signals.recent_last_error == ESP_OK &&
                          automation.available && automation.enabled_known &&
                          automation.rule_count_known && automation.log_mode_known;
-    char plain[256]{};
-    char pretty[256]{};
+    char plain[384]{};
+    char pretty[320]{};
     char learned_count[16]{"unknown"};
+    char recent_count[16]{"unknown"};
     char rule_count[16]{"unknown"};
     if (signals_error == ESP_OK && signals.available) {
         std::snprintf(learned_count, sizeof(learned_count), "%u",
                       static_cast<unsigned>(signals.learned_count));
+        if (signals.recent_available) {
+            std::snprintf(recent_count, sizeof(recent_count), "%u",
+                          static_cast<unsigned>(signals.recent_count));
+        }
     }
     if (automation_error == ESP_OK && automation.rule_count_known) {
         std::snprintf(rule_count, sizeof(rule_count), "%u",
@@ -422,13 +428,14 @@ void print_persistent_configuration_summary()
                                ? rf_automation_log_mode_name(automation.log_mode)
                                : "unknown";
     std::snprintf(plain, sizeof(plain),
-                  "STORAGE learned=%s rules=%s automation=%s log_mode=%s nvs=%s signals=%s rules_error=%s",
-                  learned_count, rule_count, enabled_state, log_mode,
+                  "STORAGE learned=%s recent=%s rules=%s automation=%s log_mode=%s nvs=%s signals=%s recent_error=%s rules_error=%s",
+                  learned_count, recent_count, rule_count, enabled_state, log_mode,
                   esp_err_to_name(storage_error), esp_err_to_name(signals_error),
+                  esp_err_to_name(signals.recent_last_error),
                   esp_err_to_name(automation_error));
     std::snprintf(pretty, sizeof(pretty),
-                  "Persistent RF configuration: %s learned / %s rules / automation %s / log %s",
-                  learned_count, rule_count, enabled_state, log_mode);
+                  "Persistent RF configuration: %s learned / %s recent / %s rules / automation %s / log %s",
+                  learned_count, recent_count, rule_count, enabled_state, log_mode);
     print_tagged_line(healthy ? ConsoleTone::kSuccess : ConsoleTone::kWarning, "STORE", plain,
                       pretty, false);
 }
@@ -2224,6 +2231,103 @@ int replay_command(int argc, char **argv)
                                               BridgeEventSource::kUart));
 }
 
+int list_recent_signals()
+{
+    OutputGuard guard;
+    if (!guard.locked()) {
+        return 1;
+    }
+    RfRecentSignal entries[kRfRecentSignalCapacity]{};
+    std::size_t count = 0;
+    const esp_err_t error = rf_storage_recent_list(entries, std::size(entries), &count);
+    if (error != ESP_OK) {
+        return print_result("recent list", error);
+    }
+    if (current_console_style() == ConsoleStyle::kPlain) {
+        std::printf("RECENT count=%zu\n", count);
+    } else {
+        char count_text[16]{};
+        std::snprintf(count_text, sizeof(count_text), "%zu", count);
+        print_dashboard_header("Recent decoded signals");
+        print_dashboard_value("Count", count_text,
+                              count == 0 ? ConsoleTone::kMuted : ConsoleTone::kInfo);
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        RfFrame frame{};
+        frame.encoding = RfEncoding::kDecoded;
+        frame.decoded = entries[index].decoded;
+        const LearnedMatch match = rf_signals_match_frame(frame);
+        char match_text[kRfStorageNameCapacity + 24U]{};
+        if (match.kind == LearnedMatchKind::kUnique) {
+            std::snprintf(match_text, sizeof(match_text), "%s", match.name);
+        } else if (match.kind == LearnedMatchKind::kAmbiguous) {
+            std::snprintf(match_text, sizeof(match_text), "ambiguous(%u)", match.count);
+        } else if (match.kind == LearnedMatchKind::kUnavailable) {
+            std::snprintf(match_text, sizeof(match_text), "unavailable");
+        } else {
+            std::snprintf(match_text, sizeof(match_text), "-");
+        }
+        char line[256]{};
+        const int length = std::snprintf(
+            line, sizeof(line),
+            "id=%llu code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u learned=%s",
+            static_cast<unsigned long long>(entries[index].id),
+            static_cast<unsigned long long>(entries[index].decoded.code),
+            static_cast<unsigned long long>(entries[index].decoded.code),
+            entries[index].decoded.bits, entries[index].decoded.protocol,
+            entries[index].decoded.pulse_us, match_text);
+        if (length < 0 || static_cast<std::size_t>(length) >= sizeof(line)) {
+            return print_result("recent list", ESP_ERR_INVALID_SIZE);
+        }
+        if (current_console_style() == ConsoleStyle::kPlain) {
+            std::printf("RECENT %s\n", line);
+        } else {
+            char id_text[24]{};
+            char code_text[56]{};
+            char format_text[48]{};
+            std::snprintf(id_text, sizeof(id_text), "%llu",
+                          static_cast<unsigned long long>(entries[index].id));
+            std::snprintf(code_text, sizeof(code_text), "%llu / 0x%llX",
+                          static_cast<unsigned long long>(entries[index].decoded.code),
+                          static_cast<unsigned long long>(entries[index].decoded.code));
+            std::snprintf(format_text, sizeof(format_text), "%u bit / protocol %u / %u us",
+                          entries[index].decoded.bits, entries[index].decoded.protocol,
+                          entries[index].decoded.pulse_us);
+            print_dashboard_value("Signal ID", id_text, ConsoleTone::kInfo);
+            print_dashboard_value("Code", code_text, ConsoleTone::kInfo);
+            print_dashboard_value("Format", format_text, ConsoleTone::kMuted);
+            print_dashboard_value("Learned", match_text, ConsoleTone::kMuted);
+        }
+    }
+    if (current_console_style() == ConsoleStyle::kPretty) {
+        print_dashboard_footer();
+    }
+    return 0;
+}
+
+int recent_command(int argc, char **argv)
+{
+    RecentArguments arguments{};
+    if (!parse_recent_arguments(argc, argv, CONFIG_RF_DEFAULT_TX_REPEATS, &arguments)) {
+        return print_usage("usage: recent <list|replay <id> [repeats:1..20]|save <id> <name>|clear>");
+    }
+    switch (arguments.action) {
+        case RecentAction::kList:
+            return list_recent_signals();
+        case RecentAction::kReplay:
+            return print_result(
+                "recent replay", bridge_control_replay_recent(
+                                     arguments.id, arguments.repeats, BridgeEventSource::kUart));
+        case RecentAction::kSave:
+            return print_result(
+                "recent save", bridge_control_save_recent(
+                                   arguments.id, arguments.name, BridgeEventSource::kUart));
+        case RecentAction::kClear:
+            return print_result("recent clear", bridge_control_clear_recent());
+    }
+    return print_result("recent", ESP_ERR_INVALID_ARG);
+}
+
 
 int list_rules()
 {
@@ -2395,6 +2499,21 @@ int rule_command(int argc, char **argv)
         return print_result("rule add", rf_automation_add_rule(argv[2], argv[3], repeats));
     }
     return print_usage("usage: rule <add <received_name> <transmit_name> [repeats]|list|remove <received_name>|enable|disable|log [off|actions|verbose]>");
+}
+
+int save_signal_command(int argc, char **argv)
+{
+    SaveSignalArguments arguments{};
+    if (!parse_save_signal_arguments(argc, argv, &arguments)) {
+        return print_usage("usage: save <name> <code> <bits> <protocol> [pulse_us]");
+    }
+    DecodedSignalSaveRequest request{};
+    request.code = arguments.code;
+    request.pulse_us = arguments.pulse_us;
+    request.bits = arguments.bits;
+    request.protocol = arguments.protocol;
+    return print_result("save", bridge_control_save_decoded(
+                                    arguments.name, request, BridgeEventSource::kUart));
 }
 
 int send_value_command(int argc, char **argv)
@@ -2588,7 +2707,11 @@ constexpr CommandDefinition kCommands[] = {
      "auth <status|rotate>", web_command},
     {"radio", "Start, inspect, reset, or select RF hardware", "<start|info|reset|hardware>", radio_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
+    {"recent", "List or use the five persistent decoded receptions",
+     "<list|replay <id> [repeats]|save <id> <name>|clear>", recent_command},
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
+    {"save", "Save a decoded value without receiving it",
+     "<name> <code> <bits> <protocol> [pulse_us]", save_signal_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
     {"rule", "Configure persistent receive-to-replay automation",
      "<add <rx> <tx> [repeats]|list|remove <rx>|enable|disable|"

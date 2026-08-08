@@ -270,6 +270,55 @@ TEST_CASE("RF hardware selection record is versioned and CRC protected", "[rf_st
                           record, size, &loaded)));
 }
 
+TEST_CASE("recent decoded history record rotates and rejects corruption", "[rf_storage][recent]")
+{
+    rfbridge::RfRecentHistory history{};
+    rfbridge::DecodedSignal decoded{};
+    decoded.pulse_us = 386;
+    decoded.bits = 24;
+    decoded.protocol = 1;
+    for (uint64_t code = 1; code <= 6; ++code) {
+        decoded.code = code == 2 ? 1 : code;
+        TEST_ASSERT_EQUAL(
+            static_cast<int>(rfbridge::RfRecentFormatResult::kOk),
+            static_cast<int>(rfbridge::append_rf_recent_history(&history, decoded)));
+    }
+    TEST_ASSERT_EQUAL_size_t(rfbridge::kRfRecentSignalCapacity, history.count);
+    TEST_ASSERT_EQUAL_UINT64(7, history.next_id);
+    TEST_ASSERT_EQUAL_UINT64(6, history.entries[0].id);
+    TEST_ASSERT_EQUAL_UINT64(2, history.entries[4].id);
+    TEST_ASSERT_EQUAL_UINT64(1, history.entries[4].decoded.code);
+
+    uint8_t record[rfbridge::kRfRecentMaxRecordSize]{};
+    std::size_t size = 0;
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kOk),
+        static_cast<int>(rfbridge::encode_rf_recent_record(
+            history, record, sizeof(record), &size)));
+    TEST_ASSERT_EQUAL_size_t(rfbridge::kRfRecentMaxRecordSize, size);
+    rfbridge::RfRecentHistory loaded{};
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kOk),
+        static_cast<int>(rfbridge::decode_rf_recent_record(record, size, &loaded)));
+    TEST_ASSERT_EQUAL_UINT64(6, loaded.entries[0].id);
+
+    record[12] ^= 1U;
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kInvalidCrc),
+        static_cast<int>(rfbridge::decode_rf_recent_record(record, size, &loaded)));
+    record[12] ^= 1U;
+    record[4] = 2;
+    rewrite_crc(record, size);
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kInvalidVersion),
+        static_cast<int>(rfbridge::decode_rf_recent_record(record, size, &loaded)));
+
+    history.next_id = UINT64_MAX;
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kInvalidArgument),
+        static_cast<int>(rfbridge::append_rf_recent_history(&history, decoded)));
+}
+
 TEST_CASE("RF hardware selection persists independently in NVS", "[rf_storage][nvs]")
 {
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
@@ -356,6 +405,92 @@ TEST_CASE("RF storage NVS backend is create only and forgets one key", "[rf_stor
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, missing_forget_error);
     TEST_ASSERT_EQUAL(ESP_OK, final_exists_error);
     TEST_ASSERT_FALSE(exists);
+}
+
+TEST_CASE("recent decoded history persists rotates clears and preserves learned storage",
+          "[rf_storage][recent][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+    std::size_t learned_before = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_list(nullptr, 0, &learned_before));
+
+    nvs_handle_t handle = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READWRITE, &handle));
+    uint8_t backup[rfbridge::kRfRecentMaxRecordSize]{};
+    std::size_t backup_size = 0;
+    esp_err_t backup_error = nvs_get_blob(handle, "history", nullptr, &backup_size);
+    const bool had_backup = backup_error == ESP_OK;
+    TEST_ASSERT_TRUE(backup_error == ESP_OK || backup_error == ESP_ERR_NVS_NOT_FOUND);
+    if (had_backup) {
+        TEST_ASSERT_LESS_OR_EQUAL_size_t(sizeof(backup), backup_size);
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_get_blob(handle, "history", backup, &backup_size));
+    }
+
+    rfbridge::RfRecentHistory seed{};
+    seed.next_id = 100;
+    uint8_t record[rfbridge::kRfRecentMaxRecordSize]{};
+    std::size_t record_size = 0;
+    TEST_ASSERT_EQUAL(
+        static_cast<int>(rfbridge::RfRecentFormatResult::kOk),
+        static_cast<int>(rfbridge::encode_rf_recent_record(
+            seed, record, sizeof(record), &record_size)));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_set_blob(handle, "history", record, record_size));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+    nvs_close(handle);
+
+    rfbridge::DecodedSignal decoded{};
+    decoded.pulse_us = 386;
+    decoded.bits = 24;
+    decoded.protocol = 1;
+    for (uint64_t code = 1; code <= 6; ++code) {
+        decoded.code = code == 2 ? 1 : code;
+        TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_append(decoded));
+    }
+    rfbridge::RfRecentSignal entries[rfbridge::kRfRecentSignalCapacity]{};
+    std::size_t count = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_list(
+                                  entries, std::size(entries), &count));
+    TEST_ASSERT_EQUAL_size_t(rfbridge::kRfRecentSignalCapacity, count);
+    TEST_ASSERT_EQUAL_UINT64(105, entries[0].id);
+    TEST_ASSERT_EQUAL_UINT64(101, entries[4].id);
+    TEST_ASSERT_EQUAL_UINT64(1, entries[4].decoded.code);
+    rfbridge::RfRecentSignal loaded{};
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_load(103, &loaded));
+    TEST_ASSERT_EQUAL_UINT64(4, loaded.decoded.code);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, rfbridge::rf_storage_recent_load(100, &loaded));
+
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_clear());
+    decoded.code = 77;
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_append(decoded, &loaded));
+    TEST_ASSERT_EQUAL_UINT64(106, loaded.id);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READWRITE, &handle));
+    record_size = sizeof(record);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_get_blob(handle, "history", record, &record_size));
+    record[12] ^= 1U;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_set_blob(handle, "history", record, record_size));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+    nvs_close(handle);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_CRC,
+                      rfbridge::rf_storage_recent_list(entries, std::size(entries), &count));
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_clear());
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_list(
+                                  entries, std::size(entries), &count));
+    TEST_ASSERT_EQUAL_size_t(0, count);
+
+    std::size_t learned_after = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_list(nullptr, 0, &learned_after));
+    TEST_ASSERT_EQUAL_size_t(learned_before, learned_after);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READWRITE, &handle));
+    if (had_backup) {
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_set_blob(handle, "history", backup, backup_size));
+    } else {
+        const esp_err_t erase_error = nvs_erase_key(handle, "history");
+        TEST_ASSERT_TRUE(erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND);
+    }
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+    nvs_close(handle);
 }
 
 

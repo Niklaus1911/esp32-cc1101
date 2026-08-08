@@ -51,6 +51,8 @@ const RfProtocol *rf_protocol(uint8_t protocol_number);
 uint8_t rf_protocol_min_factor(uint8_t protocol_number);
 uint8_t rf_protocol_max_factor(uint8_t protocol_number);
 bool decoded_signal_is_valid(const DecodedSignal &signal);
+bool make_decoded_signal(uint64_t code, uint8_t bits, uint8_t protocol, uint16_t pulse_us,
+                         DecodedSignal *signal);
 bool decoded_signals_match(const DecodedSignal &left, const DecodedSignal &right);
 bool raw_signal_is_valid(const RawSignal &signal);
 RawProtocolIdentity identify_raw_protocol(const RawSignal &raw, DecodedSignal *decoded);

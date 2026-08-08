@@ -20,10 +20,31 @@ enum class WebRulePatch : uint8_t {
     kLogMode,
 };
 
+enum class WebRecentAction : uint8_t {
+    kReplay,
+    kSave,
+    kClear,
+};
+
 struct WebReplayForm {
     bool latest = true;
     char name[kWebNameCapacity]{};
     uint16_t repeats = 1;
+};
+
+struct WebRecentForm {
+    WebRecentAction action = WebRecentAction::kReplay;
+    uint64_t id = 0;
+    uint16_t repeats = 0;
+    char name[kWebNameCapacity]{};
+};
+
+struct WebSignalSaveForm {
+    char name[kWebNameCapacity]{};
+    uint64_t code = 0;
+    uint16_t pulse_us = 0;
+    uint8_t bits = 0;
+    uint8_t protocol = 0;
 };
 
 struct WebDecodedForm {
@@ -64,6 +85,9 @@ struct WebHardwareForm {
 bool parse_web_learn_form(const char *body, std::size_t length, char *name,
                           std::size_t name_capacity);
 bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *output);
+bool parse_web_recent_form(const char *body, std::size_t length, WebRecentForm *output);
+bool parse_web_signal_save_form(const char *body, std::size_t length,
+                                WebSignalSaveForm *output);
 bool parse_web_signal_name_form(const char *body, std::size_t length, char *name,
                                 std::size_t name_capacity);
 bool parse_web_decoded_form(const char *body, std::size_t length, WebDecodedForm *output);

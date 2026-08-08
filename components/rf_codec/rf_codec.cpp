@@ -460,6 +460,26 @@ bool decoded_signal_is_valid(const DecodedSignal &signal)
            (signal.bits == 64 || (signal.code >> signal.bits) == 0);
 }
 
+bool make_decoded_signal(uint64_t code, uint8_t bits, uint8_t protocol_number,
+                         uint16_t pulse_us, DecodedSignal *signal)
+{
+    const RfProtocol *protocol = rf_protocol(protocol_number);
+    if (signal == nullptr || protocol == nullptr) {
+        return false;
+    }
+    DecodedSignal decoded{};
+    decoded.code = code;
+    decoded.pulse_us = pulse_us == 0 ? protocol->pulse_us : pulse_us;
+    decoded.bits = bits;
+    decoded.protocol = protocol_number;
+    decoded.inverted = protocol->inverted;
+    if (!decoded_signal_is_valid(decoded)) {
+        return false;
+    }
+    *signal = decoded;
+    return true;
+}
+
 bool decoded_signals_match(const DecodedSignal &left, const DecodedSignal &right)
 {
     return decoded_signal_is_valid(left) && decoded_signal_is_valid(right) && left.code == right.code &&

@@ -36,6 +36,13 @@ struct DecodedTransmitRequest {
     uint8_t protocol = 0;
 };
 
+struct DecodedSignalSaveRequest {
+    uint64_t code = 0;
+    uint16_t pulse_us = 0;
+    uint8_t bits = 0;
+    uint8_t protocol = 0;
+};
+
 struct RawTransmitRequest {
     RawSignal signal{};
     uint16_t repeats = 0;
@@ -50,6 +57,9 @@ esp_err_t bridge_control_reset_radio();
 esp_err_t bridge_control_transmit_decoded(const DecodedTransmitRequest &request,
                                           BridgeEventSource source,
                                           uint32_t operation_id = 0);
+esp_err_t bridge_control_save_decoded(const char *name,
+                                      const DecodedSignalSaveRequest &request,
+                                      BridgeEventSource source);
 esp_err_t bridge_control_transmit_raw(const RawTransmitRequest &request,
                                       BridgeEventSource source,
                                       uint32_t operation_id = 0);
@@ -58,6 +68,12 @@ esp_err_t bridge_control_replay_last(uint16_t repeats, BridgeEventSource source,
 esp_err_t bridge_control_replay_named(const char *name, uint16_t repeats,
                                       BridgeEventSource source,
                                       uint32_t operation_id = 0);
+esp_err_t bridge_control_replay_recent(uint64_t id, uint16_t repeats,
+                                      BridgeEventSource source,
+                                      uint32_t operation_id = 0);
+esp_err_t bridge_control_save_recent(uint64_t id, const char *name,
+                                    BridgeEventSource source);
+esp_err_t bridge_control_clear_recent();
 esp_err_t bridge_control_forget_signal(const char *name);
 
 }  // namespace rfbridge
