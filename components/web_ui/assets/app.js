@@ -710,6 +710,21 @@ showNotice(error.message || "Could not load rules", "error");
 }
 }
 
+async function refreshSignalsAndRules() {
+await refreshSignals();
+await refreshRules();
+}
+
+async function refreshSignalsView() {
+cancelPolling();
+try {
+await refreshRecent();
+await refreshSignals();
+} finally {
+schedulePoll(0);
+}
+}
+
 async function refreshOta() {
 try {
 const ota = await readJson("/api/v1/ota/status");
@@ -733,7 +748,7 @@ const active = panel.dataset.panel === name;
 panel.hidden = !active;
 panel.classList.toggle("active", active);
 });
-if (name === "signals") Promise.all([refreshRecent(),refreshSignals()]);
+if (name === "signals") refreshSignalsView();
 if (name === "rules") refreshRules();
 if (name === "system") refreshOta();
 }
@@ -764,7 +779,7 @@ pulse_us: data.pulse_us || "0",
 }), async () => {
 byId("signal-save-name").value = "";
 byId("signal-save-code").value = "";
-await Promise.all([refreshSignals(), refreshRules()]);
+await refreshSignalsAndRules();
 });
 byId("cancel-learning").addEventListener("click", () => requestAction("/api/learn", "DELETE"));
 byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: byId("last-repeats").value })));
@@ -782,7 +797,7 @@ await refreshRecent();
 byId("refresh-signals").addEventListener("click", refreshSignals);
 byId("generate-random-signal").addEventListener("click", () => {
 requestAction("/api/signals/random", "POST", null, async (result) => {
-await Promise.all([refreshSignals(), refreshRules()]);
+await refreshSignalsAndRules();
 showNotice(`Saved ${result.signal.name} / ${result.signal.code}`, "success");
 });
 });
@@ -810,7 +825,7 @@ const repeats = item.querySelector("input").value;
 await requestAction("/api/replay", "POST", formBody({ name, repeats }));
 } else if (button.dataset.action === "delete" && confirm(`Delete learned signal ${name}?`)) {
 await requestAction("/api/signals", "DELETE", formBody({ name }), async () => {
-await Promise.all([refreshSignals(), refreshRules()]);
+await refreshSignalsAndRules();
 });
 }
 });
@@ -908,4 +923,8 @@ if (!matchMedia("(max-width: 560px)").matches) byId("firmware-disclosure").open 
 restoreActivity()
 bindActions()
 renderActivity()
-Promise.all([refreshRecent(),refreshSignals(),refreshRules(),refreshOta()]).finally(()=>schedulePoll(0))
+refreshRecent()
+.then(refreshSignals)
+.then(refreshRules)
+.then(refreshOta)
+.finally(()=>schedulePoll(0))

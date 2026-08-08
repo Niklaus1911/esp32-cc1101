@@ -341,7 +341,7 @@ assert(js.includes('action: "replay"') && js.includes('action: "save"') &&
 assert(js.includes('bindPostForm("signal-save-form", "/api/signals"') &&
        js.includes('byId("signal-save-name").value = ""') &&
        js.includes('byId("signal-save-code").value = ""') &&
-       js.includes("Promise.all([refreshSignals(), refreshRules()])"),
+       js.includes("await refreshSignalsAndRules();"),
        "manual decoded signal save refresh flow missing");
 const requestActionStart = js.indexOf(
   "async function requestAction(path, method, body = null, afterSuccess = null)");
@@ -358,8 +358,16 @@ assert(requestActionStart >= 0 && requestActionEnd > requestActionStart &&
          'await requestAction(path, "POST", formBody(data), complete);'),
        "post-action refresh must finish before live polling resumes");
 assert(compactSource(js).includes(
-         'requestAction("/api/signals/random", "POST", null, async (result) => { await Promise.all([refreshSignals(), refreshRules()]); showNotice(`Saved ${result.signal.name} / ${result.signal.code}`, "success");') &&
+         'requestAction("/api/signals/random", "POST", null, async (result) => { await refreshSignalsAndRules(); showNotice(`Saved ${result.signal.name} / ${result.signal.code}`, "success");') &&
        "random signal save feedback or refresh flow missing");
+assert(compactSource(js).includes(
+         "async function refreshSignalsAndRules() { await refreshSignals(); await refreshRules(); }") &&
+       compactSource(js).includes(
+         "async function refreshSignalsView() { cancelPolling(); try { await refreshRecent(); await refreshSignals(); } finally { schedulePoll(0); } }") &&
+       compactSource(js).includes(
+         "refreshRecent() .then(refreshSignals) .then(refreshRules) .then(refreshOta) .finally(()=>schedulePoll(0))") &&
+       !js.includes("Promise.all([refresh"),
+       "Web API refreshes must stay within the two-socket server limit");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(liveRenderer.includes("const incomingRadio=live.radio||{}") &&
        liveRenderer.includes("renderRadioHardware(incomingRadio)"),
