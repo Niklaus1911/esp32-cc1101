@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 
+#include "bridge_random_signal.hpp"
 #include "network_wifi_config.hpp"
 #include "network_hostname_config.hpp"
 #include "network_mdns_policy.hpp"
@@ -1658,6 +1659,30 @@ void test_web_forms()
             "Web IPv4 formatting rejects null and zero-capacity outputs");
 }
 
+void test_random_signal_candidates()
+{
+    rfbridge::RandomSignalSaveResult candidate{};
+    require(rfbridge::make_random_signal_candidate(0xA5D30A91U, &candidate) &&
+                std::strcmp(candidate.name.value, "random_D30A91") == 0 &&
+                candidate.decoded.code == 0xD30A91 &&
+                candidate.decoded.bits == rfbridge::kRandomSignalBits &&
+                candidate.decoded.protocol == rfbridge::kRandomSignalProtocol &&
+                candidate.decoded.pulse_us == 350 &&
+                rfbridge::rf_storage_name_is_valid(candidate.name.value),
+            "random signal masks to a valid canonical 24-bit protocol 1 candidate");
+    require(rfbridge::make_random_signal_candidate(0, &candidate) &&
+                std::strcmp(candidate.name.value, "random_000000") == 0 &&
+                candidate.decoded.code == 0,
+            "random signal keeps the unbiased all-zero boundary");
+    require(rfbridge::make_random_signal_candidate(UINT32_MAX, &candidate) &&
+                std::strcmp(candidate.name.value, "random_FFFFFF") == 0 &&
+                candidate.decoded.code == 0xFFFFFF,
+            "random signal keeps the unbiased all-one boundary");
+    require(!rfbridge::make_random_signal_candidate(1, nullptr) &&
+                rfbridge::kRandomSignalMaximumAttempts == 8,
+            "random signal rejects a missing result and keeps bounded retries");
+}
+
 }  // namespace
 
 int main()
@@ -1682,6 +1707,7 @@ int main()
     test_ota_policy();
     test_automation_rules();
     test_web_forms();
+    test_random_signal_candidates();
     std::puts("All host RF tests passed");
     return 0;
 }

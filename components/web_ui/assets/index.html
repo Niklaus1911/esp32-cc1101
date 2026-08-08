@@ -84,7 +84,13 @@
         <div id="recent-list" class="item-list"><p class="empty">Loading recent signals.</p></div>
       </section>
       <section class="band">
-        <div class="section-heading"><div><h2>Learned signals</h2><p id="signal-count" class="subtle">Loading</p></div><button id="refresh-signals" type="button" class="quiet">Refresh</button></div>
+        <div class="section-heading">
+          <div><h2>Learned signals</h2><p id="signal-count" class="subtle">Loading</p></div>
+          <div class="inline-controls signal-heading-actions">
+            <button id="generate-random-signal" type="button" class="primary">Generate &amp; save</button>
+            <button id="refresh-signals" type="button" class="quiet">Refresh</button>
+          </div>
+        </div>
         <form id="signal-save-form" class="form-grid signal-save-form" autocomplete="off">
           <label>Name<input id="signal-save-name" name="name" maxlength="15" pattern="[A-Za-z][A-Za-z0-9_\-]{0,14}" required></label>
           <label>Code<input id="signal-save-code" name="code" placeholder="0xD30A91" required></label>

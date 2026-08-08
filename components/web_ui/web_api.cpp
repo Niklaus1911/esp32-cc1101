@@ -901,6 +901,44 @@ esp_err_t create_signal_handler(httpd_req_t *request)
         "201 Created");
 }
 
+esp_err_t random_signal_handler(httpd_req_t *request)
+{
+    if (!validate_mutation_headers(request, false)) {
+        return reject_request(request, "403 Forbidden", "origin_rejected",
+                              ESP_ERR_INVALID_STATE);
+    }
+    if (request->content_len != 0) {
+        return reject_request(request, "413 Content Too Large", "body_rejected",
+                              ESP_ERR_INVALID_SIZE);
+    }
+
+    RandomSignalSaveResult result{};
+    const esp_err_t error = bridge_control_generate_and_save_random_decoded(
+        BridgeEventSource::kWeb, &result);
+    if (error == ESP_ERR_NOT_FINISHED) {
+        return send_api_error(request, "503 Service Unavailable",
+                              "random_generation_exhausted", error);
+    }
+    if (error != ESP_OK) {
+        return send_api_error(request, status_for_error(error), esp_err_to_name(error), error);
+    }
+
+    char response[kScratchSize]{};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"signal\":{\"name\":\"%s\",\"encoding\":\"decoded\","
+        "\"code\":\"0x%llX\",\"code_decimal\":\"%llu\",\"bits\":%u,"
+        "\"protocol\":%u,\"pulse_us\":%u}}",
+        result.name.value, static_cast<unsigned long long>(result.decoded.code),
+        static_cast<unsigned long long>(result.decoded.code), result.decoded.bits,
+        result.decoded.protocol, result.decoded.pulse_us);
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(response)) {
+        return send_api_error(request, "500 Internal Server Error", "response_too_large",
+                              ESP_ERR_INVALID_SIZE);
+    }
+    return send_json(request, "201 Created", response);
+}
+
 esp_err_t delete_signal_handler(httpd_req_t *request)
 {
     std::unique_ptr<char[]> body;
@@ -1105,6 +1143,7 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/api/replay", HTTP_POST, replay_handler, nullptr},
         {"/api/recent", HTTP_POST, recent_action_handler, nullptr},
         {"/api/signals", HTTP_POST, create_signal_handler, nullptr},
+        {"/api/signals/random", HTTP_POST, random_signal_handler, nullptr},
         {"/api/signals", HTTP_DELETE, delete_signal_handler, nullptr},
         {"/api/transmit/decoded", HTTP_POST, decoded_transmit_handler, nullptr},
         {"/api/transmit/raw", HTTP_POST, raw_transmit_handler, nullptr},

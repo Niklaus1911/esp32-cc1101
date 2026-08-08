@@ -106,7 +106,7 @@ esp_err_t start_server() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kHttpPort;
     config.stack_size = kHttpTaskStackSize;
-    config.max_uri_handlers = 21;
+    config.max_uri_handlers = 22;
     config.max_open_sockets = 2;
     config.open_fn = accept_ready_session;
     config.lru_purge_enable = true;

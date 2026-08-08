@@ -34,7 +34,7 @@ const compactSource = (content) => content.replace(/\s+/g, " ");
 const occurrenceCount = (content, value) => content.split(value).length - 1;
 
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = 80;/);
-assert.match(lifecycle, /config\.max_uri_handlers = 21;/);
+assert.match(lifecycle, /config\.max_uri_handlers = 22;/);
 assert.match(lifecycle, /config\.max_open_sockets = 2;/);
 assert.match(api, /constexpr uint16_t kHttpPort = 80;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
@@ -53,6 +53,7 @@ for (const route of [
   '"/api/replay", HTTP_POST, replay_handler',
   '"/api/recent", HTTP_POST, recent_action_handler',
   '"/api/signals", HTTP_POST, create_signal_handler',
+  '"/api/signals/random", HTTP_POST, random_signal_handler',
   '"/api/signals", HTTP_DELETE, delete_signal_handler',
   '"/api/transmit/decoded", HTTP_POST, decoded_transmit_handler',
   '"/api/transmit/raw", HTTP_POST, raw_transmit_handler',
@@ -69,6 +70,12 @@ assert(api.includes("bridge_control_save_decoded") &&
        api.includes('"201 Created"') &&
        forms.includes("parse_web_signal_save_form"),
        "manual decoded signal save route missing");
+assert(api.includes("bridge_control_generate_and_save_random_decoded") &&
+       api.includes("random_generation_exhausted") &&
+       api.includes('send_json(request, "201 Created", response)'),
+       "random decoded signal save route missing");
+assert(!api.includes("true_random_unavailable"),
+       "random signal save must not require Wi-Fi entropy");
 assert(api.includes("bridge_control_replay_recent") &&
        api.includes("bridge_control_save_recent") &&
        api.includes("bridge_control_clear_recent"),
@@ -95,6 +102,9 @@ assert(index.includes('id="signal-save-form"') &&
        index.includes('id="signal-save-name"') &&
        index.includes('id="signal-save-code"'),
        "manual decoded signal form missing");
+assert(index.includes('id="generate-random-signal"') &&
+       index.includes("Generate &amp; save"),
+       "random learned-signal action missing");
 assert(index.includes("Install and reboot"), "OTA control missing");
 assert(index.includes('id="radio-hardware"') && index.includes('id="apply-radio-hardware"') &&
        js.includes('requestAction("/api/radio/hardware","POST"'),
@@ -333,6 +343,23 @@ assert(js.includes('bindPostForm("signal-save-form", "/api/signals"') &&
        js.includes('byId("signal-save-code").value = ""') &&
        js.includes("Promise.all([refreshSignals(), refreshRules()])"),
        "manual decoded signal save refresh flow missing");
+const requestActionStart = js.indexOf(
+  "async function requestAction(path, method, body = null, afterSuccess = null)");
+const requestActionEnd = js.indexOf("function schedulePoll", requestActionStart);
+const requestAction = js.slice(requestActionStart, requestActionEnd);
+const afterSuccessOffset = requestAction.indexOf(
+  "if (afterSuccess) await afterSuccess(payload);");
+const finallyOffset = requestAction.indexOf("} finally {");
+const pollingOffset = requestAction.indexOf("schedulePoll(0);");
+assert(requestActionStart >= 0 && requestActionEnd > requestActionStart &&
+       afterSuccessOffset >= 0 && finallyOffset > afterSuccessOffset &&
+       pollingOffset > finallyOffset &&
+       compactSource(js).includes(
+         'await requestAction(path, "POST", formBody(data), complete);'),
+       "post-action refresh must finish before live polling resumes");
+assert(compactSource(js).includes(
+         'requestAction("/api/signals/random", "POST", null, async (result) => { await Promise.all([refreshSignals(), refreshRules()]); showNotice(`Saved ${result.signal.name} / ${result.signal.code}`, "success");') &&
+       "random signal save feedback or refresh flow missing");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(liveRenderer.includes("const incomingRadio=live.radio||{}") &&
        liveRenderer.includes("renderRadioHardware(incomingRadio)"),

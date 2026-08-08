@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "esp_random.h"
 #include "rf_storage.hpp"
 
 namespace rfbridge {
@@ -165,6 +166,50 @@ esp_err_t bridge_control_save_decoded(const char *name,
         return ESP_ERR_INVALID_ARG;
     }
     return rf_signals_save_decoded(name, decoded, source);
+}
+
+esp_err_t bridge_control_generate_and_save_random_decoded(
+    BridgeEventSource source, RandomSignalSaveResult *result)
+{
+    if (result == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (std::size_t attempt = 0; attempt < kRandomSignalMaximumAttempts; ++attempt) {
+        RandomSignalSaveResult candidate{};
+        if (!make_random_signal_candidate(esp_random(), &candidate)) {
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        RfFrame frame{};
+        frame.encoding = RfEncoding::kDecoded;
+        frame.decoded = candidate.decoded;
+        const LearnedMatch match = rf_signals_match_frame(frame);
+        if (match.kind == LearnedMatchKind::kUnavailable) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (match.kind != LearnedMatchKind::kNone) {
+            continue;
+        }
+
+        const esp_err_t save_error =
+            rf_signals_save_decoded(candidate.name.value, candidate.decoded, source);
+        if (save_error == ESP_OK) {
+            *result = candidate;
+            return ESP_OK;
+        }
+        if (save_error == ESP_ERR_INVALID_STATE) {
+            bool exists = false;
+            const esp_err_t exists_error = rf_storage_exists(candidate.name.value, &exists);
+            if (exists_error != ESP_OK) {
+                return exists_error;
+            }
+            if (exists) {
+                continue;
+            }
+        }
+        return save_error;
+    }
+    return ESP_ERR_NOT_FINISHED;
 }
 
 esp_err_t bridge_control_transmit_raw(const RawTransmitRequest &request,

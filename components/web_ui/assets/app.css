@@ -136,6 +136,7 @@ progress { width: 100%; height: 12px; margin-top: 14px; accent-color: #35b8c3; }
   .metric { padding: 11px; }
   .section-heading { align-items: flex-start; flex-direction: column; }
   .inline-controls, .settings-row, .form-row { width: 100%; }
+  .signal-heading-actions button { flex: 1 1 0; }
   .inline-controls label { flex: 1; }
   .form-row label, .form-row button { width: 100%; }
   .form-grid, .raw-form { grid-template-columns: 1fr; }

@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "bridge_events.hpp"
+#include "bridge_random_signal.hpp"
 #include "esp_err.h"
 #include "network_wifi.hpp"
 #include "ota_update.hpp"
@@ -60,6 +61,8 @@ esp_err_t bridge_control_transmit_decoded(const DecodedTransmitRequest &request,
 esp_err_t bridge_control_save_decoded(const char *name,
                                       const DecodedSignalSaveRequest &request,
                                       BridgeEventSource source);
+esp_err_t bridge_control_generate_and_save_random_decoded(
+    BridgeEventSource source, RandomSignalSaveResult *result);
 esp_err_t bridge_control_transmit_raw(const RawTransmitRequest &request,
                                       BridgeEventSource source,
                                       uint32_t operation_id = 0);

@@ -63,6 +63,30 @@ tools/verify-production.sh
 
 The production verifier rebuilds all four profiles in clean `/tmp/esp32-cc1101-production` directories, checks image target/flash headers, the `RFBD` board descriptor, partition offsets, S3 Quad/Octal PSRAM settings, board console/LED defaults, and the 25% OTA-slot margin. `dependencies.lock.esp32` and `dependencies.lock.esp32s3` are intentionally separate because ESP-IDF component resolution is target-specific. Do not copy a generated `sdkconfig`, build directory, or lock between targets.
 
+The production image artifacts and OTA slots are:
+
+| Profile | Image | Flash / PSRAM | Console / activity LED | CC1101 defaults (SCK/MISO/MOSI/CSN/GDO0/GDO2) | Generic TX/RX | OTA slot |
+|---|---|---|---|---|---|---:|
+| `esp32-devkit` | `build/esp32-devkit/esp32-cc1101.bin` | 4 MB / none | UART0 GPIO1/3 / GPIO2 active-high | `18/19/23/27/26/25` | `32/33` | `0x1e0000` |
+| `esp32s3-devkitc-n16r8` | `build/esp32s3-devkitc-n16r8/esp32-cc1101.bin` | 16 MB / 8 MB Octal | UART0 GPIO43/44 / disabled, GPIO48 reserved | `12/13/11/10/4/5` | `6/7` | `0x7e0000` |
+| `xiao-esp32s3` | `build/xiao-esp32s3/esp32-cc1101.bin` | 8 MB / 8 MB Octal | USB Serial/JTAG / GPIO21 active-low | `7/8/9/4/2/1` | `5/6` | `0x3e0000` |
+| `esp32s3-supermini-fh4r2` | `build/esp32s3-supermini-fh4r2/esp32-cc1101.bin` | 4 MB / 2 MB Quad | USB Serial/JTAG / disabled, GPIO48 reserved | `12/13/11/10/4/5` | `6/7` | `0x1e0000` |
+
+The generic DATA GPIOs are fixed by profile. CC1101 defaults may be intentionally overridden through the owning ESP-IDF configuration only when the selected board's GPIO validation and non-overlap rules remain satisfied.
+
+### LAN OTA workflow
+
+After the matching profile has been installed once over wire, build the same profile and upload its application image from a trusted LAN:
+
+```bash
+tools/build-board.sh <profile> build
+tools/push-ota.sh <effective-hostname>.local build/<profile>/esp32-cc1101.bin
+```
+
+The running device must have Wi-Fi online and service mode `web` or `both`; MQTT-only mode has no HTTP server or OTA endpoint. Use `hostname status` for the effective `.local` name or pass the current IPv4 address. The uploader validates checksum/hash, project and ESP-IDF metadata, chip, flash header, `RFBD` profile descriptor, and the profile's OTA-slot limit before uploading. The Web equivalent is **System > Firmware update** in the trusted-LAN UI.
+
+All four profiles are accepted by `tools/push-ota.sh`, including XIAO. XIAO remains build-only for local wired access in this repository because no persistent by-id path has been approved; once an OTA-capable XIAO image is installed by an externally approved wired workflow, network OTA follows the same command. A blank board, legacy single-app image, profile migration, or legacy downgrade still requires an exact-profile wired flash without erasing NVS.
+
 Unity compilation uses the same split defaults and locks in isolated directories:
 
 ```bash
@@ -90,11 +114,11 @@ tools/build-board.sh esp32-devkit build
 
 The extension's generic target/flash buttons are not a substitute for selecting the profile. Never run `set-target`, `menuconfig`, or edit generated `sdkconfig` as part of a profile switch. Put durable defaults in the shared, target-specific, or board-specific defaults files instead.
 
-The XIAO and FH4R2 native USB Serial/JTAG devices can disappear and re-enumerate during reset, bootloader entry, or a flash. Re-select their approved by-id paths after re-enumeration; do not rely on `/dev/ttyACM*` auto-detection. The N16R8 profile uses its separate USB-UART connector on UART0 GPIO43/44 and has the fixed path listed below.
+Native USB Serial/JTAG devices can disappear and re-enumerate during reset, bootloader entry, or a flash. The FH4R2 must return on its approved by-id path; a future XIAO path must meet the same persistence requirement before hardware access is enabled. Do not rely on `/dev/ttyACM*` auto-detection. The N16R8 profile uses its separate USB-UART connector on UART0 GPIO43/44 and has the fixed path listed below.
 
 ## Hardware Access Contract
 
-The available boards have separate exact paths:
+The currently approved production boards have separate exact paths:
 
 ```text
 esp32-devkit:              /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
@@ -102,7 +126,7 @@ esp32s3-devkitc-n16r8:     /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
 esp32s3-supermini-fh4r2:   /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
 ```
 
-`tools/build-board.sh` checks that the selected profile's exact symlink exists and resolves to a character device before allowing `flash` or `monitor`; it also validates the built target, flash header, profile define, and `RFBD` descriptor. Do not substitute a `/dev/ttyUSB*` or `/dev/ttyACM*` path, swap paths between boards, or use port auto-detection. XIAO hardware access remains disabled. FH4R2 validation in this workflow is limited to offline boot, native USB console, PSRAM, and local board diagnostics; no Wi-Fi-dependent test is authorized.
+`tools/build-board.sh` checks that the selected profile's exact symlink exists and resolves to a character device before allowing `flash` or `monitor`; it also validates the built target, flash header, profile define, and `RFBD` descriptor. Do not substitute a `/dev/ttyUSB*` or `/dev/ttyACM*` path, swap paths between boards, or use port auto-detection. The XIAO profile has no approved local wired path and is intentionally rejected for `flash`/`monitor` until one is explicitly added. FH4R2 validation in this workflow is limited to offline boot, native USB console, PSRAM, and local board diagnostics; no Wi-Fi-dependent test is authorized.
 
 ## Python Environments
 

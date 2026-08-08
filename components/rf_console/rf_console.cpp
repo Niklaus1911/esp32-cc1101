@@ -2516,6 +2516,41 @@ int save_signal_command(int argc, char **argv)
                                     arguments.name, request, BridgeEventSource::kUart));
 }
 
+int random_signal_command(int argc, char **)
+{
+    if (argc != 1) {
+        return print_usage("usage: random");
+    }
+    RandomSignalSaveResult result{};
+    const esp_err_t error = bridge_control_generate_and_save_random_decoded(
+        BridgeEventSource::kUart, &result);
+    if (error == ESP_ERR_NOT_FINISHED) {
+        return print_validation_error(
+            "ERROR random: no unique signal after 8 attempts",
+            "Could not find a unique random signal after 8 attempts");
+    }
+    if (error != ESP_OK) {
+        return print_result("random", error);
+    }
+
+    char plain[192]{};
+    char pretty[192]{};
+    std::snprintf(
+        plain, sizeof(plain),
+        "RANDOM name=%s code=%llu hex=0x%llX bits=%u protocol=%u pulse_us=%u",
+        result.name.value, static_cast<unsigned long long>(result.decoded.code),
+        static_cast<unsigned long long>(result.decoded.code), result.decoded.bits,
+        result.decoded.protocol, result.decoded.pulse_us);
+    std::snprintf(
+        pretty, sizeof(pretty),
+        "Saved %s / code %llu (0x%llX) / %u bit / protocol %u / %u us",
+        result.name.value, static_cast<unsigned long long>(result.decoded.code),
+        static_cast<unsigned long long>(result.decoded.code), result.decoded.bits,
+        result.decoded.protocol, result.decoded.pulse_us);
+    print_tagged_line(ConsoleTone::kSuccess, "RANDOM", plain, pretty, false);
+    return 0;
+}
+
 int send_value_command(int argc, char **argv)
 {
     if (argc < 4 || argc > 6) {
@@ -2712,6 +2747,8 @@ constexpr CommandDefinition kCommands[] = {
     {"learn", "Learn the next accepted frame or list names", "<name>|list", learn_command},
     {"save", "Save a decoded value without receiving it",
      "<name> <code> <bits> <protocol> [pulse_us]", save_signal_command},
+    {"random", "Generate and save a random decoded value", nullptr,
+     random_signal_command},
     {"forget", "Delete one learned NVS frame", "<name>", forget_command},
     {"rule", "Configure persistent receive-to-replay automation",
      "<add <rx> <tx> [repeats]|list|remove <rx>|enable|disable|"

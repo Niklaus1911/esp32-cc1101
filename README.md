@@ -10,7 +10,7 @@ It provides:
 - Stable complete-frame decoding with repeated-frame consensus and ambiguity rejection.
 - Raw capture/replay for stable repeated OOK waveforms that do not match a known protocol.
 - A UART console for inspection, named learning, persistent receive-to-replay automation, direct sending, replay, diagnostics, and radio recovery.
-- Versioned named signal storage in NVS; the unnamed latest frame remains RAM-only and is lost at reboot.
+- Versioned named-signal storage plus the five newest decoded receptions in NVS; the separate unnamed latest decoded or raw frame remains RAM-only.
 - Optional runtime Wi-Fi station mode with reboot-selected Web, MQTT, or (on any ESP32-S3 profile) simultaneous Web+MQTT operation. Web provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; MQTT provides native Home Assistant MQTT Discovery, learned-signal buttons, RF/automation activity, retained snapshots, and automation controls. RF, storage, automation, and the physical console remain shared by every mode.
 
 ## Hardware
@@ -27,6 +27,26 @@ The firmware is one codebase with four explicit profiles. Flash the image matchi
 | `esp32s3-supermini-fh4r2` | ESP32-S3FH4R2 | 4 MB / 2 MB Quad | Native USB Serial/JTAG | Disabled; GPIO48 reserved | `web`, `mqtt`, `both` |
 
 The classic ESP32 has no PSRAM and deliberately rejects `service mode both`; it keeps the memory-safe Web-or-MQTT behavior. All three S3 profiles place MQTT's cold catalogs, ledgers, rule snapshots, and discovery scratch in PSRAM while keeping control state, credentials, queues, task stacks, OTA buffers, and RF/RMT state in internal RAM. A missing or failed S3 MQTT allocation leaves Web available when it was requested, and a failed frontend never stops the other frontend in `both` mode.
+
+### Pin map at a glance
+
+The following are the production defaults for each profile. CC1101 pins can be intentionally changed through the owning ESP-IDF configuration, but must remain valid and non-overlapping for the selected board. Generic ASK/OOK DATA pins are fixed by the board profile.
+
+| Profile | CC1101 SCK/MISO/MOSI/CSN/GDO0/GDO2 | Generic TX/RX DATA |
+|---|---|---|
+| `esp32-devkit` | `18/19/23/27/26/25` | `32/33` |
+| `esp32s3-devkitc-n16r8` | `12/13/11/10/4/5` | `6/7` |
+| `xiao-esp32s3` | `D8/GPIO7, D9/GPIO8, D10/GPIO9, D3/GPIO4, D1/GPIO2, D0/GPIO1` | `D4/GPIO5, D5/GPIO6` |
+| `esp32s3-supermini-fh4r2` | `12/13/11/10/4/5` | `6/7` |
+
+Console, LED, and reserved pins are profile-specific:
+
+| Profile | Console / LED | Unavailable for RF remapping |
+|---|---|---|
+| `esp32-devkit` | UART0 GPIO1/3; GPIO2 LED | GPIO0-3, GPIO5-12, GPIO15-17; GPIO6-11 are flash-connected |
+| `esp32s3-devkitc-n16r8` | UART0 GPIO43/44; LED disabled | GPIO0/3, USB GPIO19/20, flash/PSRAM GPIO26-37, GPIO43-46, GPIO48 |
+| `xiao-esp32s3` | Native USB Serial/JTAG; GPIO21 LED | Only exposed GPIO1/2/4-9/43/44 are eligible for intentional CC1101 remapping; generic GPIO5/6 and LED GPIO21 remain occupied |
+| `esp32s3-supermini-fh4r2` | Native USB Serial/JTAG; LED disabled | Only exposed GPIO1/2/4-13/43/44 are eligible for intentional CC1101 remapping; generic GPIO6/7 and GPIO48 remain reserved |
 
 ### CC1101 wiring
 
@@ -78,7 +98,7 @@ ESP32-S3FH4R2 SuperMini:
 | `GDO0` | GPIO4 | RMT TX into CC1101 asynchronous TX input |
 | `GDO2` | GPIO5 | CC1101 asynchronous RX output into ESP32 RMT RX |
 
-The XIAO and SuperMini native USB connectors carry the Serial/JTAG console and must remain accessible while the CC1101 is wired. The N16R8 profile expects a USB-UART connection on UART0 GPIO43/44. On the SuperMini, GPIO48 is reserved for its onboard LED and is never driven by this firmware. Do not use GPIO19/20 (USB), GPIO26-37 (flash/PSRAM), strapping pins, or profile-reserved LED pins for CC1101 wiring.
+The XIAO and SuperMini native USB connectors carry the Serial/JTAG console and must remain accessible while the CC1101 is wired. The N16R8 profile expects a USB-UART connection on UART0 GPIO43/44. On the SuperMini, GPIO48 is reserved for its onboard LED and is never driven by this firmware. On ESP32-S3 profiles, do not use GPIO19/20 (USB), GPIO26-37 (flash/PSRAM), strapping pins, or profile-reserved LED pins for CC1101 wiring.
 
 Recommended hardware details:
 
@@ -121,29 +141,33 @@ Only one backend runs at a time. In CC1101 mode, the generic TX DATA pin is held
 
 ### RF activity LED
 
-By default, GPIO2 blinks active-high three times during application startup, using 25 ms pulses separated by 150 ms inactive gaps. It then pulses for 25 ms whenever a decoded or raw frame is accepted. RF activity received before the startup sequence completes is coalesced into one normal pulse after the final inactive gap. Many DOIT/clone ESP32 DevKit V1 boards connect a blue LED to GPIO2. The official Espressif ESP32-DevKitC V4 does not: its onboard red LED is a non-programmable 5 V power indicator. On that board, disable the feature or connect an external active-high LED as `GPIO2 -> 220-1000 ohm resistor -> LED anode`, with the LED cathode connected to GND.
+On the classic ESP32, GPIO2 blinks active-high three times during application startup, using 25 ms pulses separated by 150 ms inactive gaps. It then pulses for 25 ms whenever a decoded or raw frame is accepted. The XIAO uses the same behavior on its active-low GPIO21 LED; the N16R8 and SuperMini activity LEDs are disabled by default. RF activity received before the startup sequence completes is coalesced into one normal pulse after the final inactive gap. Many DOIT/clone ESP32 DevKit V1 boards connect a blue LED to GPIO2. The official Espressif ESP32-DevKitC V4 does not: its onboard red LED is a non-programmable 5 V power indicator. On that board, disable the feature or connect an external active-high LED as `GPIO2 -> 220-1000 ohm resistor -> LED anode`, with the LED cathode connected to GND.
 
 GPIO2 is a boot-strapping pin. The firmware does not configure it until application startup, so the three-blink indication does not run during ROM or bootloader execution and external circuitry must not force an incompatible level while the ESP32 resets. `RF_ACTIVITY_LED_ENABLE`, `RF_ACTIVITY_LED_GPIO`, `RF_ACTIVITY_LED_ACTIVE_HIGH`, and `RF_ACTIVITY_LED_PULSE_MS` configure both startup and RF activity pulses. GPIO0, GPIO5, GPIO12, and GPIO15 are rejected because external LED wiring on those strapping pins can prevent boot or select an unsafe flash voltage. The selected output must not overlap UART0, flash/PSRAM, any configured CC1101 pin, or either generic RF DATA pin. An invalid software configuration is nonfatal and never prevents RF reception.
 
-## Build
+## Build and install
 
 The machine-local ESP-IDF, MCP, coding-agent, and Playwright arrangement is recorded in [Development Tooling Setup](docs/development-tooling-setup.md).
 
-Activate an ESP-IDF 6.0.2 environment using the installation method for your system, then build a selected profile:
+The repository wrapper activates the installed ESP-IDF 6.0.2 environment, selects the target, board defaults, partition table, and target-specific dependency lock, and isolates each profile under `build/<profile>`. Run it from the repository root:
 
 ```bash
-# Installed ESP-IDF 6.0.2 checkout:
-. "$HOME/.espressif/v6.0.2/esp-idf/export.sh"
-
-# Isolated build directories and target-specific dependency locks:
 tools/build-board.sh esp32-devkit build
-tools/build-board.sh esp32-devkit size
 tools/build-board.sh esp32s3-devkitc-n16r8 build
 tools/build-board.sh xiao-esp32s3 build
 tools/build-board.sh esp32s3-supermini-fh4r2 build
 ```
 
-`tools/build-board.sh` accepts `esp32-devkit`, `esp32s3-devkitc-n16r8`, `xiao-esp32s3`, or `esp32s3-supermini-fh4r2`, plus `build`, `size`, `flash`, or `monitor`. It selects `IDF_TARGET`, the board defaults, the matching dependency lock, and `build/<profile>` without invoking `set-target` or sharing target-contaminated configuration. The classic ESP32, N16R8, and FH4R2 have approved hardware paths; the XIAO image remains build-verified only.
+The output application image paths and OTA layouts are:
+
+| Profile | Application image | OTA slot size | OTA slot offsets |
+|---|---|---:|---|
+| `esp32-devkit` | `build/esp32-devkit/esp32-cc1101.bin` | `0x1e0000` | `0x020000`, `0x200000` |
+| `esp32s3-devkitc-n16r8` | `build/esp32s3-devkitc-n16r8/esp32-cc1101.bin` | `0x7e0000` | `0x020000`, `0x800000` |
+| `xiao-esp32s3` | `build/xiao-esp32s3/esp32-cc1101.bin` | `0x3e0000` | `0x020000`, `0x400000` |
+| `esp32s3-supermini-fh4r2` | `build/esp32s3-supermini-fh4r2/esp32-cc1101.bin` | `0x1e0000` | `0x020000`, `0x200000` |
+
+`tools/build-board.sh` also accepts `size`, `flash`, or `monitor`. Do not use `set-target`, share generated configuration between profiles, edit generated `sdkconfig`, or substitute one profile's image for another.
 
 For a clean, no-flash production build with size and image metadata checks, run:
 
@@ -153,57 +177,69 @@ tools/verify-production.sh
 
 The verifier uses isolated build and log directories under `/tmp`; it never accesses a serial port or flashes hardware.
 
-To configure pins, center frequency, nominal power, RX inversion, repeat count, duplicate window, or the RF activity LED:
+Framework defaults are in `sdkconfig.defaults`; profile defaults, including production CC1101 pins, are under `boards/<profile>/sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. Put deliberate persistent changes in those defaults and rebuild through `tools/build-board.sh`; do not use `menuconfig` as a profile selector or edit generated `sdkconfig`. The verifier enforces at least 25% free space in every OTA slot.
+
+### First wired installation or migration
+
+A blank board, legacy single-app image, or different board profile cannot receive this firmware through OTA. Install the exact profile once over its wired console so the bootloader, profile partition table, application, and `RFBD` descriptor agree.
+
+| Profile | Repository wired workflow |
+|---|---|
+| `esp32-devkit` | Enabled with its approved persistent by-id path |
+| `esp32s3-devkitc-n16r8` | Enabled with its approved persistent by-id path |
+| `xiao-esp32s3` | Blocked until a persistent XIAO by-id path is supplied and explicitly approved |
+| `esp32s3-supermini-fh4r2` | Enabled with its approved persistent by-id path |
+
+The exact machine-local mappings are authoritative in [Development Tooling Setup](docs/development-tooling-setup.md#hardware-access-contract). For an enabled profile, use only the validated wrapper and its matching path:
 
 ```bash
-idf.py menuconfig
-# CC1101 RF configuration
+tools/build-board.sh <profile> flash --port <approved-by-id-path>
+tools/build-board.sh <profile> monitor --port <approved-by-id-path>
 ```
 
-Framework defaults are in `sdkconfig.defaults`; shared radio options are defined by the owning components' `Kconfig` files. The generated `sdkconfig` should not be edited by hand. Each profile has a two-slot OTA table with preserved NVS/OTA metadata offsets. The classic ESP32 and FH4R2 slots are `0x1e0000` bytes, the XIAO slot is `0x3e0000`, and the N16R8 slot is `0x7e0000`. The verifier enforces at least 25% free space in each slot.
-
-The classic ESP32 and N16R8 each have one authorized persistent by-id path:
+Before migrating a device that already contains learned signals or network settings, back up its NVS partition with the confirmed chip and approved by-id path:
 
 ```bash
-tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
-tools/build-board.sh esp32-devkit monitor --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
-tools/build-board.sh esp32s3-devkitc-n16r8 flash --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
-tools/build-board.sh esp32s3-devkitc-n16r8 monitor --port /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
-tools/build-board.sh esp32s3-supermini-fh4r2 flash --port /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
-tools/build-board.sh esp32s3-supermini-fh4r2 monitor --port /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
+esptool --chip <esp32-or-esp32s3> --port <approved-by-id-path> \
+  read-flash 0x9000 0x6000 nvs-backup.bin
 ```
 
-The script verifies that the profile's exact symlink resolves to a character device and rejects every other port. Never substitute `/dev/ttyUSB*`, `/dev/ttyACM*`, port auto-detection, or one board's path for another. The FH4R2 uses native USB Serial-JTAG; the device may disappear briefly during reset, but the persistent by-id symlink must remain selected. XIAO hardware access remains blocked until it has its own approved path. Exit the monitor with `Ctrl+]`. Network-dependent Web, MQTT, mDNS, and OTA validation requires Wi-Fi and is separate from offline FH4R2 boot/console validation.
+The profile partition tables preserve NVS at `0x9000` with size `0x6000`, add `otadata` at `0xf000` and `phy_init` at `0x11000`, and place two application slots at the offsets shown above. Never run `erase-flash` for installation or migration. A legacy downgrade or profile change also requires a wired flash; never use OTA to cross board profiles.
 
-### One-time OTA partition migration
+### OTA over the local network
 
-The first OTA-capable installation must be a wired flash because the previous single-app partition table cannot receive this image over OTA. Back up the existing NVS partition first, then use an ordinary `idf.py flash` without erasing flash:
+OTA works on all four profiles after an OTA-capable image of that exact profile is installed. Before uploading:
+
+- Connect Wi-Fi and confirm an address with `wifi status`.
+- Confirm the effective collision-resolved name with `hostname status`; use its `.local` form or the canonical IPv4 address.
+- Run service mode `web` or `both`. MQTT-only mode has no HTTP or OTA server; select `service mode web` (or `both` on an S3), then reset or power-cycle once.
+- Run `tools/verify-production.sh` once for a changed production candidate before installing it. Reuse a successful result only while production inputs remain unchanged.
+- Build the profile that matches the running board.
+
+Upload the corresponding application image with the validated CLI:
 
 ```bash
-esptool --chip esp32 --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00 read-flash 0x9000 0x6000 nvs-backup.bin
-tools/build-board.sh esp32-devkit flash --port /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
+tools/push-ota.sh <effective-hostname>.local build/esp32-devkit/esp32-cc1101.bin
+tools/push-ota.sh <effective-hostname>.local build/esp32s3-devkitc-n16r8/esp32-cc1101.bin
+tools/push-ota.sh <effective-hostname>.local build/xiao-esp32s3/esp32-cc1101.bin
+tools/push-ota.sh <effective-hostname>.local build/esp32s3-supermini-fh4r2/esp32-cc1101.bin
 ```
 
-The new table deliberately preserves NVS at offset `0x9000` with size `0x6000`, so learned signals, automation rules, logging mode, and other existing NVS records remain in place. It adds `otadata` at `0xf000`, `phy_init` at `0x11000`, and `ota_0`/`ota_1` at `0x20000`/`0x200000`. Do not run `erase-flash` for this migration. Confirm the port, board, backup file, and no-erase procedure before accessing hardware.
+Replace the hostname with the device's IPv4 address when `.local` resolution is unavailable. The uploader validates the image checksum and hash, ESP-IDF/project identity, chip, flash header, embedded `RFBD` profile descriptor, and profile-specific slot size before contacting the device.
 
-The first installation on any ESP32-S3 profile must be a wired flash of that exact profile. OTA images carry an `RFBD` board/layout descriptor and reject a different S3 profile, flash layout, or legacy image without the descriptor. A legacy downgrade therefore requires wired flashing. Never erase NVS during a profile migration; learned signals, automation rules, Wi-Fi, and MQTT persistence are intentionally retained.
+The same image can be installed from **Web UI > System > Firmware update**: choose **Application image**, select **Install and reboot**, and confirm. The device pauses automation and RF safely, writes only the inactive slot, validates it, sends the success response, and reboots. Reopen the same effective hostname or IPv4 address after reconnect and check **System > Firmware update** or `ota status` for the running image.
+
+The Web UI and OTA endpoint are intentionally unauthenticated. Any client on the trusted LAN can install firmware; never expose port 80 to an untrusted network or the Internet. A mismatched profile, oversized image, interrupted upload, or failed validation is rejected without selecting the incomplete slot.
 
 ## Serial console
 
-UART0 runs at 115200 baud. Type `help` to list commands. For `tio`, use normal output mode with local echo left disabled:
+The classic ESP32 and N16R8 profiles use UART0 at 115200 baud; the XIAO and SuperMini profiles use native USB Serial/JTAG. Type `help` to list commands. Use the selected profile and exact approved path from the tooling guide:
 
 ```bash
-# Classic ESP32:
-tio --baudrate 115200 --color none /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
-# N16R8 UART0 USB-UART bridge:
-tio --baudrate 115200 --color none /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
+tools/build-board.sh <profile> monitor --port <approved-by-id-path>
 ```
 
-`--color none` disables coloring of tio's own connection messages; firmware ANSI colors still pass through. To keep a plain-text session log while retaining colors on screen:
-
-```bash
-tio --baudrate 115200 --color none --log --log-file rf-console.log --log-strip /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
-```
+The wrapper validates the built image and board mapping before starting the monitor. Exit with `Ctrl+]`.
 
 The console starts in the nonpersistent `pretty` style after every reboot. It uses bounded ASCII sections and semantic ANSI colors: green for success/online, cyan for RF receive and information, magenta for TX/automation, yellow for waiting/maintenance/warnings, red for failures, and dim white for metadata. Change or inspect the runtime style with:
 
@@ -213,7 +249,7 @@ console style plain
 console style pretty
 ```
 
-`plain` removes application-console ANSI sequences and preserves stable machine-readable `RX`, `RULE`, and `WIFI` records. ESP-IDF application and bootloader severity logs embed their own ANSI colors; `tio --log-strip` removes all control sequences from saved logs. Colored bootloader logs take effect only after an approved wired bootloader flash. The prompt renders as `rf> ` using the native informational color. The repository-owned ESP-IDF 6.0.2 linenoise adapter preserves history, arrows, editing, hints, and completion while coordinating asynchronous application events and native `ESP_LOG` records. An active command is cleared before external output and redrawn afterward with its buffer and cursor intact, including while RF, Wi-Fi, DHCP, OTA, and Web services start. ROM, bootloader, and early application logs before console initialization are unchanged, and local console access is not delayed for optional startup work.
+`plain` removes application-console ANSI sequences and preserves stable machine-readable `RX`, `RULE`, and `WIFI` records. ESP-IDF application and bootloader severity logs embed their own ANSI colors, so external log capture must strip those separately when pure text is required. Colored bootloader logs take effect only after an approved wired bootloader flash. The prompt renders as `rf> ` using the native informational color. The repository-owned ESP-IDF 6.0.2 linenoise adapter preserves history, arrows, editing, hints, and completion while coordinating asynchronous application events and native `ESP_LOG` records. An active command is cleared before external output and redrawn afterward with its buffer and cursor intact, including while RF, Wi-Fi, DHCP, OTA, and Web services start. ROM, bootloader, and early application logs before console initialization are unchanged, and local console access is not delayed for optional startup work.
 
 If terminal probing falls back to dumb mode, history and cursor editing remain disabled as in the ESP-IDF fallback. Asynchronous output starts on a fresh line and the prompt plus the unmasked input collected so far is printed again without ANSI cursor sequences; the earlier partial line cannot be erased on such a terminal.
 
@@ -381,15 +417,7 @@ The receiver has no user-controlled off state. RX is always the desired state an
 
 The Web UI intentionally has no authentication. Any client already on the local network can read status, transmit RF, change persistent automation, delete learned signals, or install firmware. Requests accept only the exact current IPv4 address, configured `.local` name, or currently cached conflict-resolved `.local` name. Mutations additionally require an exact same-origin match to the Host representation used by that request; valid names cannot be mixed. These checks reduce browser cross-origin abuse but are not authentication. Do not expose port `80` to an untrusted network or the Internet.
 
-The OTA endpoint uses the existing inactive-partition writer, chip/project/image validation, maintenance locks, rollback support, and running-image confirmation. The same endpoint is available to the validated CLI uploader:
-
-```bash
-tools/push-ota.sh <effective-hostname>.local <application-image.bin>
-```
-
-Use the effective collision-resolved name reported by `hostname status`; this keeps OTA independent of the address assigned by DHCP. A canonical IPv4 address remains a diagnostic fallback. The uploader accepts that IPv4 form or one strict hostname label followed by `.local`. It lowercases hostname input and canonicalizes IPv4 octets before constructing matching Host and Origin values; ports, paths, trailing dots, whitespace, and shell metacharacters are rejected. Before uploading, it matches the image's chip, flash header, and embedded `RFBD` descriptor to one supported board profile and enforces that profile's OTA-slot limit.
-
-Firmware can also still be installed through the approved wired serial flashing process.
+The OTA endpoint uses the existing inactive-partition writer, chip/project/image validation, maintenance locks, rollback support, and running-image confirmation. The complete per-profile build, wired-installation, CLI upload, Web upload, and first-install migration workflow is documented in [Build and install](#build-and-install) above. The Web UI is intentionally unauthenticated trusted-LAN firmware administration; keep port 80 isolated.
 
 ### Receive
 
@@ -480,6 +508,16 @@ Manual-save rules:
 - Confidence, observed repeat count, and fingerprint text from an `RX` line are reception metadata and are not stored. Home Assistant replay continues to use `CONFIG_RF_DEFAULT_TX_REPEATS`.
 - A committed manual signal appears in the existing learned list and automation selectors. When MQTT is configured, the catalog-change event creates its Home Assistant button immediately when connected or during the next normal reconciliation.
 - Manual saving does not transmit RF, replace the latest RAM frame, change learning state, or add an entry to recent history.
+
+Generate and save a random decoded signal without receiving or transmitting it:
+
+```text
+random
+```
+
+The Web equivalent is **Signals > Learned signals > Generate & save**. The firmware takes 24 bits from the ESP hardware RNG, uses rc-switch protocol 1 at its nominal 350 us pulse width, and creates a name such as `random_D30A91`. Existing equivalent signals and names are never overwritten; generation retries with a fresh value up to eight times. The committed result enters the normal learned list and automation selectors and becomes a Home Assistant replay button when MQTT discovery is active.
+
+Generation works with Wi-Fi running or stopped. ESP-IDF classifies RNG output without an active RF or SAR entropy source as pseudo-random, which is sufficient for selecting a collision-checked fixed ASK/OOK code but is not a cryptographic security mechanism. Generation alone never transmits RF, regardless of whether CC1101 or the generic ASK/OOK backend is selected.
 
 Learn the next accepted decoded or raw signal under a persistent name:
 

@@ -7,6 +7,7 @@ find_program(NODE_EXECUTABLE node REQUIRED)
 
 add_executable(rf_host_tests
     host_tests.cpp
+    ../components/bridge_control/bridge_random_signal.cpp
     ../components/platform_board/platform_board_policy.cpp
     ../components/network_mdns/network_mdns_policy.cpp
     ../components/network_wifi/network_hostname_config.cpp
@@ -26,6 +27,7 @@ add_executable(rf_host_tests
     ../components/web_ui/web_form.cpp
 )
 target_include_directories(rf_host_tests PRIVATE
+    ../components/bridge_control/include
     ../components/network_mdns/include
     ../components/platform_board/include
     ../components/network_wifi/include
@@ -68,6 +70,9 @@ add_test(NAME mqtt_host_tests COMMAND mqtt_host_tests)
 add_test(NAME push_ota_script_tests
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_push_ota.sh"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME documentation_contract_tests
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_documentation.mjs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME web_asset_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_web_assets.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -76,4 +81,7 @@ add_test(NAME mqtt_runtime_source_contract_tests
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME rf_hardware_switch_source_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_rf_hardware_switch_source.mjs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME random_signal_source_contract_tests
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_random_signal_source.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")

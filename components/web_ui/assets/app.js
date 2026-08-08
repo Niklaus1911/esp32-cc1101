@@ -89,7 +89,7 @@ return payload;
 clearTimeout(timeout);
 }
 }
-async function requestAction(path, method, body = null) {
+async function requestAction(path, method, body = null, afterSuccess = null) {
 if (state.busy || state.otaRebooting) return null;
 cancelPolling();
 setBusy(true);
@@ -103,6 +103,7 @@ const response = await fetch(path, options);
 const payload = await response.json();
 if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
 showNotice("Action completed", "success");
+if (afterSuccess) await afterSuccess(payload);
 return payload;
 } catch (error) {
 showNotice(error.message || "Request failed", "error");
@@ -742,7 +743,7 @@ byId(id).addEventListener("submit", async (event) => {
 event.preventDefault();
 let data = Object.fromEntries(new FormData(event.currentTarget));
 if (prepare) data = prepare(data);
-if (await requestAction(path, "POST", formBody(data)) && complete) await complete();
+await requestAction(path, "POST", formBody(data), complete);
 });
 }
 
@@ -779,6 +780,12 @@ await requestAction("/api/recent", "POST", formBody({ action: "clear" }));
 await refreshRecent();
 });
 byId("refresh-signals").addEventListener("click", refreshSignals);
+byId("generate-random-signal").addEventListener("click", () => {
+requestAction("/api/signals/random", "POST", null, async (result) => {
+await Promise.all([refreshSignals(), refreshRules()]);
+showNotice(`Saved ${result.signal.name} / ${result.signal.code}`, "success");
+});
+});
 byId("refresh-rules").addEventListener("click", refreshRules);
 byId("refresh-ota").addEventListener("click", refreshOta);
 byId("radio-hardware").onchange=()=>{
@@ -802,9 +809,9 @@ if (button.dataset.action === "replay") {
 const repeats = item.querySelector("input").value;
 await requestAction("/api/replay", "POST", formBody({ name, repeats }));
 } else if (button.dataset.action === "delete" && confirm(`Delete learned signal ${name}?`)) {
-if (await requestAction("/api/signals", "DELETE", formBody({ name }))) {
+await requestAction("/api/signals", "DELETE", formBody({ name }), async () => {
 await Promise.all([refreshSignals(), refreshRules()]);
-}
+});
 }
 });
 
