@@ -17,6 +17,7 @@ readonly OVERSIZED_SUPERMINI_IMAGE="$test_dir/oversized-supermini.bin"
 readonly TINY_IMAGE="$test_dir/tiny.bin"
 readonly CURL_LOG="$test_dir/curl.log"
 readonly OUTPUT="$test_dir/output.log"
+readonly STATUS_COUNTER="$test_dir/status-counter"
 mkdir -p -- "$MOCK_BIN"
 
 make_image() {
@@ -79,6 +80,8 @@ printf '%s\n' \
     'Checksum: 0xea (valid)' \
     'Validation hash: 33b46e331793f9854a4a493b5c4bcc0d846b752d5680451a72071bafb39b4a03 (valid)' \
     'Project name: esp32-cc1101' \
+    'App version: test-version' \
+    'ELF file SHA256: 4444444444444444444444444444444444444444444444444444444444444444' \
     'ESP-IDF: v6.0.2'
 MOCK_ESPTOOL
 
@@ -97,8 +100,63 @@ while (($#)); do
         shift
     fi
 done
+if [[ "$url" == */api/live ]]; then
+    printf '{"board":{"profile":"%s"},"services":{"requested":"%s"}}' \
+        "${MOCK_DEVICE_PROFILE:-esp32-devkit}" "${MOCK_REQUESTED_SERVICES:-web}" >"$output"
+    exit 0
+fi
 if [[ "$url" == */status ]]; then
-    printf '{"state":"idle","server":true}' >"$output"
+    count=0
+    if [[ -s "$MOCK_STATUS_COUNTER" ]]; then
+        read -r count <"$MOCK_STATUS_COUNTER"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$MOCK_STATUS_COUNTER"
+    if ((count == 1)); then
+        case "${MOCK_CONFIRM_MODE:-success}" in
+            busy)
+                status_state=receiving
+                upload=true
+                pending=false
+                ;;
+            pending)
+                status_state=idle
+                upload=false
+                pending=true
+                ;;
+            *)
+                status_state=idle
+                upload=false
+                pending=false
+                ;;
+        esac
+        printf '{"state":"%s","server":true,"upload":%s,"pending_verification":%s,"board_profile":"%s","running_partition":"ota_0","update_partition":"ota_1"}' \
+            "$status_state" "$upload" "$pending" "${MOCK_DEVICE_PROFILE:-esp32-devkit}" >"$output"
+        exit 0
+    fi
+    case "${MOCK_CONFIRM_MODE:-success}" in
+        success)
+            printf '{"state":"idle","running_partition":"ota_1","running_elf_sha256":"4444444444444444444444444444444444444444444444444444444444444444","running_image_state":"valid","running_image_state_error":"ESP_OK","confirmation_error":"ESP_OK"}' >"$output"
+            ;;
+        rollback)
+            printf '{"state":"idle","running_partition":"ota_0","running_elf_sha256":"3333333333333333333333333333333333333333333333333333333333333333","running_image_state":"valid","running_image_state_error":"ESP_OK","confirmation_error":"ESP_OK"}' >"$output"
+            ;;
+        wrong_digest)
+            printf '{"state":"idle","running_partition":"ota_1","running_elf_sha256":"5555555555555555555555555555555555555555555555555555555555555555","running_image_state":"valid","running_image_state_error":"ESP_OK","confirmation_error":"ESP_OK"}' >"$output"
+            ;;
+        unconfirmed)
+            printf '{"state":"idle","running_partition":"ota_1","running_elf_sha256":"4444444444444444444444444444444444444444444444444444444444444444","running_image_state":"pending_verify","running_image_state_error":"ESP_OK","confirmation_error":"ESP_ERR_INVALID_STATE"}' >"$output"
+            ;;
+        legacy)
+            printf '{"state":"idle","running_partition":"ota_1"}' >"$output"
+            ;;
+        confirm_error)
+            printf '{"state":"idle","running_partition":"ota_1","running_elf_sha256":"4444444444444444444444444444444444444444444444444444444444444444","running_image_state":"pending_verify","running_image_state_error":"ESP_OK","confirmation_error":"ESP_FAIL"}' >"$output"
+            ;;
+        unavailable)
+            exit 7
+            ;;
+    esac
     exit 0
 fi
 for argument in "${arguments[@]}"; do
@@ -106,7 +164,7 @@ for argument in "${arguments[@]}"; do
 done
 case "${MOCK_UPLOAD_MODE:-success}" in
     success)
-        printf '{"ok":true,"rebooting":true}' >"$output"
+        printf '{"ok":true,"rebooting":true,"target_partition":"ota_1","candidate_version":"test-version","candidate_elf_sha256":"4444444444444444444444444444444444444444444444444444444444444444"}' >"$output"
         ;;
     fail)
         printf '{"error":"ESP_FAIL","code":-1}' >"$output"
@@ -123,14 +181,32 @@ MOCK_CURL
 chmod +x "$MOCK_BIN/esptool" "$MOCK_BIN/curl"
 
 run_push() {
-    PATH="$MOCK_BIN:$PATH" MOCK_CURL_LOG="$CURL_LOG" MOCK_UPLOAD_MODE="${1:-success}" \
-        MOCK_IMAGE_METADATA="${4:-classic}" \
-        "$PUSH_OTA" "${2:-192.168.1.17}" "${3:-$CLASSIC_IMAGE}"
+    local metadata="${4:-classic}"
+    local device_profile=""
+    case "$metadata" in
+        classic) device_profile=esp32-devkit ;;
+        xiao) device_profile=xiao-esp32s3 ;;
+        n16r8) device_profile=esp32s3-devkitc-n16r8 ;;
+        fh4r2) device_profile=esp32s3-supermini-fh4r2 ;;
+    esac
+    : >"$STATUS_COUNTER"
+    command_args=()
+    if [[ "${5:---no-wait}" == "--no-wait" ]]; then
+        command_args+=(--no-wait)
+    fi
+    PATH="$MOCK_BIN:$PATH" MOCK_CURL_LOG="$CURL_LOG" MOCK_STATUS_COUNTER="$STATUS_COUNTER" \
+        MOCK_UPLOAD_MODE="${1:-success}" MOCK_IMAGE_METADATA="$metadata" \
+        MOCK_DEVICE_PROFILE="${7:-$device_profile}" MOCK_CONFIRM_MODE="${6:-success}" \
+        MOCK_REQUESTED_SERVICES="${8:-web}" OTA_REBOOT_TIMEOUT_SECONDS=0 \
+        OTA_POLL_INTERVAL_SECONDS=1 \
+        "$PUSH_OTA" "${command_args[@]}" "${2:-192.168.1.17}" "${3:-$CLASSIC_IMAGE}"
 }
 
 run_push success >"$OUTPUT" 2>&1
-grep -q 'OTA accepted: {"ok":true,"rebooting":true}' "$OUTPUT"
-grep -q 'Image profile: esp32-devkit; OTA slot limit: 0x1e0000 bytes' "$OUTPUT"
+grep -q 'OTA accepted: {"ok":true,"rebooting":true' "$OUTPUT"
+grep -q 'Image profile: esp32-devkit; version: test-version; ELF SHA256: 4444' "$OUTPUT"
+grep -q 'OTA slot limit: 0x1e0000 bytes' "$OUTPUT"
+grep -q 'Acceptance-only mode selected' "$OUTPUT"
 grep -qx -- 'UPLOAD:--no-progress-meter' "$CURL_LOG"
 grep -qx -- "UPLOAD:@$CLASSIC_IMAGE" "$CURL_LOG"
 grep -qx -- 'UPLOAD:Origin: http://192.168.1.17' "$CURL_LOG"
@@ -142,17 +218,20 @@ fi
 
 : >"$CURL_LOG"
 run_push success 192.168.1.17 "$XIAO_IMAGE" xiao >"$OUTPUT" 2>&1
-grep -q 'Image profile: xiao-esp32s3; OTA slot limit: 0x3e0000 bytes' "$OUTPUT"
+grep -q 'Image profile: xiao-esp32s3; version: test-version' "$OUTPUT"
+grep -q 'OTA slot limit: 0x3e0000 bytes' "$OUTPUT"
 grep -qx -- "UPLOAD:@$XIAO_IMAGE" "$CURL_LOG"
 
 : >"$CURL_LOG"
 run_push success 192.168.1.17 "$N16R8_IMAGE" n16r8 >"$OUTPUT" 2>&1
-grep -q 'Image profile: esp32s3-devkitc-n16r8; OTA slot limit: 0x7e0000 bytes' "$OUTPUT"
+grep -q 'Image profile: esp32s3-devkitc-n16r8; version: test-version' "$OUTPUT"
+grep -q 'OTA slot limit: 0x7e0000 bytes' "$OUTPUT"
 grep -qx -- "UPLOAD:@$N16R8_IMAGE" "$CURL_LOG"
 
 : >"$CURL_LOG"
 run_push success 192.168.1.17 "$SUPERMINI_IMAGE" fh4r2 >"$OUTPUT" 2>&1
-grep -q 'Image profile: esp32s3-supermini-fh4r2; OTA slot limit: 0x1e0000 bytes' "$OUTPUT"
+grep -q 'Image profile: esp32s3-supermini-fh4r2; version: test-version' "$OUTPUT"
+grep -q 'OTA slot limit: 0x1e0000 bytes' "$OUTPUT"
 grep -qx -- "UPLOAD:@$SUPERMINI_IMAGE" "$CURL_LOG"
 
 if run_push success 192.168.1.17 "$INVALID_IMAGE" n16r8 >"$OUTPUT" 2>&1; then
@@ -208,6 +287,73 @@ for invalid in \
     grep -q 'Invalid ESP32 address' "$OUTPUT"
 done
 
+run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait success >"$OUTPUT" 2>&1
+grep -q 'Waiting up to 0 seconds for exact boot confirmation' "$OUTPUT"
+grep -q 'OTA boot confirmed: partition ota_1, version test-version' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait rollback >"$OUTPUT" 2>&1; then
+    printf 'Expected rollback confirmation to fail\n' >&2
+    exit 1
+fi
+grep -q 'device returned to original partition ota_0' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait wrong_digest >"$OUTPUT" 2>&1; then
+    printf 'Expected a mismatched running digest to fail\n' >&2
+    exit 1
+fi
+grep -q 'target partition booted with a different ELF SHA256' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait unconfirmed >"$OUTPUT" 2>&1; then
+    printf 'Expected an unconfirmed image state to fail\n' >&2
+    exit 1
+fi
+grep -q 'accepted but boot was not confirmed' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait legacy >"$OUTPUT" 2>&1; then
+    printf 'Expected legacy target metadata to remain unconfirmed\n' >&2
+    exit 1
+fi
+grep -q 'accepted but boot was not confirmed' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait unavailable >"$OUTPUT" 2>&1; then
+    printf 'Expected an unreachable reboot target to time out\n' >&2
+    exit 1
+fi
+grep -q 'device unavailable' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait confirm_error >"$OUTPUT" 2>&1; then
+    printf 'Expected a confirmation checkpoint error to fail\n' >&2
+    exit 1
+fi
+grep -q 'target image validation failed' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait busy >"$OUTPUT" 2>&1; then
+    printf 'Expected a busy device preflight to fail\n' >&2
+    exit 1
+fi
+grep -q 'OTA preflight refused: device state is receiving' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait pending >"$OUTPUT" 2>&1; then
+    printf 'Expected a pending-verification device preflight to fail\n' >&2
+    exit 1
+fi
+grep -q 'pending_verification=true' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait success xiao-esp32s3 >"$OUTPUT" 2>&1; then
+    printf 'Expected a device/image profile mismatch to fail\n' >&2
+    exit 1
+fi
+grep -q 'does not match device profile xiao-esp32s3' "$OUTPUT"
+
+if run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic wait success esp32-devkit mqtt >"$OUTPUT" 2>&1; then
+    printf 'Expected MQTT-only next boot to fail confirmation preflight\n' >&2
+    exit 1
+fi
+grep -q 'next boot is MQTT-only' "$OUTPUT"
+
+run_push success 192.168.1.17 "$CLASSIC_IMAGE" classic --no-wait success esp32-devkit mqtt >"$OUTPUT" 2>&1
+grep -q 'Acceptance-only mode selected' "$OUTPUT"
+
 set +e
 run_push fail >"$OUTPUT" 2>&1
 upload_status=$?
@@ -226,11 +372,14 @@ if run_push malformed >"$OUTPUT" 2>&1; then
     printf 'Expected malformed success response to return nonzero\n' >&2
     exit 1
 fi
-grep -q 'OTA service did not confirm success' "$OUTPUT"
+grep -q 'OTA service did not confirm acceptance' "$OUTPUT"
 
 if command -v script >/dev/null 2>&1 && script --help 2>&1 | grep -q -- '--command'; then
     : >"$CURL_LOG"
-    PATH="$MOCK_BIN:$PATH" MOCK_CURL_LOG="$CURL_LOG" MOCK_UPLOAD_MODE=success \
+    : >"$STATUS_COUNTER"
+    PATH="$MOCK_BIN:$PATH" MOCK_CURL_LOG="$CURL_LOG" MOCK_STATUS_COUNTER="$STATUS_COUNTER" \
+        MOCK_UPLOAD_MODE=success MOCK_DEVICE_PROFILE=esp32-devkit MOCK_CONFIRM_MODE=success \
+        MOCK_REQUESTED_SERVICES=web OTA_REBOOT_TIMEOUT_SECONDS=0 OTA_POLL_INTERVAL_SECONDS=1 \
         script --quiet --return --command \
         "'$PUSH_OTA' 192.168.1.17 '$CLASSIC_IMAGE'" /dev/null >"$OUTPUT" 2>&1
     if grep -Eqx -- 'UPLOAD:--progress-bar|UPLOAD:--no-progress-meter|UPLOAD:--silent' "$CURL_LOG"; then

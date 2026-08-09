@@ -11,14 +11,15 @@
 #include "freertos/task.h"
 #include "network_mdns.hpp"
 #include "ota_update.hpp"
+#include "sdkconfig.h"
 #include "web_api.hpp"
 
 namespace rfbridge {
 namespace {
 
 constexpr char kTag[] = "web_ui";
-constexpr uint16_t kHttpPort = 80;
-constexpr uint32_t kHttpTaskStackSize = 8192;
+constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;
+constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;
 constexpr uint32_t kServiceTaskStackSize = 4608;
 constexpr uint32_t kInternalHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr UBaseType_t kServiceTaskPriority = 3;

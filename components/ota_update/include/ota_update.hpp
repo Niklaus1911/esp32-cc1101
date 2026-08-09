@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "ota_update_policy.hpp"
 
 namespace rfbridge {
 
@@ -40,16 +41,22 @@ struct OtaUpdateStatus {
     bool pending_verification = false;
     bool rollback_possible = false;
     OtaUpdateState state = OtaUpdateState::kUnavailable;
+    OtaImageState running_image_state = OtaImageState::kUnknown;
     uint16_t port = 0;
     uint32_t bytes_received = 0;
     uint32_t content_length = 0;
     esp_err_t initialization_error = ESP_ERR_INVALID_STATE;
     esp_err_t last_error = ESP_OK;
     esp_err_t maintenance_error = ESP_OK;
+    esp_err_t running_image_state_error = ESP_ERR_INVALID_STATE;
+    esp_err_t confirmation_error = ESP_ERR_INVALID_STATE;
+    char board_profile[33]{};
     char running_partition[17]{};
     char update_partition[17]{};
     char running_version[33]{};
     char candidate_version[33]{};
+    char running_elf_sha256[kOtaSha256HexCapacity]{};
+    char candidate_elf_sha256[kOtaSha256HexCapacity]{};
 };
 
 // Runs on the OTA service or HTTP task. A sink must use only bounded zero-wait operations.

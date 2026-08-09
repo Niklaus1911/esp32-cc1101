@@ -1609,11 +1609,17 @@ int render_ota_status()
                         static_cast<unsigned>(error));
             return 1;
         }
-        std::printf("OTA available=%u state=%s server=%u upload=%u port=%u running=%s update=%s version=%s candidate=%s bytes=%lu total=%lu pending_verify=%u rollback=%u last_error=%s maintenance_error=%s\n",
+        std::printf("OTA available=%u state=%s server=%u upload=%u port=%u board=%s running=%s update=%s version=%s candidate=%s running_sha256=%s candidate_sha256=%s image_state=%s image_state_error=%s confirmation_error=%s bytes=%lu total=%lu pending_verify=%u rollback=%u last_error=%s maintenance_error=%s\n",
                     ota.available, ota_update_state_name(ota.state), ota.server_running,
-                    ota.upload_active, ota.port, ota.running_partition, ota.update_partition,
+                    ota.upload_active, ota.port, ota.board_profile, ota.running_partition,
+                    ota.update_partition,
                     ota.running_version,
                     ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
+                    ota.running_elf_sha256[0] == '\0' ? "-" : ota.running_elf_sha256,
+                    ota.candidate_elf_sha256[0] == '\0' ? "-" : ota.candidate_elf_sha256,
+                    ota_image_state_name(ota.running_image_state),
+                    esp_err_to_name(ota.running_image_state_error),
+                    esp_err_to_name(ota.confirmation_error),
                     static_cast<unsigned long>(ota.bytes_received),
                     static_cast<unsigned long>(ota.content_length), ota.pending_verification,
                     ota.rollback_possible, esp_err_to_name(ota.last_error),
@@ -1640,6 +1646,20 @@ int render_ota_status()
     print_dashboard_row("Running", ota.running_partition, ConsoleTone::kSuccess,
                         "Next slot", ota.update_partition, ConsoleTone::kInfo);
     print_dashboard_value("Version", ota.running_version, ConsoleTone::kInfo);
+    char digest[20]{};
+    if (ota.running_elf_sha256[0] != '\0') {
+        std::snprintf(digest, sizeof(digest), "%.16s...", ota.running_elf_sha256);
+    }
+    print_dashboard_value("Image SHA", digest[0] == '\0' ? "-" : digest,
+                          digest[0] == '\0' ? ConsoleTone::kMuted : ConsoleTone::kInfo);
+    std::snprintf(left, sizeof(left), "%s / %s", ota_image_state_name(ota.running_image_state),
+                  esp_err_to_name(ota.running_image_state_error));
+    print_dashboard_value("Verification", left,
+                          ota.running_image_state == OtaImageState::kValid
+                              ? ConsoleTone::kSuccess
+                              : (ota.running_image_state == OtaImageState::kPendingVerify
+                                     ? ConsoleTone::kWarning
+                                     : ConsoleTone::kMuted));
     print_dashboard_value("Candidate",
                           ota.candidate_version[0] == '\0' ? "-" : ota.candidate_version,
                           ota.candidate_version[0] == '\0' ? ConsoleTone::kMuted
@@ -1660,6 +1680,9 @@ int render_ota_status()
     print_dashboard_value("Maintenance", esp_err_to_name(ota.maintenance_error),
                           ota.maintenance_error == ESP_OK ? ConsoleTone::kSuccess
                                                           : ConsoleTone::kError);
+    print_dashboard_value("Confirmation", esp_err_to_name(ota.confirmation_error),
+                          ota.confirmation_error == ESP_OK ? ConsoleTone::kSuccess
+                                                           : ConsoleTone::kError);
     print_dashboard_footer();
     return 0;
 }

@@ -15,6 +15,7 @@ const js = readFileSync(join(component, "assets", "app.js"), "utf8");
 const main = readFileSync(join(root, "main", "main.cpp"), "utf8");
 const radioHeader = readFileSync(join(root, "components", "rf_ook", "include", "rf_ook.hpp"), "utf8");
 const consoleSource = readFileSync(join(root, "components", "rf_console", "rf_console.cpp"), "utf8");
+const otaSource = readFileSync(join(root, "components", "ota_update", "ota_update.cpp"), "utf8");
 const source = `${api}\n${forms}\n${lifecycle}\n${cmake}`;
 
 function sourceSection(content, start, end, label) {
@@ -33,10 +34,11 @@ function assertFields(content, fields, label) {
 const compactSource = (content) => content.replace(/\s+/g, " ");
 const occurrenceCount = (content, value) => content.split(value).length - 1;
 
-assert.match(lifecycle, /constexpr uint16_t kHttpPort = 80;/);
+assert.match(lifecycle, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
+assert.match(lifecycle, /constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;/);
 assert.match(lifecycle, /config\.max_uri_handlers = 22;/);
 assert.match(lifecycle, /config\.max_open_sockets = 2;/);
-assert.match(api, /constexpr uint16_t kHttpPort = 80;/);
+assert.match(api, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
 assert.match(api, /web_origin_matches_device_host/);
 assert.match(api, /parse_web_device_host/);
@@ -65,6 +67,14 @@ for (const route of [
 
 assert(source.includes("register_ota_http_handlers"), "OTA must share the Web server");
 assert(source.includes("authorize_web_ota_request"), "OTA must use Host/origin authorization");
+for (const field of [
+  "board_profile", "running_elf_sha256", "candidate_elf_sha256", "running_image_state",
+  "running_image_state_error", "confirmation_error", "initialization_error",
+]) assert(otaSource.includes(`\\"${field}\\"`), `OTA status identity field missing: ${field}`);
+assert(otaSource.includes('\\"target_partition\\"') &&
+       otaSource.includes('\\"candidate_version\\"') &&
+       otaSource.includes('\\"candidate_elf_sha256\\"'),
+       "OTA acceptance response identity fields missing");
 assert(api.includes("bridge_control_replay_named"), "named replay route missing");
 assert(api.includes("bridge_control_save_decoded") &&
        api.includes('"201 Created"') &&
@@ -376,8 +386,35 @@ assert(js.includes("state.radioDirty=false") &&
        js.includes("renderRadioHardware(state.live?.radio)") &&
        js.includes("RF hardware switch failed; active backend restored"),
        "failed hardware switches must resynchronize the selector and report rollback");
-assert(js.includes("otaRebooting"), "OTA reconnect state missing");
-assert(js.includes("XMLHttpRequest"), "OTA progress upload missing");
+assert(js.includes("otaRebooting") && js.includes("XMLHttpRequest"),
+       "OTA reconnect or progress state missing");
+assert(js.includes("function inspectOtaImage(") &&
+       js.includes('project !== "esp32-cc1101"') &&
+       js.includes("otaBoardProfiles.get(descriptor)") &&
+       js.includes("otaElfSha256Offset"),
+       "browser OTA image identity inspection missing");
+assert(js.includes('live.services?.requested === "mqtt"') &&
+       js.includes("image.profile !== deviceProfile") &&
+       js.includes('["receiving", "validating", "pending_reboot"].includes(ota.state)'),
+       "browser OTA preflight safety checks missing");
+assert(js.includes('ota.running_image_state === "valid"') &&
+       js.includes('ota.running_image_state_error === "ESP_OK"') &&
+       js.includes('ota.confirmation_error === "ESP_OK"') &&
+       js.includes("digest === attempt.expectedDigest") &&
+       js.includes("location.reload()"),
+       "browser OTA must require exact validated boot identity before success");
+assert(js.includes("function expireOtaConfirmation(") &&
+       js.includes("background checks will continue") &&
+       js.includes("otaSuccessStorageKey"),
+       "browser OTA timeout, late reconciliation, or one-time success feedback missing");
+for (const outcome of [
+  "returned to ${attempt.originalPartition}",
+  "target partition booted with a different firmware digest",
+  "cannot prove its image identity and validation state",
+  "upload connection closed after transfer",
+]) assert(js.includes(outcome), `browser OTA outcome handling missing: ${outcome}`);
+assert(!js.includes('showNotice("Firmware reboot complete"'),
+       "a successful live poll alone must not claim OTA success");
 assert(js.includes('"rfbridge.observed-activity.v1"'), "versioned activity storage key missing");
 assert(js.includes("sessionStorage.getItem(activityStorageKey)"), "activity restoration missing");
 assert(js.includes("sessionStorage.setItem(activityStorageKey"), "activity persistence missing");
@@ -445,7 +482,7 @@ for (const forbidden of [
          `forbidden or stale Web contract remains: ${forbidden}`);
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
-  const maximumSize = name === "app.js" ? 40 * 1024 : 20000;
+  const maximumSize = name === "app.js" ? 48 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

@@ -83,7 +83,9 @@ tools/build-board.sh <profile> build
 tools/push-ota.sh <effective-hostname>.local build/<profile>/esp32-cc1101.bin
 ```
 
-The running device must have Wi-Fi online and service mode `web` or `both`; MQTT-only mode has no HTTP server or OTA endpoint. Use `hostname status` for the effective `.local` name or pass the current IPv4 address. The uploader validates checksum/hash, project and ESP-IDF metadata, chip, flash header, `RFBD` profile descriptor, and the profile's OTA-slot limit before uploading. The Web equivalent is **System > Firmware update** in the trusted-LAN UI.
+The running device must have Wi-Fi online and service mode `web` or `both`; MQTT-only mode has no HTTP server or OTA endpoint. Use `hostname status` for the effective `.local` name or pass the current IPv4 address. The uploader validates checksum/hash, project and ESP-IDF metadata, chip, flash header, `RFBD` profile descriptor, and the profile's OTA-slot limit before uploading. It also preflights the device profile, OTA state, pending-verification state, inactive slot, and next-boot service mode.
+
+The default command waits up to 120 seconds and returns zero only when the target slot is running the exact uploaded ELF SHA256 with image state `valid` and successful boot confirmation. Upload acceptance followed by rollback, an identity mismatch, an unconfirmed state, or a timeout returns nonzero. `tools/push-ota.sh --no-wait <host> <image>` explicitly requests acceptance-only behavior and does not report a boot outcome. The Web equivalent is **System > Firmware update** in the trusted-LAN UI and uses the same exact-identity confirmation semantics.
 
 All four profiles are accepted by `tools/push-ota.sh`, including XIAO. XIAO remains build-only for local wired access in this repository because no persistent by-id path has been approved; once an OTA-capable XIAO image is installed by an externally approved wired workflow, network OTA follows the same command. A blank board, legacy single-app image, profile migration, or legacy downgrade still requires an exact-profile wired flash without erasing NVS.
 

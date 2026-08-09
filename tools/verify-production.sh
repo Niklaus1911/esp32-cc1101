@@ -225,9 +225,10 @@ grep -Fqx '  espressif/mdns: "1.11.3"' "$MDNS_MANIFEST"
 verify_dependency_lock "$CLASSIC_LOCK" esp32
 verify_dependency_lock "$S3_LOCK" esp32s3
 require_exact_line "$PROJECT_ROOT/components/web_ui/web_ui.cpp" \
-    'constexpr uint16_t kHttpPort = 80;' 'fixed Web HTTP port'
+    'constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;' 'configured shared Web HTTP port'
 require_exact_line "$PROJECT_ROOT/components/web_ui/web_ui.cpp" \
-    'constexpr uint32_t kHttpTaskStackSize = 8192;' 'bounded Web HTTP task stack'
+    'constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;' \
+    'configured bounded Web HTTP task stack'
 run_profile esp32-devkit esp32 4 1 $((0x1e0000)) "$CLASSIC_LOCK" \
     '52464244 01100101 04010000 00000000'
 run_profile xiao-esp32s3 esp32s3 8 2 $((0x3e0000)) "$S3_LOCK" \

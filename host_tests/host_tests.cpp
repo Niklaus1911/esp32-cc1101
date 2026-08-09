@@ -1318,6 +1318,31 @@ void test_ota_policy()
     require(rfbridge::ota_project_name_is_compatible("esp32-cc1101", "esp32-cc1101") &&
                 !rfbridge::ota_project_name_is_compatible("other", "esp32-cc1101"),
             "OTA project identity is exact");
+    uint8_t sha256[rfbridge::kOtaSha256Size]{};
+    for (std::size_t index = 0; index < sizeof(sha256); ++index) {
+        sha256[index] = static_cast<uint8_t>(index);
+    }
+    char digest[rfbridge::kOtaSha256HexCapacity]{};
+    require(rfbridge::format_ota_sha256(sha256, sizeof(sha256), digest, sizeof(digest)) &&
+                std::strcmp(digest,
+                            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f") == 0 &&
+                !rfbridge::format_ota_sha256(sha256, sizeof(sha256) - 1U, digest,
+                                             sizeof(digest)) &&
+                !rfbridge::format_ota_sha256(sha256, sizeof(sha256), digest,
+                                             sizeof(digest) - 1U),
+            "OTA ELF SHA-256 formatting is exact and bounded");
+    require(rfbridge::ota_image_state_from_raw(0) == rfbridge::OtaImageState::kNew &&
+                rfbridge::ota_image_state_from_raw(1) ==
+                    rfbridge::OtaImageState::kPendingVerify &&
+                rfbridge::ota_image_state_from_raw(2) == rfbridge::OtaImageState::kValid &&
+                rfbridge::ota_image_state_from_raw(3) == rfbridge::OtaImageState::kInvalid &&
+                rfbridge::ota_image_state_from_raw(4) == rfbridge::OtaImageState::kAborted &&
+                rfbridge::ota_image_state_from_raw(UINT32_MAX) ==
+                    rfbridge::OtaImageState::kUndefined &&
+                rfbridge::ota_image_state_from_raw(5) == rfbridge::OtaImageState::kUnknown &&
+                std::strcmp(rfbridge::ota_image_state_name(rfbridge::OtaImageState::kValid),
+                            "valid") == 0,
+            "OTA image states map to stable public names");
 }
 
 void test_automation_rules()

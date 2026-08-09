@@ -34,6 +34,7 @@ constexpr uint32_t kProgressStepBytes = 65536;
 constexpr char kStatusUri[] = "/api/v1/ota/status";
 constexpr char kUploadUri[] = "/api/v1/ota";
 constexpr char kJsonContentType[] = "application/json";
+constexpr std::size_t kEscapedAppTextCapacity = 32U * 6U + 1U;
 constexpr std::size_t kImagePrefixSize =
     sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t) +
     sizeof(RfBoardImageDescriptor);
@@ -72,6 +73,53 @@ void copy_text(char *destination, std::size_t capacity, const char *source)
 {
     std::strncpy(destination, source, capacity - 1U);
     destination[capacity - 1U] = '\0';
+}
+
+void copy_bounded_text(char *destination, std::size_t capacity, const char *source,
+                       std::size_t source_capacity)
+{
+    if (destination == nullptr || capacity == 0 || source == nullptr) {
+        return;
+    }
+    const std::size_t length = std::min(capacity - 1U, strnlen(source, source_capacity));
+    std::memcpy(destination, source, length);
+    destination[length] = '\0';
+}
+
+bool escape_json_text(const char *input, char *output, std::size_t capacity)
+{
+    constexpr char kHex[] = "0123456789abcdef";
+    if (input == nullptr || output == nullptr || capacity == 0) {
+        return false;
+    }
+    std::size_t used = 0;
+    for (std::size_t index = 0; input[index] != '\0'; ++index) {
+        const uint8_t value = static_cast<uint8_t>(input[index]);
+        if (value == '"' || value == '\\') {
+            if (used + 2U >= capacity) {
+                return false;
+            }
+            output[used++] = '\\';
+            output[used++] = static_cast<char>(value);
+        } else if (value < 0x20U || value > 0x7eU) {
+            if (used + 6U >= capacity) {
+                return false;
+            }
+            output[used++] = '\\';
+            output[used++] = 'u';
+            output[used++] = '0';
+            output[used++] = '0';
+            output[used++] = kHex[value >> 4U];
+            output[used++] = kHex[value & 0x0fU];
+        } else {
+            if (used + 1U >= capacity) {
+                return false;
+            }
+            output[used++] = static_cast<char>(value);
+        }
+    }
+    output[used] = '\0';
+    return true;
 }
 
 bool emit_event(const OtaUpdateEvent &event)
@@ -139,23 +187,41 @@ esp_err_t send_json(httpd_req_t *request, const char *status, const char *json)
     return httpd_resp_send(request, json, HTTPD_RESP_USE_STRLEN);
 }
 
-void make_status_json(char *output, std::size_t capacity, const OtaUpdateStatus &status)
+bool make_status_json(char *output, std::size_t capacity, const OtaUpdateStatus &status)
 {
-    std::snprintf(output, capacity,
+    char running_version[kEscapedAppTextCapacity]{};
+    char candidate_version[kEscapedAppTextCapacity]{};
+    if (!escape_json_text(status.running_version, running_version, sizeof(running_version)) ||
+        !escape_json_text(status.candidate_version, candidate_version,
+                          sizeof(candidate_version))) {
+        return false;
+    }
+    const int length = std::snprintf(output, capacity,
                   "{\"state\":\"%s\",\"server\":%s,\"upload\":%s,\"port\":%u,"
+                   "\"board_profile\":\"%s\","
                    "\"running_partition\":\"%s\",\"update_partition\":\"%s\","
                    "\"running_version\":\"%s\",\"candidate_version\":\"%s\","
+                   "\"running_elf_sha256\":\"%s\",\"candidate_elf_sha256\":\"%s\","
+                   "\"running_image_state\":\"%s\","
+                   "\"running_image_state_error\":\"%s\","
+                   "\"confirmation_error\":\"%s\","
                    "\"rollback_possible\":%s,\"pending_verification\":%s,"
                    "\"bytes\":%lu,\"total\":%lu,\"error\":\"%s\","
-                   "\"maintenance_error\":\"%s\"}",
+                   "\"maintenance_error\":\"%s\",\"initialization_error\":\"%s\"}",
                   ota_update_state_name(status.state), status.server_running ? "true" : "false",
-                  status.upload_active ? "true" : "false", status.port, status.running_partition,
-                   status.update_partition, status.running_version, status.candidate_version,
+                  status.upload_active ? "true" : "false", status.port, status.board_profile,
+                   status.running_partition, status.update_partition, running_version,
+                   candidate_version, status.running_elf_sha256, status.candidate_elf_sha256,
+                   ota_image_state_name(status.running_image_state),
+                   esp_err_to_name(status.running_image_state_error),
+                   esp_err_to_name(status.confirmation_error),
                    status.rollback_possible ? "true" : "false",
                    status.pending_verification ? "true" : "false",
                    static_cast<unsigned long>(status.bytes_received),
                    static_cast<unsigned long>(status.content_length), esp_err_to_name(status.last_error),
-                   esp_err_to_name(status.maintenance_error));
+                   esp_err_to_name(status.maintenance_error),
+                   esp_err_to_name(status.initialization_error));
+    return length >= 0 && static_cast<std::size_t>(length) < capacity;
 }
 
 esp_err_t status_handler(httpd_req_t *request)
@@ -168,8 +234,10 @@ esp_err_t status_handler(httpd_req_t *request)
     if (error != ESP_OK) {
         return send_json(request, "500 Internal Server Error", "{\"error\":\"status_unavailable\"}");
     }
-    char response[512]{};
-    make_status_json(response, sizeof(response), status);
+    char response[1024]{};
+    if (!make_status_json(response, sizeof(response), status)) {
+        return send_json(request, "500 Internal Server Error", "{\"error\":\"status_too_large\"}");
+    }
     return send_json(request, "200 OK", response);
 }
 
@@ -246,6 +314,16 @@ esp_err_t upload_handler(httpd_req_t *request)
     const uint32_t content_length = request->content_len > 0 ? static_cast<uint32_t>(request->content_len) : 0;
     uint32_t bytes_received = 0;
     uint32_t next_report = 0;
+    {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status.bytes_received = 0;
+            s_status.content_length = content_length;
+            s_status.candidate_version[0] = '\0';
+            s_status.candidate_elf_sha256[0] = '\0';
+            s_status.maintenance_error = ESP_OK;
+        }
+    }
     char content_type[48]{};
     const std::size_t content_type_length = httpd_req_get_hdr_value_len(request, "Content-Type");
     if (content_type_length == 0 || content_type_length >= sizeof(content_type) ||
@@ -260,6 +338,8 @@ esp_err_t upload_handler(httpd_req_t *request)
     std::array<uint8_t, kImagePrefixSize> prefix{};
     esp_app_desc_t candidate{};
     RfBoardImageDescriptor candidate_board{};
+    char candidate_version[sizeof(candidate.version) + 1U]{};
+    char candidate_elf_sha256[kOtaSha256HexCapacity]{};
     if (result == ESP_OK) {
         result = receive_exact(request, prefix.data(), prefix.size());
         bytes_received = result == ESP_OK ? static_cast<uint32_t>(prefix.size()) : 0;
@@ -268,8 +348,14 @@ esp_err_t upload_handler(httpd_req_t *request)
         result = validate_image_prefix(prefix.data(), prefix.size(), &candidate, &candidate_board);
     }
     if (result == ESP_OK) {
-        char candidate_version[sizeof(candidate.version) + 1U]{};
-        std::memcpy(candidate_version, candidate.version, sizeof(candidate.version));
+        copy_bounded_text(candidate_version, sizeof(candidate_version), candidate.version,
+                          sizeof(candidate.version));
+        if (!format_ota_sha256(candidate.app_elf_sha256, sizeof(candidate.app_elf_sha256),
+                               candidate_elf_sha256, sizeof(candidate_elf_sha256))) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+    }
+    if (result == ESP_OK) {
         StatusLock lock;
         if (!lock.locked()) {
             result = ESP_ERR_TIMEOUT;
@@ -282,6 +368,8 @@ esp_err_t upload_handler(httpd_req_t *request)
             s_status.maintenance_error = ESP_OK;
             copy_text(s_status.update_partition, sizeof(s_status.update_partition), update_partition->label);
             copy_text(s_status.candidate_version, sizeof(s_status.candidate_version), candidate_version);
+            copy_text(s_status.candidate_elf_sha256,
+                      sizeof(s_status.candidate_elf_sha256), candidate_elf_sha256);
         }
     }
     if (result == ESP_OK) {
@@ -376,7 +464,19 @@ esp_err_t upload_handler(httpd_req_t *request)
     event.content_length = content_length;
     std::memcpy(event.candidate_version, candidate.version, sizeof(candidate.version));
     emit_event(event);
-    const esp_err_t response_error = send_json(request, "200 OK", "{\"ok\":true,\"rebooting\":true}");
+    char escaped_version[kEscapedAppTextCapacity]{};
+    char response[512]{};
+    esp_err_t response_error = ESP_FAIL;
+    if (escape_json_text(candidate_version, escaped_version, sizeof(escaped_version))) {
+        const int length = std::snprintf(
+            response, sizeof(response),
+            "{\"ok\":true,\"rebooting\":true,\"target_partition\":\"%s\","
+            "\"candidate_version\":\"%s\",\"candidate_elf_sha256\":\"%s\"}",
+            update_partition->label, escaped_version, candidate_elf_sha256);
+        if (length >= 0 && static_cast<std::size_t>(length) < sizeof(response)) {
+            response_error = send_json(request, "200 OK", response);
+        }
+    }
     s_upload_active.store(false, std::memory_order_release);
     schedule_reboot();
     return response_error;
@@ -422,8 +522,27 @@ esp_err_t initialize_ota_update()
         return ESP_ERR_NOT_FOUND;
     }
     esp_ota_img_states_t image_state{};
-    const bool pending = esp_ota_get_state_partition(running, &image_state) == ESP_OK &&
-                         image_state == ESP_OTA_IMG_PENDING_VERIFY;
+    const esp_err_t image_state_error = esp_ota_get_state_partition(running, &image_state);
+    const OtaImageState running_image_state =
+        image_state_error == ESP_OK
+            ? ota_image_state_from_raw(static_cast<uint32_t>(image_state))
+            : OtaImageState::kUnknown;
+    const bool pending = running_image_state == OtaImageState::kPendingVerify;
+    const esp_app_desc_t *running_description = esp_app_get_description();
+    char running_elf_sha256[kOtaSha256HexCapacity]{};
+    if (running_description == nullptr ||
+        !format_ota_sha256(running_description->app_elf_sha256,
+                           sizeof(running_description->app_elf_sha256), running_elf_sha256,
+                           sizeof(running_elf_sha256))) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status = {};
+            s_status.state = OtaUpdateState::kUnavailable;
+            s_status.initialization_error = ESP_ERR_INVALID_STATE;
+        }
+        s_initialization_error.store(ESP_ERR_INVALID_STATE, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
     if (xTaskCreate(reboot_task, "ota_reboot", kRebootTaskStackSize, nullptr, kRebootTaskPriority,
                     &s_reboot_task) != pdPASS) {
         StatusLock lock;
@@ -446,10 +565,21 @@ esp_err_t initialize_ota_update()
             s_status.initialization_error = ESP_OK;
             s_status.pending_verification = pending;
             s_status.rollback_possible = esp_ota_check_rollback_is_possible();
+            s_status.running_image_state = running_image_state;
+            s_status.running_image_state_error = image_state_error;
+            s_status.confirmation_error =
+                image_state_error == ESP_OK
+                    ? (pending ? ESP_ERR_INVALID_STATE : ESP_OK)
+                    : image_state_error;
+            copy_text(s_status.board_profile, sizeof(s_status.board_profile),
+                      current_board_info().profile_name);
             copy_text(s_status.running_partition, sizeof(s_status.running_partition), running->label);
             copy_text(s_status.update_partition, sizeof(s_status.update_partition), update->label);
-            copy_text(s_status.running_version, sizeof(s_status.running_version),
-                      esp_app_get_description()->version);
+            copy_bounded_text(s_status.running_version, sizeof(s_status.running_version),
+                              running_description->version,
+                              sizeof(running_description->version));
+            copy_text(s_status.running_elf_sha256, sizeof(s_status.running_elf_sha256),
+                      running_elf_sha256);
         }
     }
     s_available.store(true, std::memory_order_release);
@@ -570,15 +700,40 @@ esp_err_t confirm_running_ota_image()
     }
     esp_ota_img_states_t state{};
     const esp_err_t state_error = esp_ota_get_state_partition(running, &state);
-    if (state_error != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
-        return state_error == ESP_ERR_NOT_SUPPORTED || state_error == ESP_ERR_NOT_FOUND ? ESP_OK : state_error;
-    }
-    const esp_err_t error = esp_ota_mark_app_valid_cancel_rollback();
-    if (error == ESP_OK) {
+    {
         StatusLock lock;
         if (lock.locked()) {
-            s_status.pending_verification = false;
-            s_status.rollback_possible = esp_ota_check_rollback_is_possible();
+            s_status.running_image_state =
+                state_error == ESP_OK
+                    ? ota_image_state_from_raw(static_cast<uint32_t>(state))
+                    : OtaImageState::kUnknown;
+            s_status.running_image_state_error = state_error;
+            s_status.pending_verification =
+                state_error == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY;
+            s_status.confirmation_error = state_error;
+        }
+    }
+    if (state_error != ESP_OK) {
+        return state_error;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status.confirmation_error = ESP_OK;
+        }
+        return ESP_OK;
+    }
+    const esp_err_t error = esp_ota_mark_app_valid_cancel_rollback();
+    {
+        StatusLock lock;
+        if (lock.locked()) {
+            s_status.confirmation_error = error;
+            if (error == ESP_OK) {
+                s_status.pending_verification = false;
+                s_status.running_image_state = OtaImageState::kValid;
+                s_status.running_image_state_error = ESP_OK;
+                s_status.rollback_possible = esp_ota_check_rollback_is_possible();
+            }
         }
     }
     return error;

@@ -225,9 +225,15 @@ tools/push-ota.sh <effective-hostname>.local build/xiao-esp32s3/esp32-cc1101.bin
 tools/push-ota.sh <effective-hostname>.local build/esp32s3-supermini-fh4r2/esp32-cc1101.bin
 ```
 
-Replace the hostname with the device's IPv4 address when `.local` resolution is unavailable. The uploader validates the image checksum and hash, ESP-IDF/project identity, chip, flash header, embedded `RFBD` profile descriptor, and profile-specific slot size before contacting the device.
+Replace the hostname with the device's IPv4 address when `.local` resolution is unavailable. The uploader validates the image checksum and hash, ESP-IDF/project identity, chip, flash header, embedded `RFBD` profile descriptor, and profile-specific slot size before contacting the device. Its preflight also rejects a busy or pending OTA, a device/image profile mismatch, and an MQTT-only next boot that would make HTTP confirmation impossible.
 
-The same image can be installed from **Web UI > System > Firmware update**: choose **Application image**, select **Install and reboot**, and confirm. The device pauses automation and RF safely, writes only the inactive slot, validates it, sends the success response, and reboots. Reopen the same effective hostname or IPv4 address after reconnect and check **System > Firmware update** or `ota status` for the running image.
+By default the command waits up to 120 seconds and exits successfully only after the target partition is running with the selected image's full ELF SHA256, ESP-IDF reports the image state as `valid`, and the firmware reports `ESP_OK` for both the state query and confirmation checkpoint. A rollback, identity mismatch, unconfirmed image, or timeout returns nonzero even when the upload itself was accepted. Use `--no-wait` only when acceptance-only behavior is intentional:
+
+```bash
+tools/push-ota.sh --no-wait <effective-hostname>.local build/<profile>/esp32-cc1101.bin
+```
+
+The same image can be installed from **Web UI > System > Firmware update**: choose **Application image**, select **Install and reboot**, and confirm. Before sending it, the browser inspects the image project, version, full ELF SHA256, and `RFBD` profile and compares the profile with a fresh device snapshot. The device pauses automation and RF safely, writes only the inactive slot, validates it, sends the acceptance response, and reboots. The Web UI does not treat a reconnect alone as success: it checks the target partition, digest, image state, and confirmation result, then reloads with a one-time confirmation message. If the 120-second foreground wait expires, controls are restored while background reconciliation continues.
 
 The Web UI and OTA endpoint are intentionally unauthenticated. Any client on the trusted LAN can install firmware; never expose port 80 to an untrusted network or the Internet. A mismatched profile, oversized image, interrupted upload, or failed validation is rejected without selecting the incomplete slot.
 

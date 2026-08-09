@@ -6,6 +6,7 @@ pollController:null,
 pollGeneration:0,
 noticeTimer:null,
 otaRebooting:false,
+otaAttempt:null,
 backoff:1000,
 accepted:null,
 ruleExecutions:null,
@@ -28,6 +29,20 @@ const maximumActivityStorageLength = 64 * 1024;
 const maximumDateMilliseconds = 8640000000000000;
 const heapCriticalBytes = 12 * 1024;
 const heapWarningBytes = 24 * 1024;
+const otaConfirmationTimeoutMs = 120000;
+const otaSuccessStorageKey = "rfbridge.ota-success.v1";
+const otaImagePrefixSize = 304;
+const otaAppDescriptionOffset = 32;
+const otaVersionOffset = otaAppDescriptionOffset + 16;
+const otaProjectOffset = otaAppDescriptionOffset + 48;
+const otaElfSha256Offset = otaAppDescriptionOffset + 144;
+const otaBoardDescriptorOffset = otaAppDescriptionOffset + 256;
+const otaBoardProfiles = new Map([
+["52464244011001010401000000000000", "esp32-devkit"],
+["52464244011003020802000000000000", "xiao-esp32s3"],
+["52464244011002021003000000000000", "esp32s3-devkitc-n16r8"],
+["52464244011004020401000000000000", "esp32s3-supermini-fh4r2"],
+]);
 const marcStateNames = "SLEEP IDLE XOFF VCOON_MC REGON_MC MANCAL VCOON REGON STARTCAL BWBOOST FS_LOCK IFADCON ENDCAL RX RX_END RX_RST TXRX_SWITCH RXFIFO_OVERFLOW FSTXON TX TX_END RXTX_SWITCH TXFIFO_UNDERFLOW".split(" ");
 const byId = (id) => document.getElementById(id);
 const text = (value) => document.createTextNode(String(value));
@@ -40,13 +55,13 @@ return node;
 function formBody(values) {
 return Object.entries(values).map(([key, value]) => `${key}=${String(value)}`).join("&");
 }
-function showNotice(message, kind = "") {
+function showNotice(message, kind = "", persistent = false) {
 const notice = byId("notice");
 notice.textContent = message;
 notice.className = `notice ${kind}`.trim();
 notice.hidden = false;
 clearTimeout(state.noticeTimer);
-state.noticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
+if (!persistent) state.noticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
 }
 function cancelPolling() {
 clearTimeout(state.pollTimer);
@@ -133,24 +148,122 @@ if (!response.ok) throw new Error(live.error || `HTTP ${response.status}`);
 if (generation !== state.pollGeneration) return;
 state.backoff = 1000;
 setConnection(true, "Connected");
-if (state.otaRebooting) {
-state.otaRebooting = false;
-setBusy(false);
-byId("ota-progress").hidden = true;
-refreshOta();
-showNotice("Firmware reboot complete", "success");
-}
 renderLive(live);
+if (state.otaAttempt) await reconcileOtaAttempt();
 } catch (error) {
 if (generation === state.pollGeneration && (error.name !== "AbortError" || timedOut)) {
 state.backoff = Math.min(state.backoff * 2, 5000);
 setConnection(false, "Disconnected");
+expireOtaConfirmation();
 }
 } finally {
 clearTimeout(timeout);
 if (state.pollController === controller) state.pollController = null;
 if (generation === state.pollGeneration) schedulePoll();
 }
+}
+function hexBytes(bytes) {
+return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+function readAppText(bytes, offset, length, label) {
+const field = bytes.slice(offset, offset + length);
+const end = field.indexOf(0);
+const content = end < 0 ? field : field.slice(0, end);
+if (!content.length || content.some((value) => value < 0x20 || value > 0x7e)) {
+throw new Error(`Firmware ${label} is missing or invalid`);
+}
+return String.fromCharCode(...content);
+}
+async function inspectOtaImage(file) {
+if (file.size < otaImagePrefixSize) throw new Error("Firmware image is too small");
+const bytes = new Uint8Array(await file.slice(0, otaImagePrefixSize).arrayBuffer());
+if (bytes[0] !== 0xe9) throw new Error("Firmware image header is invalid");
+const project = readAppText(bytes, otaProjectOffset, 32, "project identity");
+if (project !== "esp32-cc1101") throw new Error(`Firmware project ${project} is not esp32-cc1101`);
+const version = readAppText(bytes, otaVersionOffset, 32, "version");
+const elfSha256 = hexBytes(bytes.slice(otaElfSha256Offset, otaElfSha256Offset + 32));
+const descriptor = hexBytes(bytes.slice(otaBoardDescriptorOffset, otaBoardDescriptorOffset + 16));
+const profile = otaBoardProfiles.get(descriptor);
+if (!profile) throw new Error("Firmware board profile descriptor is missing or unsupported");
+return { project, version, elfSha256, profile };
+}
+function expireOtaConfirmation() {
+const attempt = state.otaAttempt;
+if (!attempt || attempt.timedOut || !attempt.deadline || Date.now() < attempt.deadline) return;
+attempt.timedOut = true;
+state.otaRebooting = false;
+byId("ota-progress").hidden = true;
+setBusy(false);
+showNotice("OTA was accepted, but boot is not confirmed yet; background checks will continue", "error", true);
+}
+function finishOtaAttempt(message) {
+state.otaAttempt = null;
+state.otaRebooting = false;
+byId("ota-progress").hidden = true;
+setBusy(false);
+showNotice(message, "error", true);
+}
+function completeOtaAttempt(ota) {
+const attempt = state.otaAttempt;
+state.otaAttempt = null;
+try {
+sessionStorage.setItem(otaSuccessStorageKey, JSON.stringify({
+version: ota.running_version || attempt?.expectedVersion || "unknown",
+partition: ota.running_partition,
+}));
+} catch (_) { /* Storage is optional. */ }
+location.reload();
+}
+async function reconcileOtaAttempt() {
+const attempt = state.otaAttempt;
+if (!attempt) return;
+let ota;
+try {
+ota = await readJson("/api/v1/ota/status");
+renderOtaStatus(ota);
+} catch (_) {
+expireOtaConfirmation();
+return;
+}
+const digest = String(ota.running_elf_sha256 || "").toLowerCase();
+const targetRunning = ota.running_partition === attempt.targetPartition;
+if (targetRunning && digest === attempt.expectedDigest &&
+    ota.running_image_state === "valid" && ota.running_image_state_error === "ESP_OK" &&
+    ota.confirmation_error === "ESP_OK") {
+completeOtaAttempt(ota);
+return;
+}
+if (targetRunning && !("running_elf_sha256" in ota && "running_image_state" in ota &&
+    "running_image_state_error" in ota && "confirmation_error" in ota)) {
+finishOtaAttempt("The new partition booted, but this firmware cannot prove its image identity and validation state");
+return;
+}
+if (targetRunning && digest && digest !== attempt.expectedDigest) {
+finishOtaAttempt("The target partition booted with a different firmware digest");
+return;
+}
+if (targetRunning && (ota.running_image_state === "invalid" || ota.running_image_state === "aborted" ||
+    (ota.running_image_state === "valid" && ota.confirmation_error !== "ESP_OK"))) {
+finishOtaAttempt(`The new image was not confirmed (${ota.confirmation_error || ota.running_image_state})`);
+return;
+}
+if (ota.running_partition === attempt.originalPartition && ota.state !== "pending_reboot") {
+finishOtaAttempt(`The device returned to ${attempt.originalPartition}; the update was rolled back or rejected`);
+return;
+}
+expireOtaConfirmation();
+}
+function restoreOtaSuccessNotice() {
+let saved = null;
+try {
+saved = sessionStorage.getItem(otaSuccessStorageKey);
+sessionStorage.removeItem(otaSuccessStorageKey);
+} catch (_) { /* Storage is optional. */ }
+if (!saved) return;
+try {
+const result = JSON.parse(saved);
+showNotice(`Firmware ${result.version} confirmed on ${result.partition}`, "success");
+} catch (_) { /* Ignore invalid session data. */ }
 }
 function stateClass(value) {
 return value === "active" || value === "completed" || value === "idle"
@@ -725,19 +838,30 @@ schedulePoll(0);
 }
 }
 
-async function refreshOta() {
-try {
-const ota = await readJson("/api/v1/ota/status");
+function renderOtaStatus(ota) {
 byId("ota-state").textContent = `${ota.state} / ${ota.running_version || "unknown"}`;
 renderDetails(byId("ota-details"), [
-["State", ota.state], ["Running partition", ota.running_partition],
+["State", ota.state], ["Board profile", ota.board_profile],
+["Running partition", ota.running_partition],
 ["Update partition", ota.update_partition], ["Running version", ota.running_version],
+["Running ELF SHA256", ota.running_elf_sha256],
 ["Candidate", ota.candidate_version || "None"],
+["Candidate ELF SHA256", ota.candidate_elf_sha256 || "None"],
+["Image state", ota.running_image_state],
+["Image state query", ota.running_image_state_error],
+["Boot confirmation", ota.confirmation_error],
 ["Rollback", ota.rollback_possible ? "Available" : "Unavailable"],
 ["Last error", ota.error],
 ]);
+}
+async function refreshOta() {
+try {
+const ota = await readJson("/api/v1/ota/status");
+renderOtaStatus(ota);
+return ota;
 } catch (error) {
 byId("ota-state").textContent = error.message || "Unavailable";
+return null;
 }
 }
 
@@ -878,49 +1002,118 @@ if (!document.hidden) schedulePoll(0);
 });
 }
 
-function uploadOta(event) {
+function beginOtaConfirmation(message) {
+state.otaAttempt.deadline = Date.now() + otaConfirmationTimeoutMs;
+state.otaAttempt.timedOut = false;
+byId("ota-progress").value = 100;
+showNotice(message, "success");
+setConnection(false, "Rebooting");
+state.otaRebooting = true;
+state.busy = false;
+setBusy(false);
+setTimeout(() => schedulePoll(0), 3000);
+}
+
+async function uploadOta(event) {
 event.preventDefault();
 const file = byId("ota-file").files[0];
-if (!file || state.busy || !confirm(`Install ${file.name} and reboot RFBridge?`)) return;
+if (!file || state.busy || state.otaRebooting) return;
 cancelPolling();
 setBusy(true);
 const progress = byId("ota-progress");
 progress.hidden = false;
 progress.value = 0;
+let image;
+let live;
+let ota;
+try {
+image = await inspectOtaImage(file);
+live = await readJson("/api/live");
+ota = await readJson("/api/v1/ota/status");
+renderOtaStatus(ota);
+if (ota.upload || ota.pending_verification ||
+    ["receiving", "validating", "pending_reboot"].includes(ota.state)) {
+throw new Error(`OTA is unavailable while the device state is ${ota.state}`);
+}
+const deviceProfile = ota.board_profile || live.board?.profile;
+if (!deviceProfile) throw new Error("Device board profile is unavailable");
+if (image.profile !== deviceProfile) {
+throw new Error(`Firmware profile ${image.profile} does not match device profile ${deviceProfile}`);
+}
+if (live.services?.requested === "mqtt") {
+throw new Error("The next boot is MQTT-only; select Web or Both and reboot before OTA");
+}
+if (!ota.running_partition || !ota.update_partition ||
+    ota.running_partition === ota.update_partition) {
+throw new Error("Inactive OTA partition identity is unavailable");
+}
+const summary = `${file.name}\nProfile: ${image.profile}\nVersion: ${image.version}\nELF SHA256: ${image.elfSha256}\nTarget: ${ota.update_partition}`;
+if (!confirm(`Install and reboot RFBridge?\n\n${summary}`)) {
+progress.hidden = true;
+setBusy(false);
+schedulePoll(0);
+return;
+}
+} catch (error) {
+progress.hidden = true;
+setBusy(false);
+showNotice(error.message || "Could not validate firmware", "error", true);
+schedulePoll(0);
+return;
+}
+state.otaAttempt = {
+originalPartition: ota.running_partition,
+targetPartition: ota.update_partition,
+expectedDigest: image.elfSha256,
+expectedVersion: image.version,
+deadline: 0,
+timedOut: false,
+};
 const request = new XMLHttpRequest();
+let uploadComplete = false;
 request.open("POST", "/api/v1/ota");
 request.setRequestHeader("Content-Type", "application/octet-stream");
 request.upload.addEventListener("progress", (upload) => {
 if (upload.lengthComputable) progress.value = Math.round((upload.loaded / upload.total) * 100);
 });
+request.upload.addEventListener("load", () => { uploadComplete = true; });
 request.addEventListener("load", () => {
 let payload = {};
 try { payload = JSON.parse(request.responseText); } catch (_) { payload = {}; }
 if (request.status === 200 && payload.ok) {
-progress.value = 100;
-showNotice("Firmware accepted; reconnecting after reboot", "success");
-setConnection(false, "Rebooting");
-state.otaRebooting = true;
-state.busy = false;
-setTimeout(() => schedulePoll(0), 3000);
+const responseDigest = String(payload.candidate_elf_sha256 || "").toLowerCase();
+if ((payload.target_partition && payload.target_partition !== state.otaAttempt.targetPartition) ||
+    (responseDigest && responseDigest !== state.otaAttempt.expectedDigest)) {
+finishOtaAttempt("The OTA response identity does not match the selected firmware");
+schedulePoll(0);
+return;
+}
+beginOtaConfirmation("Firmware accepted; waiting for exact boot confirmation");
 } else {
-showNotice(payload.error || `OTA failed: HTTP ${request.status}`, "error");
+state.otaAttempt = null;
+showNotice(payload.error || `OTA failed: HTTP ${request.status}`, "error", true);
 progress.hidden = true;
 setBusy(false);
 schedulePoll(0);
 }
 });
 request.addEventListener("error", () => {
-showNotice("OTA transport failed", "error");
+if (uploadComplete) {
+beginOtaConfirmation("The upload connection closed after transfer; checking the boot outcome");
+} else {
+state.otaAttempt = null;
+showNotice("OTA transport failed before the image was transferred", "error", true);
 progress.hidden = true;
 setBusy(false);
 schedulePoll(0);
+}
 });
 request.send(file);
 }
 
 if (!matchMedia("(max-width: 560px)").matches) byId("firmware-disclosure").open = true;
 restoreActivity()
+restoreOtaSuccessNotice()
 bindActions()
 renderActivity()
 refreshRecent()

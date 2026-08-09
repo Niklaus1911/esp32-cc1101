@@ -1,12 +1,12 @@
-menu "LAN OTA update"
+menu "Shared Web and LAN OTA HTTP server"
 
 config OTA_HTTP_PORT
-    int "LAN OTA HTTP port"
+    int "Shared Web and LAN OTA HTTP port"
     range 80 65535
     default 80
 
 config OTA_HTTP_TASK_STACK_SIZE
-    int "LAN OTA HTTP server task stack size"
+    int "Shared Web and LAN OTA HTTP server task stack size"
     range 8192 16384
     default 8192
 

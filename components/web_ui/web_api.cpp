@@ -26,7 +26,7 @@
 namespace rfbridge {
 namespace {
 
-constexpr uint16_t kHttpPort = 80;
+constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;
 constexpr std::size_t kMaximumActionBodySize = 2048;
 constexpr std::size_t kScratchSize = 512;
 
