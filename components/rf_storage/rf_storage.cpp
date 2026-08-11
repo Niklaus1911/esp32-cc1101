@@ -470,6 +470,16 @@ esp_err_t rf_storage_list(RfStorageName *names, std::size_t capacity, std::size_
     nvs_iterator_t iterator = nullptr;
     esp_err_t error = nvs_entry_find_in_handle(handle.get(), NVS_TYPE_BLOB, &iterator);
     while (error == ESP_OK) {
+        nvs_entry_info_t info{};
+        const esp_err_t info_error = nvs_entry_info(iterator, &info);
+        if (info_error != ESP_OK) {
+            nvs_release_iterator(iterator);
+            return info_error;
+        }
+        if (!rf_storage_name_is_valid(info.key)) {
+            nvs_release_iterator(iterator);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
         ++required;
         error = nvs_entry_next(&iterator);
     }
@@ -494,6 +504,10 @@ esp_err_t rf_storage_list(RfStorageName *names, std::size_t capacity, std::size_
         if (info_error != ESP_OK) {
             nvs_release_iterator(iterator);
             return info_error;
+        }
+        if (!rf_storage_name_is_valid(info.key)) {
+            nvs_release_iterator(iterator);
+            return ESP_ERR_INVALID_RESPONSE;
         }
         std::memcpy(names[index].value, info.key, sizeof(names[index].value));
         names[index].value[sizeof(names[index].value) - 1U] = '\0';

@@ -1840,14 +1840,14 @@ esp_err_t get_rf_radio_status(RfRadioStatus *status)
         return ESP_OK;
     }
 
+    fill_software_status(status);
     if (s_service_state.load(std::memory_order_acquire) == ServiceState::kStopped &&
         !s_start_override_valid.load(std::memory_order_acquire)) {
-        RfHardware stored_hardware = RfHardware::kCc1101;
+        RfHardware stored_hardware = status->hardware;
         if (rf_storage_hardware_get(&stored_hardware) == ESP_OK) {
             status->hardware = stored_hardware;
         }
     }
-    fill_software_status(status);
     status->cc1101_info_valid = false;
     status->cc1101_error = error;
     return ESP_OK;

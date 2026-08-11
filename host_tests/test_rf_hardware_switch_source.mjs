@@ -89,9 +89,12 @@ const stop = sourceSection(radio, "void stop_rf_ook(", "esp_err_t transmit_rf_de
 assert(stop.includes("LifecycleGuard lifecycle") &&
        stop.includes("s_hardware_switch_busy.load"),
        "normal RF stop must serialize with hardware switching");
+const statusGetter = sourceSection(radio, "esp_err_t get_rf_radio_status(", "esp_err_t get_rf_hardware(",
+                                  "status getter");
 assert(radio.includes("status->hardware = stored_hardware") &&
-       !sourceSection(radio, "esp_err_t get_rf_radio_status(", "esp_err_t get_rf_hardware(",
-                      "status getter").includes("s_hardware.store(stored_hardware"),
+       statusGetter.indexOf("fill_software_status(status)") <
+           statusGetter.indexOf("status->hardware = stored_hardware") &&
+       !statusGetter.includes("s_hardware.store(stored_hardware"),
        "stopped status reads must not mutate the selected backend");
 assert(radio.includes("gpio_set_pull_mode") && radio.includes("GPIO_PULLDOWN_ONLY") &&
        radio.includes("force_generic_tx_idle();"),

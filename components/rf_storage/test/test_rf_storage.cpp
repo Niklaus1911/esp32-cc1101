@@ -93,6 +93,43 @@ TEST_CASE("decoded RF storage record round trips", "[rf_storage]")
     TEST_ASSERT_EQUAL_UINT8(rfbridge::rf_protocol(source.decoded.protocol)->inverted, loaded.decoded.inverted);
 }
 
+TEST_CASE("RF signal listing rejects malformed NVS keys", "[rf_storage][nvs]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
+
+    nvs_handle_t handle = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_codes", NVS_READWRITE, &handle));
+    char invalid_name[rfbridge::kRfStorageNameCapacity]{};
+    esp_err_t find_error = ESP_OK;
+    for (int attempt = 0; attempt < 8 && find_error != ESP_ERR_NVS_NOT_FOUND; ++attempt) {
+        std::snprintf(invalid_name, sizeof(invalid_name), "1%08lX",
+                      static_cast<unsigned long>(esp_random()));
+        find_error = nvs_find_key(handle, invalid_name, nullptr);
+    }
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, find_error);
+
+    const uint8_t malformed[] = {0x52, 0x46, 0x53, 0x52};
+    esp_err_t write_error = nvs_set_blob(handle, invalid_name, malformed, sizeof(malformed));
+    if (write_error == ESP_OK) {
+        write_error = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    std::size_t count = 0;
+    const esp_err_t list_error = write_error == ESP_OK
+                                     ? rfbridge::rf_storage_list(nullptr, 0, &count)
+                                     : write_error;
+
+    TEST_ASSERT_EQUAL(ESP_OK, write_error);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, list_error);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_codes", NVS_READWRITE, &handle));
+    const esp_err_t erase_error = nvs_erase_key(handle, invalid_name);
+    TEST_ASSERT_TRUE(erase_error == ESP_OK || erase_error == ESP_ERR_NVS_NOT_FOUND);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+    nvs_close(handle);
+}
+
 TEST_CASE("maximum raw RF storage record round trips", "[rf_storage]")
 {
     rfbridge::RfStoredSignal source{};
