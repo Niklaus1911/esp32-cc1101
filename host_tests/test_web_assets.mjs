@@ -474,6 +474,8 @@ assert.match(mobileCss,
              "mobile System details must retain compact label/value columns");
 assert.match(css, /\.firmware-disclosure\s*>\s*summary\s*\{[^}]*\bcursor\s*:\s*pointer\s*;/,
              "firmware disclosure must retain an interactive native summary");
+assert.match(css, /\.firmware-disclosure\s*>\s*summary\s*\{[^}]*\bdisplay\s*:\s*list-item\s*;/,
+             "firmware disclosure must retain its native expansion marker");
 for (const forbidden of [
   '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
   "httpd_uri_match_wildcard", "body:{command:", "no-referrer", "8032",
