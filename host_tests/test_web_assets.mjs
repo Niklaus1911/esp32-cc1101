@@ -339,6 +339,9 @@ for (const id of [
 assert(css.includes(".system-runtime-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }") &&
        /@media\s*\(max-width\s*:\s*820px\)[\s\S]*?\.system-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css),
        "system hardware/runtime/services responsive grid missing");
+assert.match(css,
+             /#system-status\s*>\s*\.system-status-band\s*>\s*\.settings-row\s*\+\s*\.system-grid\s*\{[^}]*\bmargin-top\s*:\s*var\(--s-4\)\s*;/,
+             "RF hardware controls must be separated from their diagnostics cards");
 assert(!js.includes('byId("runtime-details")'), "stale runtime details renderer remains");
 assert(js.includes("document.hidden"), "visibility-aware polling missing");
 assert(js.includes('readJson("/api/recent")') &&

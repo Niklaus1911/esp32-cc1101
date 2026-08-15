@@ -161,6 +161,7 @@ h2 svg { width: 15px; height: 15px; flex: none; color: var(--accent); opacity: .
 .system-summary .metric { min-height: 84px; }
 .system-summary .metric strong { min-height: 2.7em; font-size: var(--f-md); }
 .system-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-4); }
+#system-status > .system-status-band > .settings-row + .system-grid { margin-top: var(--s-4); }
 .system-runtime-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .system-group { min-width: 0; padding: var(--s-4); }
 .system-group h3 { margin: 0; font-size: var(--f-xs); color: var(--accent-2); letter-spacing: 0; text-transform: uppercase; font-weight: 650; }
