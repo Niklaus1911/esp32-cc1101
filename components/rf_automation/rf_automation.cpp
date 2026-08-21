@@ -70,6 +70,7 @@ std::array<RuntimeRule, CONFIG_RF_MAX_AUTOMATION_RULES> s_rules{};
 std::array<RfStorageRuleEntry, CONFIG_RF_MAX_AUTOMATION_RULES> s_graph_scratch{};
 std::size_t s_rule_count = 0;
 SemaphoreHandle_t s_mutex = nullptr;
+SemaphoreHandle_t s_configuration_sink_mutex = nullptr;
 QueueHandle_t s_frame_queue = nullptr;
 TaskHandle_t s_task = nullptr;
 std::atomic<bool> s_initialization_started{false};
@@ -85,6 +86,8 @@ std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 RfAutomationLogMode s_log_mode = RfAutomationLogMode::kActions;
 RfAutomationEventSink s_event_sink = nullptr;
 void *s_event_sink_context = nullptr;
+RfAutomationConfigSink s_configuration_sink = nullptr;
+void *s_configuration_sink_context = nullptr;
 uint32_t s_last_reported_queue_drops = 0;
 uint32_t s_next_action_id = 0;
 RfAutomationStatus s_status{};
@@ -97,6 +100,23 @@ public:
     {
         if (locked_) {
             xSemaphoreGive(s_mutex);
+        }
+    }
+    bool locked() const { return locked_; }
+
+private:
+    bool locked_;
+};
+
+class ConfigurationSinkLock {
+public:
+    ConfigurationSinkLock()
+        : locked_(s_configuration_sink_mutex != nullptr &&
+                  xSemaphoreTakeRecursive(s_configuration_sink_mutex, kMutexTimeout) == pdTRUE) {}
+    ~ConfigurationSinkLock()
+    {
+        if (locked_) {
+            xSemaphoreGiveRecursive(s_configuration_sink_mutex);
         }
     }
     bool locked() const { return locked_; }
@@ -152,6 +172,14 @@ EventEmitResult emit_event(RfAutomationEvent event)
     }
     ++s_status.log_drops;
     return EventEmitResult::kRejected;
+}
+
+void notify_configuration(const RfAutomationConfigEvent &event)
+{
+    ConfigurationSinkLock lock;
+    if (lock.locked() && s_configuration_sink != nullptr) {
+        (void)s_configuration_sink(event, s_configuration_sink_context);
+    }
 }
 
 uint32_t next_action_id()
@@ -317,6 +345,7 @@ void process_frame(const FrameEvent &event)
     s_status.last_error = ESP_OK;
 
     const uint32_t action_id = next_action_id();
+    s_status.last_action_id = action_id;
     RfAutomationEvent trigger_event{};
     populate_rule_event(&trigger_event, RfAutomationEventType::kTriggered, *matched, incoming.encoding,
                         action_us);
@@ -403,6 +432,10 @@ void destroy_initialization_resources()
         vSemaphoreDelete(s_mutex);
         s_mutex = nullptr;
     }
+    if (s_configuration_sink_mutex != nullptr) {
+        vSemaphoreDelete(s_configuration_sink_mutex);
+        s_configuration_sink_mutex = nullptr;
+    }
     clear_runtime_rules();
 }
 
@@ -422,8 +455,9 @@ esp_err_t initialize_rf_automation()
     }
 
     s_mutex = xSemaphoreCreateMutex();
+    s_configuration_sink_mutex = xSemaphoreCreateRecursiveMutex();
     s_frame_queue = xQueueCreate(kFrameQueueDepth, sizeof(FrameEvent));
-    if (s_mutex == nullptr || s_frame_queue == nullptr) {
+    if (s_mutex == nullptr || s_configuration_sink_mutex == nullptr || s_frame_queue == nullptr) {
         destroy_initialization_resources();
         s_initialization_error.store(ESP_ERR_NO_MEM, std::memory_order_release);
         s_initialization_finished.store(true, std::memory_order_release);
@@ -491,34 +525,46 @@ esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_na
         return ESP_ERR_INVALID_ARG;
     }
 
-    AutomationLock lock;
-    if (!lock.locked()) {
-        return ESP_ERR_TIMEOUT;
-    }
-    if (s_rule_count >= s_rules.size()) {
-        return ESP_ERR_INVALID_SIZE;
-    }
+    RfAutomationConfigEvent config_event{};
+    {
+        AutomationLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        if (s_rule_count >= s_rules.size()) {
+            return ESP_ERR_INVALID_SIZE;
+        }
 
-    RfStoredRule stored_rule{};
-    copy_name(stored_rule.target_name, target_name);
-    stored_rule.repeats = repeats;
-    stored_rule.cooldown_ms = kRfAutomationCooldownMs;
-    AddValidationContext context{trigger_name, target_name};
-    RfStoredSignal trigger_signal{};
-    RfStoredSignal target_signal{};
-    ESP_RETURN_ON_ERROR(rf_storage_rule_create_validated(trigger_name, stored_rule, validate_new_rule_signals, &context,
-                                                         &trigger_signal, &target_signal),
-                        "rf_automation", "persist validated rule");
+        RfStoredRule stored_rule{};
+        copy_name(stored_rule.target_name, target_name);
+        stored_rule.repeats = repeats;
+        stored_rule.cooldown_ms = kRfAutomationCooldownMs;
+        AddValidationContext context{trigger_name, target_name};
+        RfStoredSignal trigger_signal{};
+        RfStoredSignal target_signal{};
+        ESP_RETURN_ON_ERROR(rf_storage_rule_create_validated(
+                                trigger_name, stored_rule, validate_new_rule_signals, &context,
+                                &trigger_signal, &target_signal),
+                            "rf_automation", "persist validated rule");
 
-    RuntimeRule &runtime = s_rules[s_rule_count++];
-    std::memset(&runtime, 0, sizeof(runtime));
-    copy_name(runtime.entry.trigger_name, trigger_name);
-    runtime.entry.rule = stored_rule;
-    runtime.trigger_signal = trigger_signal;
-    runtime.target_signal = target_signal;
-    s_status.rule_count = static_cast<uint16_t>(s_rule_count);
-    s_status.configuration_revision = ++s_configuration_revision;
-    advance_generation();
+        RuntimeRule &runtime = s_rules[s_rule_count++];
+        std::memset(&runtime, 0, sizeof(runtime));
+        copy_name(runtime.entry.trigger_name, trigger_name);
+        runtime.entry.rule = stored_rule;
+        runtime.trigger_signal = trigger_signal;
+        runtime.target_signal = target_signal;
+        s_status.rule_count = static_cast<uint16_t>(s_rule_count);
+        s_status.configuration_revision = ++s_configuration_revision;
+        advance_generation();
+        config_event.change = RfAutomationConfigChange::kRuleAdded;
+        config_event.occurred_us = esp_timer_get_time();
+        config_event.configuration_revision = s_configuration_revision;
+        config_event.enabled = s_enabled.load(std::memory_order_relaxed);
+        config_event.log_mode = s_log_mode;
+        copy_name(config_event.trigger_name, trigger_name);
+        copy_name(config_event.target_name, target_name);
+    }
+    notify_configuration(config_event);
     return ESP_OK;
 }
 
@@ -536,26 +582,37 @@ esp_err_t rf_automation_remove_rule(const char *trigger_name)
         return ESP_ERR_INVALID_ARG;
     }
 
-    AutomationLock lock;
-    if (!lock.locked()) {
-        return ESP_ERR_TIMEOUT;
+    RfAutomationConfigEvent config_event{};
+    {
+        AutomationLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        std::size_t index = 0;
+        while (index < s_rule_count && std::strcmp(s_rules[index].entry.trigger_name, trigger_name) != 0) {
+            ++index;
+        }
+        if (index == s_rule_count) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        ESP_RETURN_ON_ERROR(rf_storage_rule_remove(trigger_name), "rf_automation", "remove rule");
+        if (index + 1U < s_rule_count) {
+            std::memmove(&s_rules[index], &s_rules[index + 1U],
+                         (s_rule_count - index - 1U) * sizeof(RuntimeRule));
+        }
+        --s_rule_count;
+        std::memset(&s_rules[s_rule_count], 0, sizeof(RuntimeRule));
+        s_status.rule_count = static_cast<uint16_t>(s_rule_count);
+        s_status.configuration_revision = ++s_configuration_revision;
+        advance_generation();
+        config_event.change = RfAutomationConfigChange::kRuleRemoved;
+        config_event.occurred_us = esp_timer_get_time();
+        config_event.configuration_revision = s_configuration_revision;
+        config_event.enabled = s_enabled.load(std::memory_order_relaxed);
+        config_event.log_mode = s_log_mode;
+        copy_name(config_event.trigger_name, trigger_name);
     }
-    std::size_t index = 0;
-    while (index < s_rule_count && std::strcmp(s_rules[index].entry.trigger_name, trigger_name) != 0) {
-        ++index;
-    }
-    if (index == s_rule_count) {
-        return ESP_ERR_NOT_FOUND;
-    }
-    ESP_RETURN_ON_ERROR(rf_storage_rule_remove(trigger_name), "rf_automation", "remove rule");
-    if (index + 1U < s_rule_count) {
-        std::memmove(&s_rules[index], &s_rules[index + 1U], (s_rule_count - index - 1U) * sizeof(RuntimeRule));
-    }
-    --s_rule_count;
-    std::memset(&s_rules[s_rule_count], 0, sizeof(RuntimeRule));
-    s_status.rule_count = static_cast<uint16_t>(s_rule_count);
-    s_status.configuration_revision = ++s_configuration_revision;
-    advance_generation();
+    notify_configuration(config_event);
     return ESP_OK;
 }
 
@@ -727,17 +784,29 @@ esp_err_t rf_automation_set_enabled(bool enabled)
                    : ESP_ERR_INVALID_STATE;
     }
 
-    AutomationLock lock;
-    if (!lock.locked()) {
-        return ESP_ERR_TIMEOUT;
+    RfAutomationConfigEvent config_event{};
+    bool changed = false;
+    {
+        AutomationLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        ESP_RETURN_ON_ERROR(rf_storage_rule_enabled_set(enabled), "rf_automation", "persist enabled state");
+        changed = s_enabled.load(std::memory_order_relaxed) != enabled;
+        s_enabled.store(enabled, std::memory_order_release);
+        s_status.enabled = enabled;
+        if (changed) {
+            s_status.configuration_revision = ++s_configuration_revision;
+            advance_generation();
+            config_event.change = RfAutomationConfigChange::kEnabled;
+            config_event.occurred_us = esp_timer_get_time();
+            config_event.configuration_revision = s_configuration_revision;
+            config_event.enabled = enabled;
+            config_event.log_mode = s_log_mode;
+        }
     }
-    ESP_RETURN_ON_ERROR(rf_storage_rule_enabled_set(enabled), "rf_automation", "persist enabled state");
-    const bool changed = s_enabled.load(std::memory_order_relaxed) != enabled;
-    s_enabled.store(enabled, std::memory_order_release);
-    s_status.enabled = enabled;
     if (changed) {
-        s_status.configuration_revision = ++s_configuration_revision;
-        advance_generation();
+        notify_configuration(config_event);
     }
     return ESP_OK;
 }
@@ -754,19 +823,31 @@ esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode)
                    : ESP_ERR_INVALID_STATE;
     }
 
-    AutomationLock lock;
-    if (!lock.locked()) {
-        return ESP_ERR_TIMEOUT;
+    RfAutomationConfigEvent config_event{};
+    bool changed = false;
+    {
+        AutomationLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        ESP_RETURN_ON_ERROR(rf_storage_rule_log_mode_set(static_cast<uint8_t>(mode)), "rf_automation",
+                            "persist log mode");
+        changed = s_log_mode != mode;
+        s_log_mode = mode;
+        s_status.log_mode = mode;
+        s_status.log_mode_known = true;
+        if (changed) {
+            s_status.configuration_revision = ++s_configuration_revision;
+            s_last_reported_queue_drops = s_queue_drops.load(std::memory_order_relaxed);
+            config_event.change = RfAutomationConfigChange::kLogMode;
+            config_event.occurred_us = esp_timer_get_time();
+            config_event.configuration_revision = s_configuration_revision;
+            config_event.enabled = s_enabled.load(std::memory_order_relaxed);
+            config_event.log_mode = mode;
+        }
     }
-    ESP_RETURN_ON_ERROR(rf_storage_rule_log_mode_set(static_cast<uint8_t>(mode)), "rf_automation",
-                        "persist log mode");
-    const bool changed = s_log_mode != mode;
-    s_log_mode = mode;
-    s_status.log_mode = mode;
-    s_status.log_mode_known = true;
     if (changed) {
-        s_status.configuration_revision = ++s_configuration_revision;
-        s_last_reported_queue_drops = s_queue_drops.load(std::memory_order_relaxed);
+        notify_configuration(config_event);
     }
     return ESP_OK;
 }
@@ -818,6 +899,26 @@ esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context
     }
     s_event_sink_context = context;
     s_event_sink = sink;
+    return ESP_OK;
+}
+
+esp_err_t rf_automation_set_configuration_sink(RfAutomationConfigSink sink, void *context)
+{
+    if (!s_available.load(std::memory_order_acquire) &&
+        !s_initialization_finished.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_available.load(std::memory_order_acquire)) {
+        ConfigurationSinkLock lock;
+        if (!lock.locked()) {
+            return ESP_ERR_TIMEOUT;
+        }
+        s_configuration_sink_context = context;
+        s_configuration_sink = sink;
+        return ESP_OK;
+    }
+    s_configuration_sink_context = context;
+    s_configuration_sink = sink;
     return ESP_OK;
 }
 

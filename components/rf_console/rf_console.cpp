@@ -834,6 +834,8 @@ bool enqueue_bridge_event(const BridgeEvent &event, void *)
         }
         case BridgeEventType::kAutomation:
             return enqueue_automation_log_event(event.payload.automation, nullptr);
+        case BridgeEventType::kAutomationConfig:
+            return true;
         case BridgeEventType::kNetwork:
             return enqueue_network_event(event.payload.network, nullptr);
         case BridgeEventType::kOta:

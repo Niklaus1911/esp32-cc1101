@@ -1877,6 +1877,10 @@ bool mqtt_bridge_sink(const BridgeEvent &event, void *context_pointer)
         message.automation = make_automation_telemetry(event);
         remember_last_automation(context, message.automation);
         (void)enqueue_telemetry(context, message);
+    } else if (event.type == BridgeEventType::kAutomationConfig) {
+        context->catalog_pending.store(true, std::memory_order_release);
+        context->state_pending.store(true, std::memory_order_release);
+        notify_worker(context, kWakeCatalog | kWakePublish);
     } else if (event.type == BridgeEventType::kNetwork) {
         MqttNetworkEventKind event_kind = MqttNetworkEventKind::kOther;
         switch (event.payload.network.type) {

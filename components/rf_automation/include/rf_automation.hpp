@@ -30,6 +30,7 @@ struct RfAutomationStatus {
     uint32_t log_events = 0;
     uint32_t log_drops = 0;
     uint32_t configuration_revision = 0;
+    uint32_t last_action_id = 0;
     esp_err_t initialization_error = ESP_ERR_INVALID_STATE;
     esp_err_t last_error = ESP_OK;
     char last_trigger[kRfStorageNameCapacity]{};
@@ -55,6 +56,7 @@ esp_err_t rf_automation_set_enabled(bool enabled);
 esp_err_t rf_automation_set_log_mode(RfAutomationLogMode mode);
 esp_err_t rf_automation_set_runtime_paused(RfAutomationPauseReason reason, bool paused);
 esp_err_t rf_automation_set_event_sink(RfAutomationEventSink sink, void *context);
+esp_err_t rf_automation_set_configuration_sink(RfAutomationConfigSink sink, void *context);
 esp_err_t rf_automation_get_status(RfAutomationStatus *status);
 void rf_automation_on_frame(const RfFrame &frame);
 

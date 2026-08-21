@@ -18,7 +18,7 @@ namespace {
 
 constexpr TickType_t kMutexWait = pdMS_TO_TICKS(1000);
 constexpr TickType_t kSinkQuiesceWait = pdMS_TO_TICKS(1000);
-constexpr std::size_t kMaximumSinks = 2;
+constexpr std::size_t kMaximumSinks = 3;
 constexpr std::size_t kEventQueueDepth = 14;
 constexpr uint32_t kDispatcherStackSize = 6144;
 constexpr UBaseType_t kDispatcherPriority = 4;
@@ -67,6 +67,16 @@ bool automation_sink(const RfAutomationEvent &event, void *)
     bridge.source = BridgeEventSource::kAutomation;
     bridge.occurred_us = event.occurred_us;
     bridge.payload.set_automation(event);
+    return bridge_events_publish(bridge);
+}
+
+bool automation_configuration_sink(const RfAutomationConfigEvent &event, void *)
+{
+    BridgeEvent bridge{};
+    bridge.type = BridgeEventType::kAutomationConfig;
+    bridge.source = BridgeEventSource::kAutomation;
+    bridge.occurred_us = event.occurred_us;
+    bridge.payload.set_automation_config(event);
     return bridge_events_publish(bridge);
 }
 
@@ -168,6 +178,11 @@ esp_err_t bridge_events_bind_available_sources()
     const esp_err_t automation_error = rf_automation_set_event_sink(automation_sink, nullptr);
     if (automation_error != ESP_OK) {
         first_error = automation_error;
+    }
+    const esp_err_t automation_configuration_error =
+        rf_automation_set_configuration_sink(automation_configuration_sink, nullptr);
+    if (first_error == ESP_OK && automation_configuration_error != ESP_OK) {
+        first_error = automation_configuration_error;
     }
     const esp_err_t network_error = set_network_wifi_event_sink(network_sink, nullptr);
     if (first_error == ESP_OK && network_error != ESP_OK) {

@@ -21,6 +21,13 @@ enum class RfAutomationEventType : uint8_t {
     kQueueDrop,
 };
 
+enum class RfAutomationConfigChange : uint8_t {
+    kRuleAdded,
+    kRuleRemoved,
+    kEnabled,
+    kLogMode,
+};
+
 struct RfAutomationEvent {
     RfAutomationEventType type = RfAutomationEventType::kTriggered;
     int64_t occurred_us = 0;
@@ -35,9 +42,22 @@ struct RfAutomationEvent {
     uint32_t value = 0;
 };
 
+struct RfAutomationConfigEvent {
+    RfAutomationConfigChange change = RfAutomationConfigChange::kRuleAdded;
+    int64_t occurred_us = 0;
+    uint32_t configuration_revision = 0;
+    bool enabled = false;
+    RfAutomationLogMode log_mode = RfAutomationLogMode::kActions;
+    char trigger_name[kRfStorageNameCapacity]{};
+    char target_name[kRfStorageNameCapacity]{};
+};
+
 // Runs on the rf_auto task while automation state is locked. A sink must use only zero-wait bounded
 // operations, must not perform I/O or call automation APIs, and must not retain references after return.
 using RfAutomationEventSink = bool (*)(const RfAutomationEvent &event, void *context);
+// Configuration sinks run synchronously after the automation state lock is released. Replacing a
+// sink waits for an in-flight callback; callbacks may call automation APIs, including this setter.
+using RfAutomationConfigSink = bool (*)(const RfAutomationConfigEvent &event, void *context);
 
 bool rf_automation_log_mode_is_valid(RfAutomationLogMode mode);
 bool rf_automation_log_mode_allows(RfAutomationLogMode mode, RfAutomationEventType type);

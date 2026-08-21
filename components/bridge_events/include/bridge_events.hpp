@@ -23,6 +23,7 @@ enum class BridgeEventType : uint8_t {
     kTxStarted,
     kTxCompleted,
     kAutomation,
+    kAutomationConfig,
     kNetwork,
     kOta,
     kOperationCompleted,
@@ -50,6 +51,7 @@ struct BridgeRfEventPayload {
 union BridgeEventPayload {
     BridgeRfEventPayload rf;
     RfAutomationEvent automation;
+    RfAutomationConfigEvent automation_config;
     NetworkWifiEvent network;
     OtaUpdateEvent ota;
 
@@ -57,6 +59,10 @@ union BridgeEventPayload {
 
     void set_automation(const RfAutomationEvent &value) {
         new (&automation) RfAutomationEvent(value);
+    }
+
+    void set_automation_config(const RfAutomationConfigEvent &value) {
+        new (&automation_config) RfAutomationConfigEvent(value);
     }
 
     void set_network(const NetworkWifiEvent &value) {
