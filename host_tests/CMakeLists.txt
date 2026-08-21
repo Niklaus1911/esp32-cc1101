@@ -25,6 +25,7 @@ add_executable(rf_host_tests
     ../components/rf_storage/rf_storage_recent_format.cpp
     ../components/rf_storage/rf_storage_rule_format.cpp
     ../components/web_ui/web_form.cpp
+    ../components/web_ui/web_events_format.cpp
 )
 target_include_directories(rf_host_tests PRIVATE
     ../components/bridge_control/include

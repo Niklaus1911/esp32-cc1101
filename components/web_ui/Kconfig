@@ -1,0 +1,10 @@
+menu "RF Bridge Web UI"
+
+config WEB_SSE_ENABLE
+    bool "Enable Web UI Server-Sent Events"
+    default y
+    help
+        Keep the bounded Server-Sent Events notification channel enabled. The Web UI
+        retains its snapshot and polling fallback when this is disabled.
+
+endmenu

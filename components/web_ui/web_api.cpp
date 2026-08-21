@@ -22,6 +22,7 @@
 #include "rf_storage_format.hpp"
 #include "sdkconfig.h"
 #include "web_form.hpp"
+#include "web_events.hpp"
 
 namespace rfbridge {
 namespace {
@@ -309,6 +310,15 @@ esp_err_t static_asset_handler(httpd_req_t *request)
                            static_cast<ssize_t>(asset->end - asset->start - 1U));
 }
 
+esp_err_t events_handler(httpd_req_t *request)
+{
+    const esp_err_t validation = require_empty_get(request);
+    if (validation != ESP_OK) {
+        return validation;
+    }
+    return web_events_handler(request);
+}
+
 esp_err_t live_handler(httpd_req_t *request)
 {
     const esp_err_t validation = require_empty_get(request);
@@ -461,11 +471,13 @@ esp_err_t live_handler(httpd_req_t *request)
         const int length = std::snprintf(
             scratch, sizeof(scratch),
             "\"automation\":{\"available\":%s,\"enabled\":%s,\"runtime_paused\":%s,"
-            "\"log_mode\":\"%s\",\"rules\":%u,\"frames\":%lu,\"matches\":%lu,"
+            "\"log_mode\":\"%s\",\"configuration_revision\":%lu,\"rules\":%u,"
+            "\"frames\":%lu,\"matches\":%lu,"
             "\"stale\":%lu,\"ambiguous\":%lu,",
             automation_error == ESP_OK && automation.available ? "true" : "false",
             automation.enabled ? "true" : "false", automation.runtime_paused ? "true" : "false",
             automation.log_mode_known ? rf_automation_log_mode_name(automation.log_mode) : "unknown",
+            static_cast<unsigned long>(automation.configuration_revision),
             automation.rule_count, static_cast<unsigned long>(automation.frames_seen),
             static_cast<unsigned long>(automation.matches),
             static_cast<unsigned long>(automation.stale_frames),
@@ -475,11 +487,12 @@ esp_err_t live_handler(httpd_req_t *request)
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "\"actions\":%lu,\"suppressed\":%lu,\"tx_errors\":%lu,"
+            "\"actions\":%lu,\"last_action_id\":%lu,\"suppressed\":%lu,\"tx_errors\":%lu,"
             "\"queue_drops\":%lu,\"log_events\":%lu,\"log_drops\":%lu,"
             "\"initialization_error\":\"%s\",\"last_error\":\"%s\","
             "\"last_trigger\":\"%s\",\"last_target\":\"%s\"},",
             static_cast<unsigned long>(automation.actions_succeeded),
+            static_cast<unsigned long>(automation.last_action_id),
             static_cast<unsigned long>(automation.cooldown_suppressed),
             static_cast<unsigned long>(automation.tx_errors),
             static_cast<unsigned long>(automation.queue_drops),
@@ -772,9 +785,10 @@ esp_err_t rules_handler(httpd_req_t *request)
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "{\"enabled\":%s,\"available\":%s,\"log_mode\":\"%s\",\"rules\":[",
+            "{\"enabled\":%s,\"available\":%s,\"log_mode\":\"%s\",\"revision\":%lu,\"rules\":[",
             status.enabled ? "true" : "false", status.available ? "true" : "false",
-            status.log_mode_known ? rf_automation_log_mode_name(status.log_mode) : "unknown");
+            status.log_mode_known ? rf_automation_log_mode_name(status.log_mode) : "unknown",
+            static_cast<unsigned long>(status.configuration_revision));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
     for (std::size_t index = 0; error == ESP_OK && index < count; ++index) {
@@ -1135,6 +1149,7 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/app.css", HTTP_GET, static_asset_handler, const_cast<StaticAsset *>(&kCssAsset)},
         {"/app.js", HTTP_GET, static_asset_handler, const_cast<StaticAsset *>(&kJsAsset)},
         {"/api/live", HTTP_GET, live_handler, nullptr},
+        {"/api/events", HTTP_GET, events_handler, nullptr},
         {"/api/recent", HTTP_GET, recent_handler, nullptr},
         {"/api/signals", HTTP_GET, signals_handler, nullptr},
         {"/api/rules", HTTP_GET, rules_handler, nullptr},

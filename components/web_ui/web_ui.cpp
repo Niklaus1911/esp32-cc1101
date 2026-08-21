@@ -13,6 +13,7 @@
 #include "ota_update.hpp"
 #include "sdkconfig.h"
 #include "web_api.hpp"
+#include "web_events.hpp"
 
 namespace rfbridge {
 namespace {
@@ -75,6 +76,14 @@ esp_err_t accept_ready_session(httpd_handle_t, int) {
 
 esp_err_t rollback_server_start(esp_err_t error) {
     s_server_ready.store(false, std::memory_order_release);
+    const esp_err_t events_error = web_events_stop();
+    if (events_error != ESP_OK) {
+        ESP_LOGW(kTag, "Could not quiesce SSE during HTTP rollback: %s",
+                 esp_err_to_name(events_error));
+        set_ota_http_server_running(false, events_error);
+        update_status(events_error, false, false, false, false);
+        return events_error;
+    }
     if (s_server != nullptr) {
         const esp_err_t stop_error = httpd_stop(s_server);
         if (stop_error != ESP_OK) {
@@ -107,8 +116,8 @@ esp_err_t start_server() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kHttpPort;
     config.stack_size = kHttpTaskStackSize;
-    config.max_uri_handlers = 22;
-    config.max_open_sockets = 2;
+    config.max_uri_handlers = 23;
+    config.max_open_sockets = 3;
     config.open_fn = accept_ready_session;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
@@ -130,6 +139,9 @@ esp_err_t start_server() {
     error = register_web_handlers(s_server);
     if (error == ESP_OK) {
         error = register_ota_http_handlers(s_server, authorize_web_ota_request, nullptr);
+    }
+    if (error == ESP_OK) {
+        error = web_events_start(s_server);
     }
     if (error == ESP_OK && !s_network_online.load(std::memory_order_acquire)) {
         error = ESP_ERR_INVALID_STATE;
@@ -170,6 +182,12 @@ esp_err_t stop_server() {
     }
     const bool was_ready = s_server_ready.exchange(false, std::memory_order_acq_rel);
     set_ota_http_server_running(false);
+    const esp_err_t events_error = web_events_stop();
+    if (events_error != ESP_OK) {
+        ESP_LOGW(kTag, "Could not stop SSE stream cleanly: %s", esp_err_to_name(events_error));
+        update_status(events_error, false, false, false, false);
+        return events_error;
+    }
     const esp_err_t error = httpd_stop(s_server);
     if (error == ESP_OK) {
         s_server = nullptr;

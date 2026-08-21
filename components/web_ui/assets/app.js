@@ -4,6 +4,12 @@ busy:false,
 pollTimer:null,
 pollController:null,
 pollGeneration:0,
+sse:null,
+sseRetry:null,
+sseTimer:null,
+sseWatchdog:null,
+sseDelay:1000,
+kinds:new Set(),
 noticeTimer:null,
 otaRebooting:false,
 otaAttempt:null,
@@ -12,12 +18,14 @@ accepted:null,
 ruleExecutions:null,
 rulePulseTimer:null,
 rulePulseItem:null,
+pulseAction:null,
 learningRevision:null,
 live:null,
 signals:[],
 recent:[],
 recentRevision:null,
 recentLoading:false,
+sigBusy:false,
 rules:[],
 activity:[],
 radioDirty:false,
@@ -46,6 +54,7 @@ const otaBoardProfiles = new Map([
 const marcStateNames = "SLEEP IDLE XOFF VCOON_MC REGON_MC MANCAL VCOON REGON STARTCAL BWBOOST FS_LOCK IFADCON ENDCAL RX RX_END RX_RST TXRX_SWITCH RXFIFO_OVERFLOW FSTXON TX TX_END RXTX_SWITCH TXFIFO_UNDERFLOW".split(" ");
 const byId = (id) => document.getElementById(id);
 const text = (value) => document.createTextNode(String(value));
+const paused = () => document.hidden || state.busy || state.otaRebooting;
 function element(tag, className, content) {
 const node = document.createElement(tag);
 if (className) node.className = className;
@@ -71,6 +80,79 @@ if (state.pollController) {
 state.pollController.abort();
 state.pollController = null;
 }
+}
+function closeEvents() {
+clearTimeout(state.sseRetry);
+clearTimeout(state.sseTimer);
+clearTimeout(state.sseWatchdog);
+state.sseTimer=null;
+state.kinds.clear();
+if (state.sse) state.sse.close();
+state.sse=null;
+}
+function armEventWatchdog() {
+clearTimeout(state.sseWatchdog);
+if (!state.sse || document.hidden) return;
+state.sseWatchdog=setTimeout(() => {
+queueRefresh("watchdog");
+armEventWatchdog();
+},30000);
+}
+async function refreshViews() {
+const pending=[...state.kinds];
+state.kinds.clear();
+cancelPolling();
+await pollLive();
+if (paused()) return;
+const signalsView=document.querySelector('[data-panel="signals"]');
+const rulesView=document.querySelector('[data-panel="rules"]');
+if (pending.includes("rx") && !signalsView.hidden) await refreshRecent();
+if (pending.includes("learning") && !signalsView.hidden) await refreshSignals();
+if (pending.includes("catalog") && (!signalsView.hidden || !rulesView.hidden)) await refreshSignalsAndRules();
+if (pending.includes("automation_config") && !rulesView.hidden) await refreshRules();
+}
+function queueRefresh(kind="live") {
+state.kinds.add(kind);
+if (state.sseTimer || paused()) return;
+state.sseTimer=setTimeout(async () => {
+try { await refreshViews(); } finally {
+state.sseTimer=null;
+if (state.kinds.size && !paused()) queueRefresh();
+armEventWatchdog();
+}
+},100);
+}
+function openEvents() {
+if (paused() || typeof EventSource !== "function") {
+schedulePoll(0);
+return;
+}
+if (state.sse) return;
+clearTimeout(state.sseRetry);
+const source=new EventSource("/api/events");
+state.sse=source;
+source.onopen=() => {
+if (state.sse !== source) return;
+state.sseDelay=1000;
+cancelPolling();
+queueRefresh("hello");
+};
+source.onerror=() => {
+if (state.sse !== source) return;
+source.close();
+state.sse=null;
+setConnection(false,"Reconnecting");
+schedulePoll(0);
+const delay=state.sseDelay;
+state.sseDelay=Math.min(state.sseDelay*2,10000);
+state.sseRetry=setTimeout(openEvents,delay);
+};
+for (const kind of ["hello","rx","automation","automation_config","catalog","learning","network","tx","hardware","ota","resync"])
+source.addEventListener(kind,(event) => { let payload={}; try { payload=JSON.parse(event.data||"{}"); } catch (_) {} if (kind === "automation" && payload.kind === "triggered" && payload.trigger) pulseRule(payload.trigger,payload.action_id); queueRefresh(kind); });
+}
+function resumeLive() {
+openEvents();
+schedulePoll(250);
 }
 function setBusy(busy) {
 state.busy = busy;
@@ -125,12 +207,14 @@ showNotice(error.message || "Request failed", "error");
 return null;
 } finally {
 setBusy(false);
-schedulePoll(0);
+queueRefresh("live");
+resumeLive();
 }
 }
 function schedulePoll(delay = state.backoff) {
 clearTimeout(state.pollTimer);
-if (!document.hidden && !state.busy && !state.pollController) {
+if (!document.hidden && !state.busy && !state.pollController &&
+(!state.sse || state.sse.readyState !== 1)) {
 state.pollTimer = setTimeout(pollLive, delay);
 }
 }
@@ -194,6 +278,7 @@ attempt.timedOut = true;
 state.otaRebooting = false;
 byId("ota-progress").hidden = true;
 setBusy(false);
+resumeLive();
 showNotice("OTA was accepted, but boot is not confirmed yet; background checks will continue", "error", true);
 }
 function finishOtaAttempt(message) {
@@ -201,6 +286,7 @@ state.otaAttempt = null;
 state.otaRebooting = false;
 byId("ota-progress").hidden = true;
 setBusy(false);
+resumeLive();
 showNotice(message, "error", true);
 }
 function completeOtaAttempt(ota) {
@@ -502,15 +588,18 @@ state.rulePulseTimer = null;
 state.rulePulseItem = null;
 }
 
-function pulseTriggeredRule(trigger) {
+function pulseRule(trigger, actionId=0) {
 const rulesView = document.querySelector('[data-panel="rules"]');
 if (!trigger || rulesView.hidden) return;
+const identified = Number.isInteger(actionId) && actionId > 0;
+if (identified && state.pulseAction === actionId) return;
 const item = [...byId("rule-list").querySelectorAll("[data-trigger]")]
 .find((candidate) => candidate.dataset.trigger === trigger);
 if (!item) return;
 clearRulePulse();
 void item.offsetWidth;
 item.classList.add("rule-triggered");
+state.pulseAction = identified ? actionId : null;
 state.rulePulseItem = item;
 state.rulePulseTimer = setTimeout(() => {
 if (state.rulePulseItem === item) clearRulePulse();
@@ -643,7 +732,9 @@ addActivity(live, live.radio.accepted - previousAccepted);
 persistActivity();
 }
 if (previousRuleExecutions !== null && ruleExecutions > previousRuleExecutions) {
-pulseTriggeredRule(live.automation.last_trigger);
+pulseRule(live.automation.last_trigger,live.automation.last_action_id);
+} else if (previousRuleExecutions !== null && ruleExecutions < previousRuleExecutions) {
+state.pulseAction=null;
 }
 if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
 live.learning.state !== "armed") refreshSignals();
@@ -780,12 +871,16 @@ document.querySelector("#rule-form button").disabled = state.busy || state.signa
 }
 
 async function refreshSignals() {
+if (state.sigBusy) return;
+state.sigBusy = true;
 try {
 const payload = await readJson("/api/signals");
 state.signals = payload.signals || [];
 renderSignals();
 } catch (error) {
 showNotice(error.message || "Could not load signals", "error");
+} finally {
+state.sigBusy = false;
 }
 }
 
@@ -998,7 +1093,11 @@ await refreshRules();
 byId("ota-form").addEventListener("submit", uploadOta);
 document.addEventListener("visibilitychange", () => {
 cancelPolling();
-if (!document.hidden) schedulePoll(0);
+if (document.hidden) {
+closeEvents();
+} else {
+resumeLive();
+}
 });
 }
 
@@ -1018,6 +1117,7 @@ async function uploadOta(event) {
 event.preventDefault();
 const file = byId("ota-file").files[0];
 if (!file || state.busy || state.otaRebooting) return;
+closeEvents();
 cancelPolling();
 setBusy(true);
 const progress = byId("ota-progress");
@@ -1051,14 +1151,14 @@ const summary = `${file.name}\nProfile: ${image.profile}\nVersion: ${image.versi
 if (!confirm(`Install and reboot RFBridge?\n\n${summary}`)) {
 progress.hidden = true;
 setBusy(false);
-schedulePoll(0);
+resumeLive();
 return;
 }
 } catch (error) {
 progress.hidden = true;
 setBusy(false);
 showNotice(error.message || "Could not validate firmware", "error", true);
-schedulePoll(0);
+resumeLive();
 return;
 }
 state.otaAttempt = {
@@ -1085,7 +1185,6 @@ const responseDigest = String(payload.candidate_elf_sha256 || "").toLowerCase();
 if ((payload.target_partition && payload.target_partition !== state.otaAttempt.targetPartition) ||
     (responseDigest && responseDigest !== state.otaAttempt.expectedDigest)) {
 finishOtaAttempt("The OTA response identity does not match the selected firmware");
-schedulePoll(0);
 return;
 }
 beginOtaConfirmation("Firmware accepted; waiting for exact boot confirmation");
@@ -1094,7 +1193,7 @@ state.otaAttempt = null;
 showNotice(payload.error || `OTA failed: HTTP ${request.status}`, "error", true);
 progress.hidden = true;
 setBusy(false);
-schedulePoll(0);
+resumeLive();
 }
 });
 request.addEventListener("error", () => {
@@ -1105,7 +1204,7 @@ state.otaAttempt = null;
 showNotice("OTA transport failed before the image was transferred", "error", true);
 progress.hidden = true;
 setBusy(false);
-schedulePoll(0);
+resumeLive();
 }
 });
 request.send(file);
@@ -1120,4 +1219,4 @@ refreshRecent()
 .then(refreshSignals)
 .then(refreshRules)
 .then(refreshOta)
-.finally(()=>schedulePoll(0))
+.finally(resumeLive)

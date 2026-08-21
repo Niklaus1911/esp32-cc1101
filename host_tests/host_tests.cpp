@@ -27,6 +27,7 @@
 #include "rf_storage_recent_format.hpp"
 #include "rf_signals_match.hpp"
 #include "web_form.hpp"
+#include "web_events_format.hpp"
 
 namespace {
 
@@ -1708,6 +1709,33 @@ void test_random_signal_candidates()
             "random signal rejects a missing result and keeps bounded retries");
 }
 
+void test_web_sse_format()
+{
+    char output[128]{};
+    std::size_t length = 0;
+    require(rfbridge::format_web_sse_event(481, "automation_config",
+                                           "{\"revision\":9}", output, sizeof(output),
+                                           &length) &&
+                std::strcmp(output,
+                            "id: 481\nevent: automation_config\ndata:{\"revision\":9}\n\n") == 0 &&
+                length == std::strlen(output),
+            "SSE event framing is exact and length-delimited");
+    char exact[55]{};
+    require(rfbridge::format_web_sse_event(481, "automation_config",
+                                           "{\"revision\":9}", exact, sizeof(exact), nullptr),
+            "SSE event framing fits the exact output capacity");
+    char short_output[54] = {'x', '\0'};
+    require(!rfbridge::format_web_sse_event(481, "automation_config",
+                                            "{\"revision\":9}", short_output,
+                                            sizeof(short_output), nullptr),
+            "SSE event framing rejects truncation");
+    require(!rfbridge::format_web_sse_event(1, "bad-name", "{}", output,
+                                            sizeof(output), nullptr) &&
+                !rfbridge::format_web_sse_event(1, "rx", "{\n}", output,
+                                                sizeof(output), nullptr),
+            "SSE framing rejects event-name and data-line injection");
+}
+
 }  // namespace
 
 int main()
@@ -1732,6 +1760,7 @@ int main()
     test_ota_policy();
     test_automation_rules();
     test_web_forms();
+    test_web_sse_format();
     test_random_signal_candidates();
     std::puts("All host RF tests passed");
     return 0;

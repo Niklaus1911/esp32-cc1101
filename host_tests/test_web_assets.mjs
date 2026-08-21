@@ -8,6 +8,7 @@ const component = join(root, "components", "web_ui");
 const api = readFileSync(join(component, "web_api.cpp"), "utf8");
 const forms = readFileSync(join(component, "web_form.cpp"), "utf8");
 const lifecycle = readFileSync(join(component, "web_ui.cpp"), "utf8");
+const webEvents = readFileSync(join(component, "web_events.cpp"), "utf8");
 const cmake = readFileSync(join(component, "CMakeLists.txt"), "utf8");
 const index = readFileSync(join(component, "assets", "index.html"), "utf8");
 const css = readFileSync(join(component, "assets", "app.css"), "utf8");
@@ -16,7 +17,8 @@ const main = readFileSync(join(root, "main", "main.cpp"), "utf8");
 const radioHeader = readFileSync(join(root, "components", "rf_ook", "include", "rf_ook.hpp"), "utf8");
 const consoleSource = readFileSync(join(root, "components", "rf_console", "rf_console.cpp"), "utf8");
 const otaSource = readFileSync(join(root, "components", "ota_update", "ota_update.cpp"), "utf8");
-const source = `${api}\n${forms}\n${lifecycle}\n${cmake}`;
+const automationSource = readFileSync(join(root, "components", "rf_automation", "rf_automation.cpp"), "utf8");
+const source = `${api}\n${forms}\n${lifecycle}\n${webEvents}\n${cmake}`;
 
 function sourceSection(content, start, end, label) {
   const startOffset = content.indexOf(start);
@@ -36,8 +38,8 @@ const occurrenceCount = (content, value) => content.split(value).length - 1;
 
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(lifecycle, /constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;/);
-assert.match(lifecycle, /config\.max_uri_handlers = 22;/);
-assert.match(lifecycle, /config\.max_open_sockets = 2;/);
+assert.match(lifecycle, /config\.max_uri_handlers = 23;/);
+assert.match(lifecycle, /config\.max_open_sockets = 3;/);
 assert.match(api, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
 assert.match(api, /web_origin_matches_device_host/);
@@ -47,6 +49,7 @@ assert.match(cmake, /EMBED_TXTFILES "assets\/index\.html" "assets\/app\.css" "as
 
 for (const route of [
   '"/api/live", HTTP_GET, live_handler',
+  '"/api/events", HTTP_GET, events_handler',
   '"/api/recent", HTTP_GET, recent_handler',
   '"/api/signals", HTTP_GET, signals_handler',
   '"/api/rules", HTTP_GET, rules_handler',
@@ -129,6 +132,66 @@ assert(hardwareRenderer.includes('["cc1101","generic"].includes') &&
        hardwareRenderer.includes("hardware_switches"),
        "RF hardware compatibility, feedback, or diagnostics renderer missing");
 assert(js.includes("/api/live") && js.includes("schedulePoll"), "live polling missing");
+assert(webEvents.includes('"text/event-stream"') &&
+       webEvents.includes("httpd_req_async_handler_begin") &&
+       webEvents.includes("httpd_req_async_handler_complete") &&
+       webEvents.includes("kEventQueueDepth = 8") &&
+       webEvents.includes("kHeartbeatInterval = pdMS_TO_TICKS(15000)") &&
+       webEvents.includes('"409 Conflict", "events_client_limit"'),
+       "bounded single-client SSE worker contract missing");
+assert(webEvents.includes("!s_client_active.load(std::memory_order_acquire)") &&
+       webEvents.includes("(void)server;\n    return ESP_OK;"),
+       "idle SSE sinks or polling-only configuration fallback missing");
+const eventsStop = sourceSection(webEvents, "esp_err_t web_events_stop()",
+                                 "esp_err_t web_events_handler(", "SSE stop");
+const eventsHandler = webEvents.slice(webEvents.indexOf("esp_err_t web_events_handler("));
+assert(eventsStop.indexOf("bridge_events_remove_sink(s_sink_id)") >= 0 &&
+       eventsStop.indexOf("bridge_events_remove_sink(s_sink_id)") <
+         eventsStop.indexOf("s_sink_registered.store(false") &&
+       eventsStop.indexOf("s_sink_registered.store(false") <
+         eventsStop.indexOf("vQueueDelete(s_event_queue)") &&
+       eventsStop.includes("return sink_error;"),
+       "SSE stop must quiesce the broker sink before deleting its queue");
+assert(eventsHandler.indexOf("s_client_active.compare_exchange_strong") >= 0 &&
+       eventsHandler.indexOf("s_client_active.compare_exchange_strong") <
+         eventsHandler.indexOf("bridge_events_add_sink(web_event_sink") &&
+       occurrenceCount(eventsHandler, "s_stopping.load(std::memory_order_acquire)") >= 2,
+       "SSE admission must reserve a client slot and recheck shutdown before shared state access");
+assert(eventsHandler.includes('"503 Service Unavailable", "events_sink_unavailable"'),
+       "SSE admission without a broker sink must fall back to polling");
+const configurationNotify = sourceSection(automationSource, "void notify_configuration(",
+                                          "uint32_t next_action_id(",
+                                          "automation configuration notification");
+const configurationSetter = automationSource.slice(
+  automationSource.indexOf("esp_err_t rf_automation_set_configuration_sink("),
+  automationSource.indexOf("esp_err_t rf_automation_get_status("));
+assert(configurationNotify.includes("ConfigurationSinkLock lock;") &&
+       configurationSetter.includes("ConfigurationSinkLock lock;") &&
+       automationSource.includes("xSemaphoreCreateRecursiveMutex()"),
+       "automation configuration sink replacement must quiesce callbacks without blocking reentrancy");
+const workerFailure = eventsHandler.slice(eventsHandler.indexOf("if (xTaskCreate("));
+assert(workerFailure.indexOf("httpd_req_async_handler_complete(copy)") >= 0 &&
+       workerFailure.indexOf("httpd_req_async_handler_complete(copy)") <
+         workerFailure.indexOf("s_client_active.store(false"),
+       "SSE worker startup failure must complete async ownership before releasing the client slot");
+assert(lifecycle.includes("const esp_err_t events_error = web_events_stop();") &&
+       lifecycle.includes("Could not quiesce SSE during HTTP rollback"),
+       "HTTP rollback must not destroy a server with an active async SSE request");
+assert(webEvents.includes('event: hello') && webEvents.includes('event: resync') &&
+       webEvents.includes('"snapshot_required\\\":true') &&
+       webEvents.includes("bridge_events_get_status"),
+       "SSE snapshot/resync contract missing");
+assert(js.includes('new EventSource("/api/events")') &&
+       js.includes('typeof EventSource !== "function"') &&
+       js.includes('schedulePoll(0)') && js.includes('source.onerror=') &&
+       js.includes('state.sseDelay=Math.min(state.sseDelay*2,10000)'),
+       "EventSource startup or polling fallback missing");
+assert(js.includes("state.sseTimer=setTimeout(async () =>") &&
+       js.includes("if (state.kinds.size && !paused())") && js.includes('},100)') &&
+       js.includes('},30000)') && js.includes('pending.includes("rx")') &&
+       js.includes('pending.includes("automation_config")') &&
+       js.includes('pulseRule(payload.trigger,payload.action_id)'),
+       "SSE coalescing, watchdog, or targeted refresh handling missing");
 const liveApi = sourceSection(api, "esp_err_t live_handler(", "esp_err_t signals_handler(",
                               "live API");
 const radioApi = sourceSection(liveApi, '"{\\"radio\\":{', '"\\"learning\\":{',
@@ -159,9 +222,9 @@ assertFields(learningApi, [
 assertFields(recentApi, ["available", "count", "revision", "errors", "last_error"],
              "live recent history");
 assertFields(automationApi, [
-  "available", "enabled", "runtime_paused", "log_mode", "rules", "frames", "matches", "stale",
+  "available", "enabled", "runtime_paused", "log_mode", "configuration_revision", "rules", "frames", "matches", "stale",
   "ambiguous", "actions", "suppressed", "tx_errors", "queue_drops", "log_events", "log_drops",
-  "initialization_error", "last_error", "last_trigger", "last_target",
+  "initialization_error", "last_error", "last_action_id", "last_trigger", "last_target",
 ], "live automation");
 assertFields(networkApi, [
   "available", "online", "rssi", "state", "driver_initialized", "driver_started", "scan_running",
@@ -363,7 +426,7 @@ const requestAction = js.slice(requestActionStart, requestActionEnd);
 const afterSuccessOffset = requestAction.indexOf(
   "if (afterSuccess) await afterSuccess(payload);");
 const finallyOffset = requestAction.indexOf("} finally {");
-const pollingOffset = requestAction.indexOf("schedulePoll(0);");
+const pollingOffset = requestAction.indexOf("resumeLive();");
 assert(requestActionStart >= 0 && requestActionEnd > requestActionStart &&
        afterSuccessOffset >= 0 && finallyOffset > afterSuccessOffset &&
        pollingOffset > finallyOffset &&
@@ -378,9 +441,9 @@ assert(compactSource(js).includes(
        compactSource(js).includes(
          "async function refreshSignalsView() { cancelPolling(); try { await refreshRecent(); await refreshSignals(); } finally { schedulePoll(0); } }") &&
        compactSource(js).includes(
-         "refreshRecent() .then(refreshSignals) .then(refreshRules) .then(refreshOta) .finally(()=>schedulePoll(0))") &&
+         "refreshRecent() .then(refreshSignals) .then(refreshRules) .then(refreshOta) .finally(resumeLive)") &&
        !js.includes("Promise.all([refresh"),
-       "Web API refreshes must stay within the two-socket server limit");
+       "Web API refreshes must remain sequential with the reserved SSE socket");
 assert(js.includes("pollController") && js.includes("cancelPolling"), "single-flight poll cancellation missing");
 assert(liveRenderer.includes("const incomingRadio=live.radio||{}") &&
        liveRenderer.includes("renderRadioHardware(incomingRadio)"),
@@ -408,8 +471,18 @@ assert(js.includes('ota.running_image_state === "valid"') &&
        "browser OTA must require exact validated boot identity before success");
 assert(js.includes("function expireOtaConfirmation(") &&
        js.includes("background checks will continue") &&
-       js.includes("otaSuccessStorageKey"),
+       js.includes("otaSuccessStorageKey") &&
+       js.includes("function resumeLive()"),
        "browser OTA timeout, late reconciliation, or one-time success feedback missing");
+const expireOta = sourceSection(js, "function expireOtaConfirmation(",
+                                "function finishOtaAttempt(", "OTA timeout");
+const failedOta = sourceSection(js, "function finishOtaAttempt(",
+                                "function completeOtaAttempt(", "OTA failure");
+assert(expireOta.includes("resumeLive();") && failedOta.includes("resumeLive();") &&
+       occurrenceCount(sourceSection(js, "async function uploadOta(",
+                                     "if (!matchMedia(", "OTA upload"),
+                       "resumeLive();") >= 4,
+       "recoverable OTA outcomes must restore the default SSE transport");
 for (const outcome of [
   "returned to ${attempt.originalPartition}",
   "target partition booted with a different firmware digest",
@@ -432,6 +505,12 @@ assert(js.includes('rulesView.hidden') && js.includes("candidate.dataset.trigger
        "visible exact-trigger rule lookup missing");
 assert(js.includes('classList.add("rule-triggered")') &&
        js.includes('classList.remove("rule-triggered")'), "rule pulse lifecycle missing");
+assert(js.includes('kind === "automation" && payload.kind === "triggered" && payload.trigger'),
+       "rule pulse must run only for the automation trigger event");
+assert(js.includes("ruleExecutions > previousRuleExecutions") &&
+       js.includes("live.automation.last_action_id") &&
+       js.includes("state.pulseAction === actionId"),
+       "snapshot and SSE rule pulses must deduplicate by automation action ID");
 assert.match(css, /\.item\.rule-triggered \{ animation: rule-trigger-pulse 900ms ease-out; \}/,
              "rule trigger animation missing");
 assert(css.includes("@keyframes rule-trigger-pulse"), "rule trigger keyframes missing");
@@ -480,7 +559,7 @@ assert.match(css, /\.firmware-disclosure\s*>\s*summary\s*\{[^}]*\bcursor\s*:\s*p
 assert.match(css, /\.firmware-disclosure\s*>\s*summary\s*\{[^}]*\bdisplay\s*:\s*list-item\s*;/,
              "firmware disclosure must retain its native expansion marker");
 for (const forbidden of [
-  '"/probe"', "text/event-stream", "WebSocket", "setInterval", "Authorization",
+  '"/probe"', "WebSocket", "setInterval", "Authorization",
   "httpd_uri_match_wildcard", "body:{command:", "no-referrer", "8032",
 ]) {
   assert(!source.includes(forbidden) && !index.includes(forbidden) && !js.includes(forbidden),
