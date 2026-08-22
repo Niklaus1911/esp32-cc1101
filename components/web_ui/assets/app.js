@@ -1,6 +1,7 @@
 "use strict";
 const state = {
 busy:false,
+busyFocus:null,
 pollTimer:null,
 pollController:null,
 pollGeneration:0,
@@ -26,6 +27,7 @@ recent:[],
 recentRevision:null,
 recentLoading:false,
 sigBusy:false,
+rulesBusy:false,
 rules:[],
 activity:[],
 radioDirty:false,
@@ -38,6 +40,8 @@ const maximumDateMilliseconds = 8640000000000000;
 const heapCriticalBytes = 12 * 1024;
 const heapWarningBytes = 24 * 1024;
 const otaConfirmationTimeoutMs = 120000;
+const requestTimeoutMs = 10000;
+const otaStallTimeoutMs = 15000;
 const otaSuccessStorageKey = "rfbridge.ota-success.v1";
 const otaImagePrefixSize = 304;
 const otaAppDescriptionOffset = 32;
@@ -63,6 +67,10 @@ return node;
 }
 function formBody(values) {
 return Object.entries(values).map(([key, value]) => `${key}=${String(value)}`).join("&");
+}
+function clampRepeats(value) {
+const repeats = Number.parseInt(value, 10);
+return Number.isInteger(repeats) ? Math.min(20, Math.max(1, repeats)) : 8;
 }
 function showNotice(message, kind = "", persistent = false) {
 const notice = byId("notice");
@@ -139,9 +147,14 @@ queueRefresh("hello");
 };
 source.onerror=() => {
 if (state.sse !== source) return;
+clearTimeout(state.sseWatchdog);
 source.close();
 state.sse=null;
-setConnection(false,"Reconnecting");
+// Polling is still healthy here: flag the stream without the full
+// disconnected sweep — pollLive owns that on a real reachability failure.
+const badge=byId("connection");
+badge.textContent="Reconnecting";
+badge.className="state state-bad";
 schedulePoll(0);
 const delay=state.sseDelay;
 state.sseDelay=Math.min(state.sseDelay*2,10000);
@@ -155,11 +168,20 @@ openEvents();
 schedulePoll(250);
 }
 function setBusy(busy) {
+if (busy && !state.busy) {
+state.busyFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+}
 state.busy = busy;
 document.querySelectorAll("main button, main input, main select, main textarea").forEach((control) => {
 if (control.id !== "ota-progress") control.disabled = busy || state.otaRebooting;
 });
 if (!busy && !state.otaRebooting) {
+const focused = state.busyFocus;
+state.busyFocus = null;
+if (focused instanceof HTMLElement && focused.isConnected &&
+focused.closest("main") && !focused.disabled) {
+focused.focus({ preventScroll: true });
+}
 renderLive(state.live);
 updateRuleSelectors();
 }
@@ -179,7 +201,9 @@ const controller = new AbortController();
 const timeout = setTimeout(() => controller.abort(), timeoutMs);
 try {
 const response = await fetch(path, { cache: "no-store", signal: controller.signal });
-const payload = await response.json();
+let payload;
+try { payload = await response.json(); } catch (_) { payload = null; }
+if (!payload) throw new Error(response.ok ? "Malformed server response" : `HTTP ${response.status}`);
 if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
 return payload;
 } finally {
@@ -190,22 +214,29 @@ async function requestAction(path, method, body = null, afterSuccess = null) {
 if (state.busy || state.otaRebooting) return null;
 cancelPolling();
 setBusy(true);
+const controller = new AbortController();
+const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 try {
-const options = { method, cache: "no-store", headers: {} };
+const options = { method, cache: "no-store", headers: {}, signal: controller.signal };
 if (body !== null) {
 options.headers["Content-Type"] = "application/x-www-form-urlencoded";
 options.body = body;
 }
 const response = await fetch(path, options);
-const payload = await response.json();
-if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+let payload;
+try { payload = await response.json(); } catch (_) { payload = null; }
+if (!response.ok || !payload || !payload.ok) {
+throw new Error((payload && payload.error) ||
+(response.ok ? "Malformed server response" : `HTTP ${response.status}`));
+}
 showNotice("Action completed", "success");
 if (afterSuccess) await afterSuccess(payload);
 return payload;
 } catch (error) {
-showNotice(error.message || "Request failed", "error");
+showNotice(error.name === "AbortError" ? "Request timed out" : error.message || "Request failed", "error");
 return null;
 } finally {
+clearTimeout(timeout);
 setBusy(false);
 queueRefresh("live");
 resumeLive();
@@ -231,7 +262,7 @@ const live = await response.json();
 if (!response.ok) throw new Error(live.error || `HTTP ${response.status}`);
 if (generation !== state.pollGeneration) return;
 state.backoff = 1000;
-setConnection(true, "Connected");
+setConnection(true, state.sse && state.sse.readyState === 1 ? "Connected" : "Polling");
 renderLive(live);
 if (state.otaAttempt) await reconcileOtaAttempt();
 } catch (error) {
@@ -348,7 +379,9 @@ sessionStorage.removeItem(otaSuccessStorageKey);
 if (!saved) return;
 try {
 const result = JSON.parse(saved);
-showNotice(`Firmware ${result.version} confirmed on ${result.partition}`, "success");
+const version = typeof result?.version === "string" && result.version ? result.version : "unknown";
+const partition = typeof result?.partition === "string" && result.partition ? result.partition : "";
+showNotice(partition ? `Firmware ${version} confirmed on ${partition}` : `Firmware ${version} confirmed`, "success");
 } catch (_) { /* Ignore invalid session data. */ }
 }
 function stateClass(value) {
@@ -709,22 +742,26 @@ function renderLearning(learning) {
 const label = byId("learning-state");
 const name = learning.name ? `: ${learning.name}` : "";
 label.textContent = `${learning.state.replace("_", " ")}${name}`;
-label.className = `state ${stateClass(learning.state)}`;
+label.className = `state ${stateClass(learning.state).replace("value-", "state-")}`;
 const armed = learning.state === "armed";
 byId("cancel-learning").hidden = !armed;
 byId("learn-name").disabled = state.busy || armed;
 document.querySelector("#learn-form button[type=submit]").disabled = state.busy || armed;
 }
 
+function safeRender(section, render) {
+try { render(); } catch (error) { console.warn(`Web UI ${section} render failed`, error); }
+}
 function renderLive(live) {
 if (!live) return;
+state.live = live;
 const incomingRadio=live.radio||{};
+safeRender("hardware", () => renderRadioHardware(incomingRadio));
 const previousAccepted = state.accepted;
 const previousRuleExecutions = state.ruleExecutions;
+safeRender("activity", () => {
 const ruleExecutions = live.automation.actions + live.automation.tx_errors;
-state.live = live;
 state.accepted = live.radio.accepted;
-renderRadioHardware(incomingRadio);
 state.ruleExecutions = ruleExecutions;
 if (previousAccepted !== null && live.radio.accepted > previousAccepted) {
 addActivity(live, live.radio.accepted - previousAccepted);
@@ -736,6 +773,8 @@ pulseRule(live.automation.last_trigger,live.automation.last_action_id);
 } else if (previousRuleExecutions !== null && ruleExecutions < previousRuleExecutions) {
 state.pulseAction=null;
 }
+});
+safeRender("revisions", () => {
 if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
 live.learning.state !== "armed") refreshSignals();
 state.learningRevision = live.learning.revision;
@@ -743,7 +782,8 @@ const recentRevision=live.recent?.revision;
 const signalsView=document.querySelector('[data-panel="signals"]');
 if (Number.isInteger(recentRevision) && recentRevision !== state.recentRevision &&
 !signalsView.hidden && !state.busy) refreshRecent();
-
+});
+safeRender("metrics", () => {
 byId("radio-state").textContent = live.radio.running ? "Running" : "Faulted";
 byId("radio-state").className = live.radio.running ? "value-ok" : "value-bad";
 byId("rx-state").textContent = live.radio.rx[0].toUpperCase() + live.radio.rx.slice(1);
@@ -751,10 +791,13 @@ byId("rx-state").className = stateClass(live.radio.rx);
 byId("network-state").textContent = live.network.online ? `${live.network.rssi} dBm` : "Offline";
 byId("network-state").className = live.network.online ? "value-ok" : "value-bad";
 byId("accepted-count").textContent = live.radio.accepted;
-renderLast(live.last);
-renderLearning(live.learning);
+});
+safeRender("last-frame", () => renderLast(live.last));
+safeRender("learning", () => renderLearning(live.learning));
+safeRender("automation-summary", () => {
 byId("automation-summary").textContent = `${live.automation.rules} rules / ${live.automation.actions} actions`;
-renderSystem(live);
+});
+safeRender("system", () => { renderSystem(live); });
 }
 
 function signalMeta(signal) {
@@ -841,6 +884,7 @@ repeats.type = "number";
 repeats.min = "1";
 repeats.max = "20";
 repeats.value = "8";
+repeats.dataset.role = "repeats";
 repeats.setAttribute("aria-label", `Repeats for ${signal.name}`);
 const replay = element("button", "primary", "Replay");
 replay.type = "button";
@@ -854,6 +898,16 @@ fragment.append(item);
 });
 target.replaceChildren(fragment);
 updateRuleSelectors();
+}
+
+function restoreListFocus(listId, rowSelector, preferredValue, fallbackIndex) {
+const rows = [...byId(listId).querySelectorAll(rowSelector)];
+const target = rows.find((row) => row.dataset.name === preferredValue ||
+row.dataset.recentId === preferredValue || row.dataset.trigger === preferredValue) ||
+rows[Math.min(Math.max(fallbackIndex, 0), rows.length - 1)];
+const button = target?.querySelector("button:not([hidden])");
+if (button) button.focus({ preventScroll: true });
+else byId(listId).focus({ preventScroll: true });
 }
 
 function updateRuleSelectors() {
@@ -911,10 +965,14 @@ target.replaceChildren(fragment);
 }
 
 async function refreshRules() {
+if (state.rulesBusy) return;
+state.rulesBusy = true;
 try {
 renderRules(await readJson("/api/rules"));
 } catch (error) {
 showNotice(error.message || "Could not load rules", "error");
+} finally {
+state.rulesBusy = false;
 }
 }
 
@@ -961,7 +1019,12 @@ return null;
 }
 
 function activateView(name) {
-document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
+document.querySelectorAll(".tab").forEach((tab) => {
+const active = tab.dataset.view === name;
+tab.classList.toggle("active", active);
+if (active) tab.setAttribute("aria-current", "true");
+else tab.removeAttribute("aria-current");
+});
 document.querySelectorAll(".view").forEach((panel) => {
 const active = panel.dataset.panel === name;
 panel.hidden = !active;
@@ -1001,7 +1064,7 @@ byId("signal-save-code").value = "";
 await refreshSignalsAndRules();
 });
 byId("cancel-learning").addEventListener("click", () => requestAction("/api/learn", "DELETE"));
-byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: byId("last-repeats").value })));
+byId("replay-last").addEventListener("click", () => requestAction("/api/replay", "POST", formBody({ name: "", repeats: clampRepeats(byId("last-repeats").value) })));
 byId("clear-activity").addEventListener("click", () => {
 state.activity = [];
 removeStoredActivity();
@@ -1031,7 +1094,7 @@ const selected = byId("radio-hardware").value;
 const result = await requestAction("/api/radio/hardware","POST",formBody({hardware:selected}));
 state.radioDirty=false;
 renderRadioHardware(state.live?.radio);
-if (!result) showNotice("RF hardware switch failed; active backend restored", "error");
+if (!result) byId("radio-hardware-feedback").textContent = "RF hardware switch failed; active backend restored";
 };
 
 byId("signal-list").addEventListener("click", async (event) => {
@@ -1040,11 +1103,14 @@ const item = event.target.closest("[data-name]");
 if (!button || !item) return;
 const name = item.dataset.name;
 if (button.dataset.action === "replay") {
-const repeats = item.querySelector("input").value;
+const repeats = clampRepeats(item.querySelector("[data-role=repeats]").value);
 await requestAction("/api/replay", "POST", formBody({ name, repeats }));
 } else if (button.dataset.action === "delete" && confirm(`Delete learned signal ${name}?`)) {
+const rows = [...byId("signal-list").querySelectorAll("[data-name]")];
+const index = rows.indexOf(item);
 await requestAction("/api/signals", "DELETE", formBody({ name }), async () => {
 await refreshSignalsAndRules();
+restoreListFocus("signal-list", "[data-name]", name, index);
 });
 }
 });
@@ -1055,15 +1121,21 @@ const item = event.target.closest("[data-recent-id]");
 if (!button || !item) return;
 const id = item.dataset.recentId;
 if (button.dataset.action === "replay-recent") {
-const repeats = item.querySelector("[data-role=repeats]").value;
+const repeats = clampRepeats(item.querySelector("[data-role=repeats]").value);
+const rows = [...byId("recent-list").querySelectorAll("[data-recent-id]")];
+const index = rows.indexOf(item);
 await requestAction("/api/recent", "POST", formBody({ action: "replay", id, repeats }));
 await refreshRecent();
+restoreListFocus("recent-list", "[data-recent-id]", id, index);
 } else if (button.dataset.action === "save-recent") {
 const name = item.querySelector("[data-role=name]");
 name.value = name.value.trim();
 if (!name.reportValidity()) return;
+const rows = [...byId("recent-list").querySelectorAll("[data-recent-id]")];
+const index = rows.indexOf(item);
 const saved = await requestAction("/api/recent", "POST", formBody({ action: "save", id, name: name.value }));
 await refreshRecent();
+restoreListFocus("recent-list", "[data-recent-id]", id, index);
 if (saved) await refreshSignals();
 }
 });
@@ -1078,7 +1150,13 @@ byId("rule-list").addEventListener("click", async (event) => {
 const button = event.target.closest("[data-action=remove-rule]");
 const item = event.target.closest("[data-trigger]");
 if (button && item && confirm(`Remove rule triggered by ${item.dataset.trigger}?`)) {
-if (await requestAction("/api/rules", "DELETE", formBody({ name: item.dataset.trigger }))) await refreshRules();
+const trigger = item.dataset.trigger;
+const rows = [...byId("rule-list").querySelectorAll("[data-trigger]")];
+const index = rows.indexOf(item);
+if (await requestAction("/api/rules", "DELETE", formBody({ name: trigger }))) {
+await refreshRules();
+restoreListFocus("rule-list", "[data-trigger]", trigger, index);
+}
 }
 });
 byId("automation-enabled").addEventListener("change", async (event) => {
@@ -1171,13 +1249,28 @@ timedOut: false,
 };
 const request = new XMLHttpRequest();
 let uploadComplete = false;
+let lastProgressAt = Date.now();
+let stallTimer = null;
+const armStallWatchdog = () => {
+clearTimeout(stallTimer);
+stallTimer = setTimeout(() => {
+if (uploadComplete || Date.now() - lastProgressAt < otaStallTimeoutMs) {
+armStallWatchdog();
+return;
+}
+request.abort();
+}, 1000);
+};
+armStallWatchdog();
 request.open("POST", "/api/v1/ota");
 request.setRequestHeader("Content-Type", "application/octet-stream");
 request.upload.addEventListener("progress", (upload) => {
+lastProgressAt = Date.now();
 if (upload.lengthComputable) progress.value = Math.round((upload.loaded / upload.total) * 100);
 });
 request.upload.addEventListener("load", () => { uploadComplete = true; });
 request.addEventListener("load", () => {
+clearTimeout(stallTimer);
 let payload = {};
 try { payload = JSON.parse(request.responseText); } catch (_) { payload = {}; }
 if (request.status === 200 && payload.ok) {
@@ -1196,7 +1289,8 @@ setBusy(false);
 resumeLive();
 }
 });
-request.addEventListener("error", () => {
+const transportFailed = () => {
+clearTimeout(stallTimer);
 if (uploadComplete) {
 beginOtaConfirmation("The upload connection closed after transfer; checking the boot outcome");
 } else {
@@ -1206,7 +1300,10 @@ progress.hidden = true;
 setBusy(false);
 resumeLive();
 }
-});
+};
+// XHR abort() fires "abort", not "error" — the stall watchdog path must be handled too.
+request.addEventListener("error", transportFailed);
+request.addEventListener("abort", transportFailed);
 request.send(file);
 }
 

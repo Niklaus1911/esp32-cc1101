@@ -19,13 +19,13 @@
           <p id="device-state" class="subtle">Connecting</p>
         </div>
       </div>
-      <span id="connection" class="state state-warn">Connecting</span>
+      <span id="connection" class="state state-warn" role="status">Connecting</span>
     </div>
   </header>
 
   <nav class="tabs" aria-label="Primary views">
     <div class="tabs-inner">
-      <button type="button" class="tab active" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h4l3 7 4-14 3 7h4"/></svg><span>Overview</span></button>
+      <button type="button" class="tab active" aria-current="true" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h4l3 7 4-14 3 7h4"/></svg><span>Overview</span></button>
       <button type="button" class="tab" data-view="signals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 8v8M8 5v14M12 9v6M16 4v16M20 8v8"/></svg><span>Signals</span></button>
       <button type="button" class="tab" data-view="transmit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M4.6 4.6a10 10 0 0 0 0 14.8M19.4 4.6a10 10 0 0 1 0 14.8"/></svg><span>Transmit</span></button>
       <button type="button" class="tab" data-view="rules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 6h9M5 6a2 2 0 1 0 0 .01"/><path d="M14 6a5 5 0 0 1 5 5v2a5 5 0 0 1-5 5H8"/><path d="m11 14-3 4 3 4"/></svg><span>Rules</span></button>
@@ -56,7 +56,7 @@
       </section>
 
       <section class="band">
-        <div class="section-heading"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 4v5m0 0 3-2m-3 2L9 7"/><rect x="5" y="11" width="14" height="9" rx="2"/></svg>Learning</h2><span id="learning-state" class="state">Idle</span></div>
+        <div class="section-heading"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 4v5m0 0 3-2m-3 2L9 7"/><rect x="5" y="11" width="14" height="9" rx="2"/></svg>Learning</h2><span id="learning-state" class="state" role="status">Idle</span></div>
         <form id="learn-form" class="form-row">
           <label>Signal name<input id="learn-name" name="name" maxlength="15" pattern="[A-Za-z][A-Za-z0-9_\-]{0,14}" required></label>
           <button type="submit" class="primary">Arm learning</button>
@@ -84,7 +84,7 @@
             <button id="clear-recent" type="button" class="danger">Clear history</button>
           </div>
         </div>
-        <div id="recent-list" class="item-list"><p class="empty">Loading recent signals.</p></div>
+        <div id="recent-list" class="item-list" tabindex="-1"><p class="empty">Loading recent signals.</p></div>
       </section>
       <section class="band">
         <div class="section-heading">
@@ -102,7 +102,7 @@
           <label>Pulse us<input name="pulse_us" type="number" inputmode="numeric" min="0" max="29000" value="0" required></label>
           <button type="submit" class="primary command">Save signal</button>
         </form>
-        <div id="signal-list" class="item-list"><p class="empty">Loading signals.</p></div>
+        <div id="signal-list" class="item-list" tabindex="-1"><p class="empty">Loading signals.</p></div>
       </section>
     </section>
 
@@ -147,7 +147,7 @@
       </section>
       <section class="band">
         <div class="section-heading"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="5" cy="6" r="1.4"/><circle cx="5" cy="12" r="1.4"/><circle cx="5" cy="18" r="1.4"/></svg>Rules</h2><button id="refresh-rules" type="button" class="quiet">Refresh</button></div>
-        <div id="rule-list" class="item-list"><p class="empty">Loading rules.</p></div>
+        <div id="rule-list" class="item-list" tabindex="-1"><p class="empty">Loading rules.</p></div>
       </section>
     </section>
 
