@@ -46,17 +46,21 @@ assert(switching.includes("if (previous == hardware)") &&
 assert(switching.includes("s_start_override_valid.store(true") &&
        switching.includes("start_rf_ook_owned(callback, context)"),
        "a target restart must not be replaced by the previous NVS selection");
+assert(switching.includes("const RfFrameCallback callback = s_frame_callback != nullptr ? s_frame_callback : restart_callback") &&
+       switching.includes("const bool should_start = callback != nullptr") &&
+       switching.includes("if (was_running || should_start)"),
+       "a stopped service must restart through the caller-provided frame callback");
 assert((switching.match(/restart_with\(previous\)/g) ?? []).length === 2,
        "activation and persistence failures must both roll back the running backend");
-assert(switching.includes("else { s_hardware.store(previous, std::memory_order_release); }"),
-       "a stopped service must restore its previous in-memory backend on persistence failure");
+assert(switching.includes("else { s_hardware.store(previous, std::memory_order_release);") &&
+       switching.includes("prepare_backend_gpio_ownership(previous)"),
+       "a stopped service must restore its previous backend and GPIO ownership on persistence failure");
 
-assertOrder(switching, [
-  "const RfHardware previous",
-  "const bool was_running",
+const activeSwitch = switching.slice(switching.indexOf("const BoardInfo &board"));
+assertOrder(activeSwitch, [
   "stop_rf_ook_owned();",
   "const esp_err_t start_error = restart_with(hardware);",
-  "const esp_err_t rollback_error = restart_with(previous);",
+  "rollback_error = restart_with(previous);",
   "const esp_err_t persist_error = rf_storage_hardware_set(hardware);",
 ], "activation before persistence");
 assertOrder(switching, [
@@ -71,13 +75,15 @@ const coordination = sourceSection(
   "esp_err_t bridge_control_reset_radio(", "shared switch coordination");
 assertOrder(coordination, [
   "RfAutomationPauseReason::kHardwareSwitch, true",
-  "set_rf_hardware(hardware)",
+  "set_rf_hardware(hardware, rf_signals_on_frame, nullptr)",
   "RfAutomationPauseReason::kHardwareSwitch, false",
   "bridge_events_publish(event)",
 ], "automation isolation and switch event");
 assert(coordination.includes("event.type = BridgeEventType::kHardwareSwitch") &&
        coordination.includes("event.result = switch_error != ESP_OK ? switch_error : resume_error"),
        "the shared switch event must report success, activation failure, or resume failure");
+assert(coordination.includes("set_rf_hardware(hardware, rf_signals_on_frame, nullptr)"),
+       "bridge hardware switches must provide the normal RF frame callback for stopped recovery");
 
 const start = sourceSection(radio, "esp_err_t start_rf_ook(", "esp_err_t stop_rf_ook_owned(",
                             "public RF start guard");
@@ -96,9 +102,38 @@ assert(radio.includes("status->hardware = stored_hardware") &&
            statusGetter.indexOf("status->hardware = stored_hardware") &&
        !statusGetter.includes("s_hardware.store(stored_hardware"),
        "stopped status reads must not mutate the selected backend");
-assert(radio.includes("gpio_set_pull_mode") && radio.includes("GPIO_PULLDOWN_ONLY") &&
-       radio.includes("force_generic_tx_idle();"),
-       "generic GPIO idle and pull-down safety contracts missing");
+const ownership = sourceSection(
+  radio, "esp_err_t prepare_backend_gpio_ownership(", "esp_err_t arm_receiver_owned(",
+  "RF backend GPIO ownership");
+assert(ownership.includes("gpio_is_cc1101_pin(gpios, gpios.generic_tx)") &&
+       ownership.includes("gpio_is_cc1101_pin(gpios, gpios.generic_rx)") &&
+       (ownership.match(/gpio_reset_pin/g) ?? []).length === 2 &&
+       ownership.includes("hardware == RfHardware::kGeneric || !generic_tx_shared"),
+       "shared GPIOs must be released before backend-specific ownership");
+const startup = sourceSection(
+  radio, "esp_err_t start_rf_ook_owned(", "esp_err_t start_rf_ook(", "owned RF startup");
+assertOrder(startup, [
+  "prepare_backend_gpio_ownership(selected_hardware)",
+  "s_radio.initialize(radio_config)",
+  "initialize_rmt()",
+], "shared GPIO release before CC1101 and RMT initialization");
+const cleanup = sourceSection(
+  radio, "esp_err_t cleanup_resources()", "bool capture_input_is_valid(", "RF cleanup");
+assert(cleanup.includes("const bool generic_tx_shared = gpio_is_cc1101_pin") &&
+       cleanup.includes("if (using_generic_hardware() || !generic_tx_shared) {") &&
+       radio.includes("gpio_set_pull_mode") && radio.includes("GPIO_PULLDOWN_ONLY"),
+       "shared GPIO-aware TX idle cleanup and RX pull-down contracts missing");
+assertOrder(cleanup, [
+  "rmt_del_channel(s_rx_channel)",
+  "rmt_del_channel(s_tx_channel)",
+  "rmt_del_encoder(s_copy_encoder)",
+  "s_radio.deinitialize()",
+  "const bool generic_tx_shared",
+  "gpio_reset_pin",
+], "CC1101 teardown before shared GPIO release");
+assert(switching.includes("prepare_backend_gpio_ownership(hardware)") &&
+       switching.includes("prepare_backend_gpio_ownership(previous)"),
+       "stopped backend switching must apply and roll back GPIO ownership");
 
 const persistence = sourceSection(
   storage, "esp_err_t rf_storage_hardware_set(",

@@ -13,6 +13,8 @@ sseDelay:1000,
 kinds:new Set(),
 noticeTimer:null,
 otaRebooting:false,
+genericRebooting:false,
+genericRebootAttempt:null,
 otaAttempt:null,
 backoff:1000,
 accepted:null,
@@ -31,6 +33,7 @@ rulesBusy:false,
 rules:[],
 activity:[],
 radioDirty:false,
+genericGpioDirty:false,
 };
 const activityStorageKey = "rfbridge.observed-activity.v1";
 const activityStorageVersion = 1;
@@ -40,6 +43,8 @@ const maximumDateMilliseconds = 8640000000000000;
 const heapCriticalBytes = 12 * 1024;
 const heapWarningBytes = 24 * 1024;
 const otaConfirmationTimeoutMs = 120000;
+const genericRebootConfirmationTimeoutMs = 60000;
+const genericRebootRetryMs = 1000;
 const requestTimeoutMs = 10000;
 const otaStallTimeoutMs = 15000;
 const otaSuccessStorageKey = "rfbridge.ota-success.v1";
@@ -58,7 +63,7 @@ const otaBoardProfiles = new Map([
 const marcStateNames = "SLEEP IDLE XOFF VCOON_MC REGON_MC MANCAL VCOON REGON STARTCAL BWBOOST FS_LOCK IFADCON ENDCAL RX RX_END RX_RST TXRX_SWITCH RXFIFO_OVERFLOW FSTXON TX TX_END RXTX_SWITCH TXFIFO_UNDERFLOW".split(" ");
 const byId = (id) => document.getElementById(id);
 const text = (value) => document.createTextNode(String(value));
-const paused = () => document.hidden || state.busy || state.otaRebooting;
+const paused = () => document.hidden || state.busy || state.otaRebooting || state.genericRebooting;
 function element(tag, className, content) {
 const node = document.createElement(tag);
 if (className) node.className = className;
@@ -173,9 +178,9 @@ state.busyFocus = document.activeElement instanceof HTMLElement ? document.activ
 }
 state.busy = busy;
 document.querySelectorAll("main button, main input, main select, main textarea").forEach((control) => {
-if (control.id !== "ota-progress") control.disabled = busy || state.otaRebooting;
+if (control.id !== "ota-progress") control.disabled = busy || state.otaRebooting || state.genericRebooting;
 });
-if (!busy && !state.otaRebooting) {
+if (!busy && !state.otaRebooting && !state.genericRebooting) {
 const focused = state.busyFocus;
 state.busyFocus = null;
 if (focused instanceof HTMLElement && focused.isConnected &&
@@ -196,6 +201,67 @@ if (connected) return;
 document.querySelectorAll("#system-status .metric strong, #system-status .section-heading > .state")
 .forEach((target) => setStatus(target.id, "Disconnected", "bad", target.classList.contains("state")));
 }
+function finishGenericReboot(live, errorMessage = "") {
+const attempt=state.genericRebootAttempt;
+if (attempt?.timer) clearTimeout(attempt.timer);
+state.genericRebootAttempt=null;
+state.genericRebooting=false;
+if (live) {
+renderLive(live);
+setConnection(true,"Polling");
+}
+setBusy(false);
+resumeLive();
+if (errorMessage) {
+showNotice(errorMessage,"error",true);
+return;
+}
+showNotice(`Generic GPIO settings applied: TX GPIO ${attempt.tx} / RX GPIO ${attempt.rx}`,"success");
+}
+async function reconcileGenericReboot() {
+const attempt=state.genericRebootAttempt;
+if (!attempt || !state.genericRebooting) return;
+let live=null;
+try {
+live=await readJson("/api/live");
+} catch (_) { /* The device is expected to disappear while rebooting. */ }
+if (attempt !== state.genericRebootAttempt) return;
+if (live) {
+attempt.lastLive=live;
+const generic=live.board?.generic;
+if (generic?.tx===attempt.tx && generic?.rx===attempt.rx && generic?.pending===false) {
+finishGenericReboot(live);
+return;
+}
+renderLive(live);
+setConnection(true,"Confirming");
+} else {
+setConnection(false,"Rebooting");
+}
+if (Date.now() >= attempt.deadline) {
+const message=attempt.lastLive
+?`Device reconnected without applying TX GPIO ${attempt.tx} / RX GPIO ${attempt.rx}; review the active mapping and retry.`
+:"Device did not reconnect within 60 seconds; check power and network, then reload this page.";
+finishGenericReboot(attempt.lastLive,message);
+return;
+}
+attempt.timer=setTimeout(reconcileGenericReboot,genericRebootRetryMs);
+}
+function beginGenericReboot(txGpio, rxGpio) {
+closeEvents();
+cancelPolling();
+state.genericRebooting = true;
+state.genericRebootAttempt={
+tx:Number(txGpio),
+rx:Number(rxGpio),
+deadline:Date.now()+genericRebootConfirmationTimeoutMs,
+lastLive:null,
+timer:null,
+};
+setConnection(false, "Rebooting");
+showNotice("Generic GPIO settings saved; device is rebooting", "success", true);
+state.genericRebootAttempt.timer=setTimeout(reconcileGenericReboot,genericRebootRetryMs);
+}
 async function readJson(path, timeoutMs = 3500) {
 const controller = new AbortController();
 const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -211,9 +277,10 @@ clearTimeout(timeout);
 }
 }
 async function requestAction(path, method, body = null, afterSuccess = null) {
-if (state.busy || state.otaRebooting) return null;
+if (state.busy || state.otaRebooting || state.genericRebooting) return null;
 cancelPolling();
 setBusy(true);
+let rebootingResponse = false;
 const controller = new AbortController();
 const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 try {
@@ -229,7 +296,12 @@ if (!response.ok || !payload || !payload.ok) {
 throw new Error((payload && payload.error) ||
 (response.ok ? "Malformed server response" : `HTTP ${response.status}`));
 }
+if (payload.rebooting) {
+rebootingResponse = true;
+beginGenericReboot(payload.tx_gpio,payload.rx_gpio);
+} else {
 showNotice("Action completed", "success");
+}
 if (afterSuccess) await afterSuccess(payload);
 return payload;
 } catch (error) {
@@ -238,13 +310,15 @@ return null;
 } finally {
 clearTimeout(timeout);
 setBusy(false);
+if (!rebootingResponse) {
 queueRefresh("live");
 resumeLive();
 }
 }
+}
 function schedulePoll(delay = state.backoff) {
 clearTimeout(state.pollTimer);
-if (!document.hidden && !state.busy && !state.pollController &&
+if (!document.hidden && !state.busy && !state.otaRebooting && !state.genericRebooting && !state.pollController &&
 (!state.sse || state.sse.readyState !== 1)) {
 state.pollTimer = setTimeout(pollLive, delay);
 }
@@ -438,6 +512,51 @@ if(!supported){feedback.textContent="Backend selection unavailable on this firmw
 const error=hasError(radio.hardware_switch_error)?` / last switch ${radio.hardware_switch_error}`:"";
 feedback.textContent=`Active: ${radio.hardware}${error} / switches ${radio.hardware_switches??0}`;
 feedback.className=`subtle ${error?"value-warn":""}`.trim();
+}
+
+function genericGpioOverlapsCc1101(tx, rx) {
+const chip = state.live?.board?.cc1101;
+if (!chip) return false;
+const pins = [chip.sclk, chip.miso, chip.mosi, chip.cs, chip.gdo0_tx, chip.gdo2_rx];
+return pins.includes(Number(tx)) || pins.includes(Number(rx));
+}
+
+function renderGenericGpio(generic) {
+const txSelect=byId("generic-tx-gpio"),rxSelect=byId("generic-rx-gpio");
+const apply=byId("apply-generic-gpio"),feedback=byId("generic-gpio-feedback");
+const txOptions=Array.isArray(generic?.tx_options)?generic.tx_options.filter(Number.isInteger):[];
+const rxOptions=Array.isArray(generic?.rx_options)?generic.rx_options.filter(Number.isInteger):[];
+const selectedTx=state.genericGpioDirty?txSelect.value:(generic?.saved?generic.saved_tx:generic?.tx);
+const selectedRx=state.genericGpioDirty?rxSelect.value:(generic?.saved?generic.saved_rx:generic?.rx);
+const fill=(select,options,selected)=>{
+select.replaceChildren(...options.map((gpio)=>{
+const option=document.createElement("option"); option.value=String(gpio); option.textContent=`GPIO ${gpio}`; return option;
+}));
+select.value=options.includes(Number(selected))?String(selected):"";
+};
+fill(txSelect,txOptions,selectedTx); fill(rxSelect,rxOptions,selectedRx);
+const tx=txSelect.value,rx=rxSelect.value;
+[...txSelect.options].forEach((option)=>{ option.disabled=option.value===rx; });
+[...rxSelect.options].forEach((option)=>{ option.disabled=option.value===tx; });
+const duplicate=Boolean(tx&&rx&&tx===rx);
+const overlap=tx&&rx?genericGpioOverlapsCc1101(tx,rx):Boolean(generic?.overlap_cc1101);
+const warning=byId("generic-gpio-warning");
+warning.textContent=overlap
+?"Selected GPIO overlaps CC1101 wiring. Disconnect both modules before using this mapping."
+:"Disconnect the Generic ASK/OOK and CC1101 modules before changing wiring or using overlapping GPIOs.";
+warning.className=`security-note ${overlap?"value-warn":""}`.trim();
+txSelect.setAttribute("aria-invalid",duplicate?"true":"false");
+rxSelect.setAttribute("aria-invalid",duplicate?"true":"false");
+const error=generic?.configuration_error&&generic.configuration_error!=="ESP_OK"
+?` / config ${generic.configuration_error}`:"";
+feedback.textContent=generic?.pending
+?`Pending reboot: TX GPIO ${generic.saved_tx} / RX GPIO ${generic.saved_rx}${error}`
+:`Active: TX GPIO ${generic?.tx??"-"} / RX GPIO ${generic?.rx??"-"}${error}`;
+feedback.className=`subtle ${duplicate||error?"value-warn":""}`.trim();
+apply.disabled=state.busy||state.otaRebooting||state.genericRebooting||!state.genericGpioDirty||
+!tx||!rx||duplicate||!txOptions.includes(Number(tx))||!rxOptions.includes(Number(rx));
+txSelect.disabled=state.busy||state.otaRebooting||state.genericRebooting||txOptions.length===0;
+rxSelect.disabled=state.busy||state.otaRebooting||state.genericRebooting||rxOptions.length===0;
 }
 
 function formatState(v) { return !v ? "-" : v === "waiting_dhcp" ? "Waiting for DHCP" :
@@ -757,6 +876,7 @@ if (!live) return;
 state.live = live;
 const incomingRadio=live.radio||{};
 safeRender("hardware", () => renderRadioHardware(incomingRadio));
+safeRender("generic-gpio", () => renderGenericGpio(live.board?.generic||{}));
 const previousAccepted = state.accepted;
 const previousRuleExecutions = state.ruleExecutions;
 safeRender("activity", () => {
@@ -1095,6 +1215,22 @@ const result = await requestAction("/api/radio/hardware","POST",formBody({hardwa
 state.radioDirty=false;
 renderRadioHardware(state.live?.radio);
 if (!result) byId("radio-hardware-feedback").textContent = "RF hardware switch failed; active backend restored";
+};
+byId("generic-tx-gpio").onchange=()=>{
+state.genericGpioDirty=true;
+renderGenericGpio(state.live?.board?.generic||{});
+};
+byId("generic-rx-gpio").onchange=()=>{
+state.genericGpioDirty=true;
+renderGenericGpio(state.live?.board?.generic||{});
+};
+byId("apply-generic-gpio").onclick=async()=>{
+const tx=byId("generic-tx-gpio").value,rx=byId("generic-rx-gpio").value;
+const result=await requestAction("/api/radio/generic-gpio","POST",formBody({tx_gpio:tx,rx_gpio:rx}));
+if (result) {
+state.genericGpioDirty=false;
+renderGenericGpio(state.live?.board?.generic||{});
+}
 };
 
 byId("signal-list").addEventListener("click", async (event) => {

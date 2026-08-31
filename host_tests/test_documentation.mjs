@@ -29,13 +29,13 @@ const profiles = [
   {
     name: "esp32s3-devkitc-n16r8",
     cc: [12, 13, 11, 10, 4, 5],
-    generic: [6, 7],
+    generic: [13, 4],
     slot: "0x7e0000",
     secondOffset: "0x800000",
     policyConsole: "ConsoleTransport::kUart0",
     policyActivity: ".activity_led_gpio = -1",
     readmeProfile: "| `esp32s3-devkitc-n16r8` | ESP32-S3 | 16 MB / 8 MB Octal | UART0 GPIO43/44 through USB-UART | Disabled by default; GPIO48 reserved | `web`, `mqtt`, `both` |",
-    readmePins: "| `esp32s3-devkitc-n16r8` | `12/13/11/10/4/5` | `6/7` |",
+    readmePins: "| `esp32s3-devkitc-n16r8` | `12/13/11/10/4/5` | `13/4` |",
     toolingFacts: "16 MB / 8 MB Octal | UART0 GPIO43/44 / disabled, GPIO48 reserved",
   },
   {
@@ -144,5 +144,15 @@ assert(tooling.includes("XIAO profile has no approved local wired path"),
        "tooling guide XIAO wired-access boundary missing");
 assert(!readme.includes("/dev/ttyUSB") && !readme.includes("/dev/ttyACM"),
        "README must not recommend unstable serial device names");
+for (const contract of [
+  "Generic TX/RX GPIOs",
+  "must not be connected simultaneously",
+  "power removed",
+]) {
+  assert(readme.includes(contract) || readme.includes("Generic pins may overlap"),
+         `README GPIO configuration warning missing: ${contract}`);
+  assert(tooling.includes(contract) || tooling.includes("Generic pins may overlap"),
+         `tooling GPIO configuration warning missing: ${contract}`);
+}
 
 console.log("Documentation contracts passed");

@@ -18,6 +18,9 @@ esp_err_t rf_storage_list(RfStorageName *names, std::size_t capacity, std::size_
 esp_err_t rf_storage_forget(const char *name);
 esp_err_t rf_storage_hardware_get(RfHardware *hardware, bool *persisted = nullptr);
 esp_err_t rf_storage_hardware_set(RfHardware hardware);
+esp_err_t rf_storage_generic_gpio_get(uint8_t *profile_id, uint8_t *tx_gpio, uint8_t *rx_gpio,
+                                       bool *persisted = nullptr);
+esp_err_t rf_storage_generic_gpio_set(uint8_t profile_id, uint8_t tx_gpio, uint8_t rx_gpio);
 esp_err_t rf_storage_recent_initialization_error();
 esp_err_t rf_storage_recent_append(const DecodedSignal &decoded,
                                    RfRecentSignal *appended = nullptr);

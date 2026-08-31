@@ -33,12 +33,21 @@ function assertFields(content, fields, label) {
   }
 }
 
+function assertOrder(content, fragments, label) {
+  let offset = -1;
+  for (const fragment of fragments) {
+    const next = content.indexOf(fragment, offset + 1);
+    assert(next > offset, `${label} ordering missing: ${fragment}`);
+    offset = next;
+  }
+}
+
 const compactSource = (content) => content.replace(/\s+/g, " ");
 const occurrenceCount = (content, value) => content.split(value).length - 1;
 
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(lifecycle, /constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;/);
-assert.match(lifecycle, /config\.max_uri_handlers = 23;/);
+assert.match(lifecycle, /config\.max_uri_handlers = 24;/);
 assert.match(lifecycle, /config\.max_open_sockets = 3;/);
 assert.match(api, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
@@ -66,10 +75,26 @@ for (const route of [
   '"/api/rules", HTTP_DELETE, remove_rule_handler',
   '"/api/rules", HTTP_PATCH, patch_rule_handler',
   '"/api/radio/hardware", HTTP_POST, hardware_handler',
+  '"/api/radio/generic-gpio", HTTP_POST, generic_gpio_handler',
 ]) assert(api.includes(route), `missing Web route: ${route}`);
 
 assert(source.includes("register_ota_http_handlers"), "OTA must share the Web server");
 assert(source.includes("authorize_web_ota_request"), "OTA must use Host/origin authorization");
+assert(otaSource.includes("reserve_system_reboot") &&
+       otaSource.includes("cancel_system_reboot") &&
+       otaSource.includes("commit_system_reboot") &&
+       otaSource.includes("s_external_reboot_pending") &&
+       otaSource.includes("vTaskDelay(pdMS_TO_TICKS(1000))"),
+       "system reboot reservation must use the bounded OTA reboot task");
+const otaUpload = sourceSection(otaSource, "esp_err_t upload_handler(", "void reboot_task(",
+                                "OTA upload handler");
+assert(occurrenceCount(otaUpload, "s_external_reboot_pending.load") >= 2 &&
+       otaUpload.indexOf("s_upload_active.compare_exchange_strong") <
+         otaUpload.lastIndexOf("s_external_reboot_pending.load") &&
+       otaUpload.includes("s_upload_active.store(false"),
+       "OTA upload admission must recheck and release after racing a reboot reservation");
+assert(main.indexOf("initialize_rf_generic_gpio_config()") < main.indexOf("initialize_web_ui()"),
+       "Generic GPIO configuration must load before Web UI startup");
 for (const field of [
   "board_profile", "running_elf_sha256", "candidate_elf_sha256", "running_image_state",
   "running_image_state_error", "confirmation_error", "initialization_error",
@@ -122,6 +147,25 @@ assert(index.includes("Install and reboot"), "OTA control missing");
 assert(index.includes('id="radio-hardware"') && index.includes('id="apply-radio-hardware"') &&
        js.includes('requestAction("/api/radio/hardware","POST"'),
        "explicit Web RF hardware selector contract missing");
+assert(index.includes('id="generic-tx-gpio"') && index.includes('id="generic-rx-gpio"') &&
+       index.includes('id="apply-generic-gpio"') && index.includes('id="generic-gpio-warning"') &&
+       js.includes('requestAction("/api/radio/generic-gpio","POST"'),
+       "Generic GPIO selector contract missing");
+const genericGpioHandler = sourceSection(api, "esp_err_t generic_gpio_handler(",
+                                         "esp_err_t register_handler(",
+                                         "Generic GPIO handler");
+assertOrder(genericGpioHandler, [
+  "reserve_system_reboot()",
+  "set_rf_generic_gpio_config(",
+  "if (error != ESP_OK)",
+  "cancel_system_reboot()",
+  "if (!reboot_required)",
+  "cancel_system_reboot()",
+  'const esp_err_t response_error = send_json(request, "202 Accepted", response);',
+  "commit_system_reboot()",
+], "Generic GPIO reboot transaction");
+assert(!genericGpioHandler.includes('\\"saved\\":true'),
+       "reboot reservation failure must not claim that GPIO settings were saved");
 const hardwareRenderer = sourceSection(js, "function renderRadioHardware(",
                                        "function formatState(", "RF hardware renderer");
 assert(hardwareRenderer.includes('["cc1101","generic"].includes') &&
@@ -131,6 +175,26 @@ assert(hardwareRenderer.includes('["cc1101","generic"].includes') &&
        hardwareRenderer.includes("hardware_switch_error") &&
        hardwareRenderer.includes("hardware_switches"),
        "RF hardware compatibility, feedback, or diagnostics renderer missing");
+const genericRenderer = sourceSection(js, "function renderGenericGpio(",
+                                      "function formatState(", "Generic GPIO renderer");
+assert(genericRenderer.includes("tx_options") && genericRenderer.includes("rx_options") &&
+       genericRenderer.includes("overlap_cc1101") && genericRenderer.includes("genericRebooting"),
+       "Generic GPIO options, warning, or reboot renderer missing");
+const genericRecovery = sourceSection(js, "function finishGenericReboot(",
+                                      "async function readJson(",
+                                      "Generic GPIO reboot recovery");
+assert(genericRecovery.includes('readJson("/api/live")') &&
+       genericRecovery.includes("generic?.tx===attempt.tx") &&
+       genericRecovery.includes("generic?.rx===attempt.rx") &&
+       genericRecovery.includes("generic?.pending===false") &&
+       genericRecovery.includes("Date.now() >= attempt.deadline") &&
+       genericRecovery.includes("state.genericRebooting=false") &&
+       genericRecovery.includes("setBusy(false)") &&
+       genericRecovery.includes("resumeLive()") &&
+       genericRecovery.includes('showNotice(errorMessage,"error",true)') &&
+       js.includes("genericRebootConfirmationTimeoutMs = 60000") &&
+       js.includes("beginGenericReboot(payload.tx_gpio,payload.rx_gpio)"),
+       "Generic GPIO reboot recovery must confirm active state and restore global controls");
 assert(js.includes("/api/live") && js.includes("schedulePoll"), "live polling missing");
 assert(webEvents.includes('"text/event-stream"') &&
        webEvents.includes("httpd_req_async_handler_begin") &&
@@ -245,7 +309,9 @@ assertFields(mdnsApi, [
 assertFields(boardApi, [
   "profile", "model", "target", "flash_mib", "psram_mib", "console", "combined_services",
   "activity_led_enabled", "activity_led_gpio", "activity_led_active_high", "cc1101", "sclk",
-  "miso", "mosi", "cs", "gdo0_tx", "gdo2_rx", "generic", "tx", "rx",
+  "miso", "mosi", "cs", "gdo0_tx", "gdo2_rx", "generic", "tx", "rx", "default_tx",
+  "default_rx", "saved_tx", "saved_rx", "saved", "pending", "overlap_cc1101",
+  "configuration_error", "tx_options", "rx_options",
 ], "live board");
 assertFields(systemApi, [
   "uptime_ms", "reset_reason", "heap_free", "heap_minimum", "heap_largest",
@@ -567,8 +633,8 @@ for (const forbidden of [
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
   // The app.js ceiling is a bloat guardrail, not a hardware limit: assets are flash-resident
-  // embedded files. 56 KiB keeps honest headroom for accessibility and robustness work.
-  const maximumSize = name === "app.js" ? 56 * 1024 : 20000;
+  // embedded files. 60 KiB keeps honest headroom for accessibility and robustness work.
+  const maximumSize = name === "app.js" ? 60 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

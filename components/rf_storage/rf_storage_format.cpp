@@ -17,6 +17,10 @@ constexpr uint8_t kHardwareMagic[] = {'R', 'F', 'H', 'W'};
 constexpr uint8_t kHardwareFormatVersion = 1;
 constexpr std::size_t kHardwareHeaderSize = 8;
 constexpr std::size_t kHardwareRecordSize = kHardwareHeaderSize + 1U + 4U;
+constexpr uint8_t kGenericGpioMagic[] = {'R', 'F', 'G', 'P'};
+constexpr uint8_t kGenericGpioFormatVersion = 1;
+constexpr std::size_t kGenericGpioHeaderSize = 8;
+constexpr std::size_t kGenericGpioRecordSize = kGenericGpioHeaderSize + 3U + 4U;
 
 void write_u16(uint8_t *output, uint16_t value)
 {
@@ -296,6 +300,62 @@ RfHardwareFormatResult decode_rf_hardware_record(const uint8_t *record, std::siz
     }
     *hardware = value;
     return RfHardwareFormatResult::kOk;
+}
+
+RfGenericGpioFormatResult encode_rf_generic_gpio_record(uint8_t profile_id, uint8_t tx_gpio,
+                                                        uint8_t rx_gpio, uint8_t *output,
+                                                        std::size_t capacity,
+                                                        std::size_t *output_size)
+{
+    if (output == nullptr || output_size == nullptr || profile_id == 0 || tx_gpio > 48 ||
+        rx_gpio > 48) {
+        return RfGenericGpioFormatResult::kInvalidArgument;
+    }
+    if (capacity < kGenericGpioRecordSize) {
+        return RfGenericGpioFormatResult::kBufferTooSmall;
+    }
+    std::memcpy(output, kGenericGpioMagic, sizeof(kGenericGpioMagic));
+    output[4] = kGenericGpioFormatVersion;
+    output[5] = 3;
+    write_u16(output + 6, 1);
+    output[kGenericGpioHeaderSize] = profile_id;
+    output[kGenericGpioHeaderSize + 1U] = tx_gpio;
+    output[kGenericGpioHeaderSize + 2U] = rx_gpio;
+    write_u32(output + kGenericGpioRecordSize - 4U,
+              crc32(output, kGenericGpioRecordSize - 4U));
+    *output_size = kGenericGpioRecordSize;
+    return RfGenericGpioFormatResult::kOk;
+}
+
+RfGenericGpioFormatResult decode_rf_generic_gpio_record(const uint8_t *record, std::size_t size,
+                                                        uint8_t *profile_id, uint8_t *tx_gpio,
+                                                        uint8_t *rx_gpio)
+{
+    if (record == nullptr || profile_id == nullptr || tx_gpio == nullptr || rx_gpio == nullptr) {
+        return RfGenericGpioFormatResult::kInvalidArgument;
+    }
+    if (size != kGenericGpioRecordSize ||
+        std::memcmp(record, kGenericGpioMagic, sizeof(kGenericGpioMagic)) != 0) {
+        return RfGenericGpioFormatResult::kInvalidRecord;
+    }
+    if (record[4] != kGenericGpioFormatVersion) {
+        return RfGenericGpioFormatResult::kInvalidVersion;
+    }
+    if (record[5] != 3 || read_u16(record + 6) != 1) {
+        return RfGenericGpioFormatResult::kInvalidRecord;
+    }
+    if (read_u32(record + size - 4U) != crc32(record, size - 4U)) {
+        return RfGenericGpioFormatResult::kInvalidCrc;
+    }
+    if (record[kGenericGpioHeaderSize] == 0 ||
+        record[kGenericGpioHeaderSize + 1U] > 48 ||
+        record[kGenericGpioHeaderSize + 2U] > 48) {
+        return RfGenericGpioFormatResult::kInvalidRecord;
+    }
+    *profile_id = record[kGenericGpioHeaderSize];
+    *tx_gpio = record[kGenericGpioHeaderSize + 1U];
+    *rx_gpio = record[kGenericGpioHeaderSize + 2U];
+    return RfGenericGpioFormatResult::kOk;
 }
 
 }  // namespace rfbridge

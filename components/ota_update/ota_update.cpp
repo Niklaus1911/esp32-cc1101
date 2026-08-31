@@ -45,6 +45,7 @@ std::atomic<bool> s_initialization_started{false};
 std::atomic<bool> s_available{false};
 std::atomic<bool> s_upload_active{false};
 std::atomic<bool> s_reboot_pending{false};
+std::atomic<bool> s_external_reboot_pending{false};
 std::atomic<uint32_t> s_sink_callbacks_in_flight{0};
 std::atomic<esp_err_t> s_initialization_error{ESP_ERR_INVALID_STATE};
 OtaHttpAuthorize s_http_authorize = nullptr;
@@ -297,11 +298,24 @@ esp_err_t upload_handler(httpd_req_t *request)
     if (s_http_authorize != nullptr && s_http_authorize(request, s_http_authorize_context) != ESP_OK) {
         return ESP_FAIL;
     }
-    bool expected = false;
-    if (s_reboot_pending.load(std::memory_order_acquire) ||
-        !s_upload_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    const auto reject_busy = [&]() {
         httpd_resp_set_hdr(request, "Connection", "close");
         (void)send_json(request, "409 Conflict", "{\"error\":\"ota_busy\"}");
+    };
+    if (s_reboot_pending.load(std::memory_order_acquire) ||
+        s_external_reboot_pending.load(std::memory_order_acquire)) {
+        reject_busy();
+        return ESP_FAIL;
+    }
+    bool expected = false;
+    if (!s_upload_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        reject_busy();
+        return ESP_FAIL;
+    }
+    if (s_reboot_pending.load(std::memory_order_acquire) ||
+        s_external_reboot_pending.load(std::memory_order_acquire)) {
+        s_upload_active.store(false, std::memory_order_release);
+        reject_busy();
         return ESP_FAIL;
     }
 
@@ -646,6 +660,36 @@ void set_ota_http_server_running(bool running, esp_err_t error)
 bool ota_update_upload_is_active()
 {
     return s_upload_active.load(std::memory_order_acquire);
+}
+
+esp_err_t reserve_system_reboot()
+{
+    if (!s_available.load(std::memory_order_acquire) || s_reboot_task == nullptr ||
+        s_upload_active.load(std::memory_order_acquire) ||
+        s_reboot_pending.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool expected = false;
+    if (!s_external_reboot_pending.compare_exchange_strong(expected, true,
+                                                            std::memory_order_acq_rel)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_upload_active.load(std::memory_order_acquire) ||
+        s_reboot_pending.load(std::memory_order_acquire)) {
+        s_external_reboot_pending.store(false, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+void cancel_system_reboot()
+{
+    s_external_reboot_pending.store(false, std::memory_order_release);
+}
+
+void commit_system_reboot()
+{
+    schedule_reboot();
 }
 
 esp_err_t get_ota_update_status(OtaUpdateStatus *status)

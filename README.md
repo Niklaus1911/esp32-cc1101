@@ -30,12 +30,12 @@ The classic ESP32 has no PSRAM and deliberately rejects `service mode both`; it 
 
 ### Pin map at a glance
 
-The following are the production defaults for each profile. CC1101 pins can be intentionally changed through the owning ESP-IDF configuration, but must remain valid and non-overlapping for the selected board. Generic ASK/OOK DATA pins are fixed by the board profile.
+The following are the production defaults for each profile. CC1101 pins can be intentionally changed through the owning ESP-IDF configuration, but must remain valid and comply with the selected board's overlap policy. Generic ASK/OOK DATA pins start at these profile defaults and can be changed from Web UI **System > RF hardware**; applying a change reboots the device.
 
 | Profile | CC1101 SCK/MISO/MOSI/CSN/GDO0/GDO2 | Generic TX/RX DATA |
 |---|---|---|
 | `esp32-devkit` | `18/19/23/27/26/25` | `32/33` |
-| `esp32s3-devkitc-n16r8` | `12/13/11/10/4/5` | `6/7` |
+| `esp32s3-devkitc-n16r8` | `12/13/11/10/4/5` | `13/4` |
 | `xiao-esp32s3` | `D8/GPIO7, D9/GPIO8, D10/GPIO9, D3/GPIO4, D1/GPIO2, D0/GPIO1` | `D4/GPIO5, D5/GPIO6` |
 | `esp32s3-supermini-fh4r2` | `12/13/11/10/4/5` | `6/7` |
 
@@ -45,8 +45,8 @@ Console, LED, and reserved pins are profile-specific:
 |---|---|---|
 | `esp32-devkit` | UART0 GPIO1/3; GPIO2 LED | GPIO0-3, GPIO5-12, GPIO15-17; GPIO6-11 are flash-connected |
 | `esp32s3-devkitc-n16r8` | UART0 GPIO43/44; LED disabled | GPIO0/3, USB GPIO19/20, flash/PSRAM GPIO26-37, GPIO43-46, GPIO48 |
-| `xiao-esp32s3` | Native USB Serial/JTAG; GPIO21 LED | Only exposed GPIO1/2/4-9/43/44 are eligible for intentional CC1101 remapping; generic GPIO5/6 and LED GPIO21 remain occupied |
-| `esp32s3-supermini-fh4r2` | Native USB Serial/JTAG; LED disabled | Only exposed GPIO1/2/4-13/43/44 are eligible for intentional CC1101 remapping; generic GPIO6/7 and GPIO48 remain reserved |
+| `xiao-esp32s3` | Native USB Serial/JTAG; GPIO21 LED | Only exposed GPIO1/2/4-9/43/44 are eligible for intentional RF remapping; GPIO21 remains reserved for the LED |
+| `esp32s3-supermini-fh4r2` | Native USB Serial/JTAG; LED disabled | Only exposed GPIO1/2/4-13/43/44 are eligible for intentional RF remapping; GPIO48 remains reserved for the onboard LED |
 
 ### CC1101 wiring
 
@@ -111,12 +111,12 @@ Recommended hardware details:
 
 ### Generic ASK/OOK wiring
 
-Generic mode is for direct digital DATA modules: one 433 MHz ASK/OOK transmitter such as STX882 and one receiver such as SRX882/SRX882S. It does not use SPI. The GPIOs are fixed per board profile so the CC1101 and generic modules may remain wired at the same time without sharing pins:
+Generic mode is for direct digital DATA modules: one 433 MHz ASK/OOK transmitter such as STX882 and one receiver such as SRX882/SRX882S. It does not use SPI. The table lists the profile defaults; valid TX/RX GPIOs can be selected from Web UI **System > RF hardware**. Generic pins may overlap CC1101 pins because only one module set is connected at a time; never connect both module sets simultaneously, and perform all rewiring with power removed.
 
 | Profile | Generic TX DATA | Generic RX DATA |
 |---|---:|---:|
 | `esp32-devkit` | GPIO32 | GPIO33 |
-| `esp32s3-devkitc-n16r8` | GPIO6 | GPIO7 |
+| `esp32s3-devkitc-n16r8` | GPIO13 | GPIO4 |
 | `xiao-esp32s3` | D4 / GPIO5 | D5 / GPIO6 |
 | `esp32s3-supermini-fh4r2` | GPIO6 | GPIO7 |
 
@@ -137,7 +137,7 @@ The original NiceRF [STX882 datasheet](https://www.nicerf.com/pdf/stx882-100mw-h
 
 Place 100 nF ceramic plus 4.7–10 µF bulk capacitance close to each module, keep DATA wiring short, and attach the correct antenna before transmitting. A straight quarter-wave wire for 433.92 MHz is approximately 17.3 cm, but follow the module vendor's antenna/layout guidance. The firmware does not control generic `CS`/`EN`; strap it to its documented active level. Modules without `CS`/`EN` need no extra connection.
 
-Only one backend runs at a time. In CC1101 mode, the generic TX DATA pin is held low. In generic mode, the CC1101 is placed idle and its SPI driver is released; the generic RX DATA pin has an explicit internal pull-down before RMT capture so an absent or tri-stated receiver cannot float. RMT is bound only to the active backend, and RX remains half-duplex with TX. The generic TX DATA pin is driven low again after RMT teardown, including failed or timed-out transmission cleanup. The default is `cc1101`; a successfully applied choice persists in a versioned, CRC-protected NVS record.
+Only one backend runs at a time. CC1101 mode releases any generic GPIO that aliases its wiring instead of driving it as an inactive output. In generic mode, the CC1101 is placed idle and its SPI driver is released; Generic TX uses RMT on the selected GPIO and Generic RX uses RMT on the selected GPIO with an explicit internal pull-down so an absent or tri-stated receiver cannot float. RMT is bound only to the active backend, and RX remains half-duplex with TX. The active generic TX DATA pin is driven low again after RMT teardown, including failed or timed-out transmission cleanup. The default backend is `cc1101`; generic GPIO selections persist in a versioned, CRC-protected NVS record tagged to the board profile and apply after reboot.
 
 ### RF activity LED
 
@@ -269,7 +269,7 @@ radio hardware cc1101
 radio hardware generic
 ```
 
-A change is applied live; no reboot is required. The switch pauses automation, invalidates frames and actions queued before the switch, stops and idles the old backend, initializes the requested backend, restores receive, and only then commits the choice to NVS. If activation or persistence fails, the firmware attempts to restore the previous backend and reports the error. Reapplying the active choice does not rewrite an already-valid matching NVS record; it repairs a missing, corrupt, invalid-version, or mismatched record without restarting RF. Start, stop, maintenance, and hardware switching are serialized, and requests that overlap a transition are rejected.
+A change is applied live; no reboot is required. The switch pauses automation, invalidates frames and actions queued before the switch, stops and idles the old backend, initializes the requested backend, restores receive, and only then commits the choice to NVS. If RF is stopped because the previous startup failed, the same request starts the newly selected backend immediately. If activation or persistence fails, the firmware attempts to restore the previous backend and reports the error. Reapplying the active choice does not rewrite an already-valid matching NVS record; it repairs a missing, corrupt, invalid-version, or mismatched record without restarting RF. Start, stop, maintenance, and hardware switching are serialized, and requests that overlap a transition are rejected.
 
 The same operation is available in the Web UI under **System > RF hardware** using the two-option selector and explicit **Apply** button. MQTT creates a Home Assistant **RF hardware** select entity with `cc1101` and `generic` options. All three interfaces call the same switching transaction, and concurrent switch requests are rejected rather than overlapping.
 
@@ -417,7 +417,7 @@ The Web surface calls typed services directly and provides:
 - Automation rule add/remove/enable/disable and log-mode controls.
 - OTA status and direct application-image upload with progress and reboot recovery.
 
-The System dashboard is diagnostic apart from RF hardware selection and firmware upload. Hardware, runtime/memory, and services share three desktop columns and collapse to one below 820 px; detailed hardware and service data remain in expandable disclosures. Internal RAM determines memory health. Free or largest-block values below 12 KiB are critical, free memory below 24 KiB is degraded, and largest blocks below 16 KiB on classic ESP32 or 32 KiB on a combined-service S3 are reported as fragmented. PSRAM is explicitly shown as not installed on classic ESP32. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted; CC1101 diagnostics are inactive, not failed, while generic RF is selected. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
+The System dashboard includes RF backend selection, Generic TX/RX GPIO configuration, and firmware upload. Generic GPIO changes are saved and applied after an automatic reboot; the page pauses polling during the restart and confirms the new active pair after reconnect. Hardware, runtime/memory, and services share three desktop columns and collapse to one below 820 px; detailed hardware and service data remain in expandable disclosures. Internal RAM determines memory health. Free or largest-block values below 12 KiB are critical, free memory below 24 KiB is degraded, and largest blocks below 16 KiB on classic ESP32 or 32 KiB on a combined-service S3 are reported as fragmented. PSRAM is explicitly shown as not installed on classic ESP32. Hard current failures are red; cumulative runtime drops, timeouts, recoveries, and transmission/log errors remain amber until reset. A temporarily unavailable CC1101 status sample during RF transmission or maintenance is shown as paused rather than faulted; CC1101 diagnostics are inactive, not failed, while generic RF is selected. If a running browser reconnects to older firmware after rollback, missing diagnostics are shown as limited while the existing live data remains connected. A transport failure retains the last detailed snapshot in a muted state until polling reconnects.
 
 The receiver has no user-controlled off state. RX is always the desired state and automatically resumes after the bounded half-duplex pauses required by transmission, radio reset, and OTA maintenance. Wi-Fi credentials and lifecycle, radio recovery, console settings, authentication management, and generic UART command execution remain UART-only.
 

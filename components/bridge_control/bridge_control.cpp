@@ -125,7 +125,9 @@ esp_err_t bridge_control_set_rf_hardware(RfHardware hardware, BridgeEventSource 
                                       ? rf_automation_set_runtime_paused(
                                             RfAutomationPauseReason::kHardwareSwitch, true)
                                       : ESP_ERR_INVALID_STATE;
-    const esp_err_t switch_error = pause_error == ESP_OK ? set_rf_hardware(hardware) : pause_error;
+    const esp_err_t switch_error = pause_error == ESP_OK
+                                       ? set_rf_hardware(hardware, rf_signals_on_frame, nullptr)
+                                       : pause_error;
     const esp_err_t resume_error = pause_error == ESP_OK
                                        ? rf_automation_set_runtime_paused(
                                              RfAutomationPauseReason::kHardwareSwitch, false)

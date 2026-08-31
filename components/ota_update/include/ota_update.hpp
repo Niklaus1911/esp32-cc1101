@@ -68,6 +68,9 @@ esp_err_t register_ota_http_handlers(httpd_handle_t server, OtaHttpAuthorize aut
                                      void *authorize_context);
 void set_ota_http_server_running(bool running, esp_err_t error = ESP_OK);
 bool ota_update_upload_is_active();
+esp_err_t reserve_system_reboot();
+void cancel_system_reboot();
+void commit_system_reboot();
 esp_err_t get_ota_update_status(OtaUpdateStatus *status);
 esp_err_t set_ota_update_event_sink(OtaUpdateEventSink sink, void *context);
 esp_err_t confirm_running_ota_image();

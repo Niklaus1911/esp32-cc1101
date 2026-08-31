@@ -143,6 +143,11 @@ std::atomic<bool> s_start_override_valid{false};
 std::atomic<RfHardware> s_start_override{RfHardware::kCc1101};
 std::atomic<esp_err_t> s_hardware_switch_error{ESP_OK};
 std::atomic<uint32_t> s_hardware_switches{0};
+std::atomic<bool> s_generic_gpio_initialized{false};
+std::atomic_flag s_generic_gpio_initializing = ATOMIC_FLAG_INIT;
+portMUX_TYPE s_generic_gpio_mux = portMUX_INITIALIZER_UNLOCKED;
+BoardGpioMap s_active_gpio_map{};
+RfGenericGpioConfig s_generic_gpio_config{};
 rmt_receive_config_t s_receive_config{};
 Cc1101 s_radio{};
 std::atomic<bool> s_receive_active{false};
@@ -722,9 +727,78 @@ bool using_generic_hardware()
     return s_hardware.load(std::memory_order_acquire) == RfHardware::kGeneric;
 }
 
+bool generic_gpio_overlaps_cc1101(const BoardGpioMap &gpios)
+{
+    const int cc_pins[] = {gpios.sclk, gpios.miso, gpios.mosi, gpios.cs, gpios.gdo0,
+                           gpios.gdo2};
+    for (const int cc_pin : cc_pins) {
+        if (cc_pin == gpios.generic_tx || cc_pin == gpios.generic_rx) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool gpio_is_cc1101_pin(const BoardGpioMap &gpios, int gpio)
+{
+    return gpio == gpios.sclk || gpio == gpios.miso || gpio == gpios.mosi || gpio == gpios.cs ||
+           gpio == gpios.gdo0 || gpio == gpios.gdo2;
+}
+
+esp_err_t load_generic_gpio_config()
+{
+    const BoardInfo &board = current_board_info();
+    BoardGpioMap active = board.cc1101;
+    RfGenericGpioConfig config{};
+    config.active_tx_gpio = active.generic_tx;
+    config.active_rx_gpio = active.generic_rx;
+    config.default_tx_gpio = active.generic_tx;
+    config.default_rx_gpio = active.generic_rx;
+    config.saved_tx_gpio = active.generic_tx;
+    config.saved_rx_gpio = active.generic_rx;
+
+    uint8_t profile_id = 0;
+    uint8_t tx_gpio = 0;
+    uint8_t rx_gpio = 0;
+    bool persisted = false;
+    esp_err_t load_error = rf_storage_generic_gpio_get(&profile_id, &tx_gpio, &rx_gpio, &persisted);
+    if (load_error == ESP_OK && persisted) {
+        const bool profile_matches =
+            profile_id == static_cast<uint8_t>(configured_board_profile());
+        const bool valid = profile_matches &&
+                           board_generic_gpio_map_is_valid(
+                               configured_board_profile(), board.cc1101, tx_gpio, rx_gpio,
+                               board.activity_led_enabled ? board.activity_led_gpio : -1);
+        if (valid) {
+            active.generic_tx = tx_gpio;
+            active.generic_rx = rx_gpio;
+            config.active_tx_gpio = tx_gpio;
+            config.active_rx_gpio = rx_gpio;
+            config.saved_tx_gpio = tx_gpio;
+            config.saved_rx_gpio = rx_gpio;
+            config.saved = true;
+        } else {
+            load_error = ESP_ERR_INVALID_RESPONSE;
+            config.configuration_error = profile_matches ? load_error : ESP_ERR_INVALID_STATE;
+        }
+    } else if (load_error != ESP_OK) {
+        config.configuration_error = load_error;
+    }
+    if (load_error == ESP_OK && !persisted) {
+        config.configuration_error = ESP_OK;
+    }
+    config.overlap_cc1101 = generic_gpio_overlaps_cc1101(active);
+    portENTER_CRITICAL(&s_generic_gpio_mux);
+    s_active_gpio_map = active;
+    s_generic_gpio_config = config;
+    s_generic_gpio_initialized.store(true, std::memory_order_release);
+    portEXIT_CRITICAL(&s_generic_gpio_mux);
+    return load_error;
+}
+
 const BoardGpioMap &active_gpio_map()
 {
-    return current_board_info().cc1101;
+    return s_active_gpio_map;
 }
 
 int active_rx_gpio()
@@ -737,6 +811,16 @@ int active_tx_gpio()
     return using_generic_hardware() ? active_gpio_map().generic_tx : active_gpio_map().gdo0;
 }
 
+esp_err_t configure_generic_tx_idle()
+{
+    const int gpio = active_gpio_map().generic_tx;
+    ESP_RETURN_ON_ERROR(gpio_set_direction(static_cast<gpio_num_t>(gpio), GPIO_MODE_OUTPUT),
+                        kTag, "configure generic TX idle");
+    ESP_RETURN_ON_ERROR(gpio_set_level(static_cast<gpio_num_t>(gpio), 0), kTag,
+                        "drive generic TX idle");
+    return ESP_OK;
+}
+
 void force_generic_tx_idle()
 {
     const int gpio = active_gpio_map().generic_tx;
@@ -746,6 +830,24 @@ void force_generic_tx_idle()
     (void)gpio_reset_pin(static_cast<gpio_num_t>(gpio));
     (void)gpio_set_direction(static_cast<gpio_num_t>(gpio), GPIO_MODE_OUTPUT);
     (void)gpio_set_level(static_cast<gpio_num_t>(gpio), 0);
+}
+
+esp_err_t prepare_backend_gpio_ownership(RfHardware hardware)
+{
+    const BoardGpioMap &gpios = active_gpio_map();
+    const bool generic_tx_shared = gpio_is_cc1101_pin(gpios, gpios.generic_tx);
+    const bool generic_rx_shared = gpio_is_cc1101_pin(gpios, gpios.generic_rx);
+    if (generic_tx_shared) {
+        ESP_RETURN_ON_ERROR(gpio_reset_pin(static_cast<gpio_num_t>(gpios.generic_tx)), kTag,
+                            "release shared generic TX and CC1101 GPIO");
+    }
+    if (generic_rx_shared && gpios.generic_rx != gpios.generic_tx) {
+        ESP_RETURN_ON_ERROR(gpio_reset_pin(static_cast<gpio_num_t>(gpios.generic_rx)), kTag,
+                            "release shared generic RX and CC1101 GPIO");
+    }
+    return hardware == RfHardware::kGeneric || !generic_tx_shared
+               ? configure_generic_tx_idle()
+               : ESP_OK;
 }
 
 esp_err_t arm_receiver_owned()
@@ -1385,7 +1487,6 @@ esp_err_t cleanup_resources()
             remember_error(delete_error, "delete RMT encoder");
         }
     }
-    force_generic_tx_idle();
     if (s_rx_channel != nullptr || s_tx_channel != nullptr || s_copy_encoder != nullptr) {
         s_service_state.store(ServiceState::kStopping, std::memory_order_release);
         return cleanup_error == ESP_OK ? ESP_FAIL : cleanup_error;
@@ -1402,6 +1503,19 @@ esp_err_t cleanup_resources()
     if (radio_cleanup_error != ESP_OK) {
         s_service_state.store(ServiceState::kStopping, std::memory_order_release);
         return radio_cleanup_error;
+    }
+
+    const bool generic_tx_shared = gpio_is_cc1101_pin(active_gpio_map(),
+                                                        active_gpio_map().generic_tx);
+    if (using_generic_hardware() || !generic_tx_shared) {
+        force_generic_tx_idle();
+    } else {
+        (void)gpio_reset_pin(static_cast<gpio_num_t>(active_gpio_map().generic_tx));
+    }
+    if (!using_generic_hardware() &&
+        gpio_is_cc1101_pin(active_gpio_map(), active_gpio_map().generic_rx) &&
+        active_gpio_map().generic_rx != active_gpio_map().generic_tx) {
+        (void)gpio_reset_pin(static_cast<gpio_num_t>(active_gpio_map().generic_rx));
     }
 
     if (s_radio_queue_set != nullptr) {
@@ -1615,18 +1729,17 @@ esp_err_t start_rf_ook_owned(RfFrameCallback callback, void *context)
             selected_hardware = RfHardware::kCc1101;
         }
     }
+    (void)initialize_rf_generic_gpio_config();
     const BoardInfo &board = current_board_info();
     if (!board_generic_gpio_map_is_valid(
-            configured_board_profile(), board.cc1101, board.cc1101.generic_tx,
-            board.cc1101.generic_rx)) {
+            configured_board_profile(), board.cc1101, active_gpio_map().generic_tx,
+            active_gpio_map().generic_rx,
+            board.activity_led_enabled ? board.activity_led_gpio : -1)) {
         return ESP_ERR_INVALID_ARG;
     }
     s_hardware.store(selected_hardware, std::memory_order_release);
-    ESP_RETURN_ON_ERROR(
-        gpio_set_direction(static_cast<gpio_num_t>(board.cc1101.generic_tx), GPIO_MODE_OUTPUT),
-        kTag, "configure generic TX idle");
-    ESP_RETURN_ON_ERROR(gpio_set_level(static_cast<gpio_num_t>(board.cc1101.generic_tx), 0),
-                        kTag, "drive generic TX idle");
+    ESP_RETURN_ON_ERROR(prepare_backend_gpio_ownership(selected_hardware), kTag,
+                        "prepare RF backend GPIO ownership");
     s_service_state.store(ServiceState::kStarting, std::memory_order_release);
 
     s_rx_queue = xQueueCreate(4, sizeof(RxQueueItem));
@@ -1663,7 +1776,7 @@ esp_err_t start_rf_ook_owned(RfFrameCallback callback, void *context)
     s_rmt_tx_faulted.store(false, std::memory_order_relaxed);
     s_maintenance_active.store(false, std::memory_order_relaxed);
 
-    const esp_err_t activity_led_error = initialize_rf_activity_led();
+    const esp_err_t activity_led_error = initialize_rf_activity_led(active_gpio_map());
     if (activity_led_error != ESP_OK &&
         !s_activity_led_warning_logged.exchange(true, std::memory_order_acq_rel)) {
         ESP_LOGW(kTag, "RX activity LED unavailable: %s", esp_err_to_name(activity_led_error));
@@ -1853,6 +1966,94 @@ esp_err_t get_rf_radio_status(RfRadioStatus *status)
     return ESP_OK;
 }
 
+esp_err_t initialize_rf_generic_gpio_config()
+{
+    if (s_generic_gpio_initialized.load(std::memory_order_acquire)) {
+        portENTER_CRITICAL(&s_generic_gpio_mux);
+        const esp_err_t error = s_generic_gpio_config.configuration_error;
+        portEXIT_CRITICAL(&s_generic_gpio_mux);
+        return error;
+    }
+    if (s_generic_gpio_initializing.test_and_set(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t error = load_generic_gpio_config();
+    s_generic_gpio_initializing.clear(std::memory_order_release);
+    return error;
+}
+
+esp_err_t get_rf_generic_gpio_config(RfGenericGpioConfig *config)
+{
+    if (config == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t init_error = initialize_rf_generic_gpio_config();
+    if (!s_generic_gpio_initialized.load(std::memory_order_acquire)) {
+        return init_error;
+    }
+    portENTER_CRITICAL(&s_generic_gpio_mux);
+    *config = s_generic_gpio_config;
+    portEXIT_CRITICAL(&s_generic_gpio_mux);
+    return ESP_OK;
+}
+
+esp_err_t set_rf_generic_gpio_config(int tx_gpio, int rx_gpio, bool *reboot_required)
+{
+    if (reboot_required != nullptr) {
+        *reboot_required = false;
+    }
+    const esp_err_t init_error = initialize_rf_generic_gpio_config();
+    if (!s_generic_gpio_initialized.load(std::memory_order_acquire)) {
+        return init_error;
+    }
+    const BoardInfo &board = current_board_info();
+    if (!board_generic_gpio_map_is_valid(
+            configured_board_profile(), board.cc1101, tx_gpio, rx_gpio,
+            board.activity_led_enabled ? board.activity_led_gpio : -1)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    RfGenericGpioConfig current{};
+    portENTER_CRITICAL(&s_generic_gpio_mux);
+    current = s_generic_gpio_config;
+    portEXIT_CRITICAL(&s_generic_gpio_mux);
+    if (current.pending) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (current.active_tx_gpio == tx_gpio && current.active_rx_gpio == rx_gpio && current.saved) {
+        return ESP_OK;
+    }
+    const esp_err_t persist_error = rf_storage_generic_gpio_set(
+        static_cast<uint8_t>(configured_board_profile()), static_cast<uint8_t>(tx_gpio),
+        static_cast<uint8_t>(rx_gpio));
+    if (persist_error != ESP_OK) {
+        return persist_error;
+    }
+    const bool pending = tx_gpio != current.active_tx_gpio || rx_gpio != current.active_rx_gpio;
+    portENTER_CRITICAL(&s_generic_gpio_mux);
+    s_generic_gpio_config.saved_tx_gpio = tx_gpio;
+    s_generic_gpio_config.saved_rx_gpio = rx_gpio;
+    s_generic_gpio_config.saved = true;
+    s_generic_gpio_config.pending = pending;
+    s_generic_gpio_config.overlap_cc1101 =
+        generic_gpio_overlaps_cc1101(BoardGpioMap{
+            .sclk = board.cc1101.sclk,
+            .miso = board.cc1101.miso,
+            .mosi = board.cc1101.mosi,
+            .cs = board.cc1101.cs,
+            .gdo0 = board.cc1101.gdo0,
+            .gdo2 = board.cc1101.gdo2,
+            .generic_tx = tx_gpio,
+            .generic_rx = rx_gpio,
+        });
+    s_generic_gpio_config.configuration_error = ESP_OK;
+    portEXIT_CRITICAL(&s_generic_gpio_mux);
+    if (reboot_required != nullptr) {
+        *reboot_required = pending;
+    }
+    return ESP_OK;
+}
+
 esp_err_t get_rf_hardware(RfHardware *hardware)
 {
     if (hardware == nullptr) {
@@ -1869,7 +2070,8 @@ esp_err_t get_rf_hardware(RfHardware *hardware)
     return ESP_OK;
 }
 
-esp_err_t set_rf_hardware(RfHardware hardware)
+esp_err_t set_rf_hardware(RfHardware hardware, RfFrameCallback restart_callback,
+                           void *restart_context)
 {
     if (hardware != RfHardware::kCc1101 && hardware != RfHardware::kGeneric) {
         return ESP_ERR_INVALID_ARG;
@@ -1886,21 +2088,9 @@ esp_err_t set_rf_hardware(RfHardware hardware)
         return ESP_ERR_INVALID_STATE;
     }
     const RfHardware previous = s_hardware.load(std::memory_order_acquire);
-    if (previous == hardware) {
-        const esp_err_t persist_error = rf_storage_hardware_set(hardware);
-        s_hardware_switch_error.store(persist_error, std::memory_order_release);
-        return persist_error;
-    }
-    const BoardInfo &board = current_board_info();
-    if (hardware == RfHardware::kGeneric &&
-        !board_generic_gpio_map_is_valid(configured_board_profile(), board.cc1101,
-                                         board.cc1101.generic_tx, board.cc1101.generic_rx)) {
-        s_hardware_switch_error.store(ESP_ERR_INVALID_ARG, std::memory_order_release);
-        return ESP_ERR_INVALID_ARG;
-    }
-    const bool was_running = s_service_state.load(std::memory_order_acquire) == ServiceState::kRunning;
-    const RfFrameCallback callback = s_frame_callback;
-    void *context = s_callback_context;
+    const bool was_running = state == ServiceState::kRunning;
+    const RfFrameCallback callback = s_frame_callback != nullptr ? s_frame_callback : restart_callback;
+    void *context = s_frame_callback != nullptr ? s_callback_context : restart_context;
     const auto restart_with = [&](RfHardware selected) {
         s_hardware.store(selected, std::memory_order_release);
         s_start_override.store(selected, std::memory_order_release);
@@ -1909,6 +2099,52 @@ esp_err_t set_rf_hardware(RfHardware hardware)
         s_start_override_valid.store(false, std::memory_order_release);
         return error;
     };
+    const bool should_start = callback != nullptr;
+    if (previous == hardware) {
+        if (state == ServiceState::kStopped) {
+            const esp_err_t ownership_error = prepare_backend_gpio_ownership(hardware);
+            if (ownership_error != ESP_OK) {
+                s_hardware_switch_error.store(ownership_error, std::memory_order_release);
+                return ownership_error;
+            }
+            if (should_start) {
+                const esp_err_t start_error = restart_with(hardware);
+                if (start_error != ESP_OK) {
+                    s_hardware.store(previous, std::memory_order_release);
+                    const esp_err_t rollback_error = prepare_backend_gpio_ownership(previous);
+                    s_hardware_switch_error.store(
+                        rollback_error == ESP_OK ? start_error : rollback_error,
+                        std::memory_order_release);
+                    return rollback_error == ESP_OK ? start_error : rollback_error;
+                }
+            }
+        }
+        const esp_err_t persist_error = rf_storage_hardware_set(hardware);
+        if (persist_error != ESP_OK && state == ServiceState::kStopped && should_start) {
+            const esp_err_t stop_error = stop_rf_ook_owned();
+            if (stop_error != ESP_OK) {
+                s_hardware_switch_error.store(stop_error, std::memory_order_release);
+                return stop_error;
+            }
+            s_hardware.store(previous, std::memory_order_release);
+            const esp_err_t rollback_error = prepare_backend_gpio_ownership(previous);
+            if (rollback_error != ESP_OK) {
+                s_hardware_switch_error.store(rollback_error, std::memory_order_release);
+                return rollback_error;
+            }
+        }
+        s_hardware_switch_error.store(persist_error, std::memory_order_release);
+        return persist_error;
+    }
+    const BoardInfo &board = current_board_info();
+    if (hardware == RfHardware::kGeneric &&
+        !board_generic_gpio_map_is_valid(configured_board_profile(), board.cc1101,
+                                         active_gpio_map().generic_tx,
+                                         active_gpio_map().generic_rx,
+                                         board.activity_led_enabled ? board.activity_led_gpio : -1)) {
+        s_hardware_switch_error.store(ESP_ERR_INVALID_ARG, std::memory_order_release);
+        return ESP_ERR_INVALID_ARG;
+    }
     if (was_running) {
         const esp_err_t stop_error = stop_rf_ook_owned();
         if (stop_error != ESP_OK) {
@@ -1920,11 +2156,24 @@ esp_err_t set_rf_hardware(RfHardware hardware)
             return ESP_ERR_INVALID_STATE;
         }
     }
+    if (!was_running) {
+        const esp_err_t ownership_error = prepare_backend_gpio_ownership(hardware);
+        if (ownership_error != ESP_OK) {
+            s_hardware_switch_error.store(ownership_error, std::memory_order_release);
+            return ownership_error;
+        }
+    }
     s_hardware.store(hardware, std::memory_order_release);
-    if (was_running) {
+    if (was_running || should_start) {
         const esp_err_t start_error = restart_with(hardware);
         if (start_error != ESP_OK) {
-            const esp_err_t rollback_error = restart_with(previous);
+            esp_err_t rollback_error = ESP_OK;
+            if (was_running) {
+                rollback_error = restart_with(previous);
+            } else {
+                s_hardware.store(previous, std::memory_order_release);
+                rollback_error = prepare_backend_gpio_ownership(previous);
+            }
             if (rollback_error != ESP_OK) {
                 ESP_LOGE(kTag, "RF hardware rollback to %s failed: %s",
                          rf_hardware_name(previous), esp_err_to_name(rollback_error));
@@ -1950,8 +2199,18 @@ esp_err_t set_rf_hardware(RfHardware hardware)
                 s_hardware_switch_error.store(rollback_error, std::memory_order_release);
                 return rollback_error;
             }
-        } else {
+        } else if (should_start) {
+            const esp_err_t stop_error = stop_rf_ook_owned();
+            if (stop_error != ESP_OK) {
+                s_hardware_switch_error.store(stop_error, std::memory_order_release);
+                return stop_error;
+            }
             s_hardware.store(previous, std::memory_order_release);
+            const esp_err_t rollback_error = prepare_backend_gpio_ownership(previous);
+            if (rollback_error != ESP_OK) {
+                s_hardware_switch_error.store(rollback_error, std::memory_order_release);
+                return rollback_error;
+            }
         }
         s_hardware_switch_error.store(persist_error, std::memory_order_release);
         return persist_error;

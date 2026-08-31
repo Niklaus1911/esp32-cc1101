@@ -149,7 +149,7 @@ void timer_callback(void *)
 
 }  // namespace
 
-esp_err_t initialize_rf_activity_led()
+esp_err_t initialize_rf_activity_led(const BoardGpioMap &radio_gpios)
 {
 #if !CONFIG_RF_ACTIVITY_LED_ENABLE
     return ESP_OK;
@@ -157,12 +157,11 @@ esp_err_t initialize_rf_activity_led()
     if (s_initialized.load(std::memory_order_acquire)) {
         return ESP_OK;
     }
-    const BoardInfo &board = current_board_info();
     const int unavailable_gpios[] = {
         CONFIG_CC1101_SPI_SCLK_GPIO, CONFIG_CC1101_SPI_MISO_GPIO,
         CONFIG_CC1101_SPI_MOSI_GPIO, CONFIG_CC1101_SPI_CS_GPIO,
         CONFIG_CC1101_GDO0_GPIO,     CONFIG_CC1101_GDO2_GPIO,
-        board.cc1101.generic_tx,     board.cc1101.generic_rx,
+        radio_gpios.generic_tx, radio_gpios.generic_rx,
     };
     if (!rf_activity_led_config_is_valid(configured_board_profile(), kConfig,
                                          unavailable_gpios,

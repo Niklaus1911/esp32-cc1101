@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -875,7 +876,7 @@ void test_platform_board_policy()
                     board->profile, board->cc1101, board->cc1101.generic_tx,
                     board->cc1101.generic_rx,
                     board->activity_led_enabled ? board->activity_led_gpio : -1),
-                "each profile's generic RF wiring is valid and separate");
+                "each profile's generic RF wiring satisfies its overlap policy");
         rfbridge::BoardGpioMap duplicate = board->cc1101;
         duplicate.gdo2 = duplicate.gdo0;
         require(!rfbridge::board_cc1101_gpio_map_is_valid(board->profile, duplicate),
@@ -910,10 +911,63 @@ void test_platform_board_policy()
     invalid.gdo2 = 3;
     require(!rfbridge::board_cc1101_gpio_map_is_valid(supermini->profile, invalid),
             "FH4R2 profile rejects its strapping GPIO");
-    require(!rfbridge::board_generic_gpio_map_is_valid(
+    require(rfbridge::board_generic_gpio_map_is_valid(
                 classic->profile, classic->cc1101, classic->cc1101.gdo0,
                 classic->cc1101.generic_rx, classic->activity_led_gpio),
-            "generic RF validation rejects a CC1101 TX pin");
+            "generic RF validation permits a CC1101 TX overlap");
+    require(n16r8->cc1101.generic_tx == 13 && n16r8->cc1101.generic_rx == 4,
+            "N16R8 exposes its temporary TX13 and RX4 generic mapping");
+    require(rfbridge::board_generic_gpio_map_is_valid(
+                n16r8->profile, n16r8->cc1101, n16r8->cc1101.gdo0,
+                n16r8->cc1101.miso),
+            "N16R8 permits valid overlaps in either direction");
+    require(rfbridge::board_generic_gpio_map_is_valid(
+                n16r8->profile, n16r8->cc1101, n16r8->cc1101.miso,
+                n16r8->cc1101.gdo2),
+            "N16R8 permits overlaps beyond its temporary aliases");
+    invalid = n16r8->cc1101;
+    invalid.miso = 6;
+    require(rfbridge::board_generic_gpio_map_is_valid(
+        n16r8->profile, invalid, invalid.miso, invalid.gdo0),
+            "N16R8 permits an overlap with a remapped CC1101 GPIO");
+    invalid = n16r8->cc1101;
+    invalid.gdo0 = 7;
+    require(rfbridge::board_generic_gpio_map_is_valid(
+        n16r8->profile, invalid, invalid.miso, invalid.gdo0),
+            "N16R8 permits an overlap with a remapped CC1101 GPIO");
+    for (const rfbridge::BoardInfo *board : {classic, xiao, supermini}) {
+        require(rfbridge::board_generic_gpio_map_is_valid(
+                    board->profile, board->cc1101, board->cc1101.miso,
+                    board->cc1101.generic_rx,
+                    board->activity_led_enabled ? board->activity_led_gpio : -1),
+                "all profiles permit generic TX overlap with CC1101 MISO");
+        require(rfbridge::board_generic_gpio_map_is_valid(
+                    board->profile, board->cc1101, board->cc1101.generic_tx,
+                    board->cc1101.gdo0,
+                    board->activity_led_enabled ? board->activity_led_gpio : -1),
+                "all profiles permit generic RX overlap with CC1101 GDO0");
+    }
+    require(!rfbridge::board_generic_gpio_map_is_valid(
+                classic->profile, classic->cc1101, classic->cc1101.generic_tx,
+                classic->cc1101.generic_tx, classic->activity_led_gpio),
+            "generic TX and RX cannot share a GPIO");
+    require(!rfbridge::board_generic_gpio_map_is_valid(
+                classic->profile, classic->cc1101, classic->cc1101.generic_tx, 34,
+                classic->activity_led_gpio),
+            "classic Generic RX rejects input-only GPIOs without pull-down support");
+    int tx_options[rfbridge::kBoardGenericGpioOptionCapacity]{};
+    std::size_t tx_count = 0;
+    require(rfbridge::board_generic_gpio_options(
+                classic->profile, true, classic->activity_led_gpio, tx_options,
+                std::size(tx_options), &tx_count) && tx_count > 0,
+            "generic TX options enumerate valid exposed GPIOs");
+    int rx_options[rfbridge::kBoardGenericGpioOptionCapacity]{};
+    std::size_t rx_count = 0;
+    require(rfbridge::board_generic_gpio_options(
+                classic->profile, false, classic->activity_led_gpio, rx_options,
+                std::size(rx_options), &rx_count) &&
+                std::find(rx_options, rx_options + rx_count, 34) == rx_options + rx_count,
+            "classic Generic RX options omit input-only GPIOs");
 
     rfbridge::RfActivityLedConfig led{.enabled = true, .gpio = 21,
                                       .active_high = false, .pulse_ms = 25};
@@ -1088,6 +1142,28 @@ void test_storage_format()
     require(rfbridge::decode_rf_hardware_record(hardware_record, hardware_size, &hardware) ==
                 rfbridge::RfHardwareFormatResult::kInvalidCrc,
             "RF hardware record rejects CRC corruption");
+
+    uint8_t gpio_record[32]{};
+    std::size_t gpio_size = 0;
+    require(rfbridge::encode_rf_generic_gpio_record(
+                static_cast<uint8_t>(rfbridge::BoardProfile::kEsp32s3DevkitcN16r8), 13, 4,
+                gpio_record, sizeof(gpio_record), &gpio_size) ==
+                rfbridge::RfGenericGpioFormatResult::kOk && gpio_size == 15,
+            "generic GPIO record encodes with profile identity and CRC");
+    uint8_t profile_id = 0;
+    uint8_t tx_gpio = 0;
+    uint8_t rx_gpio = 0;
+    require(rfbridge::decode_rf_generic_gpio_record(
+                gpio_record, gpio_size, &profile_id, &tx_gpio, &rx_gpio) ==
+                rfbridge::RfGenericGpioFormatResult::kOk &&
+                profile_id == static_cast<uint8_t>(rfbridge::BoardProfile::kEsp32s3DevkitcN16r8) &&
+                tx_gpio == 13 && rx_gpio == 4,
+            "generic GPIO record round trips");
+    gpio_record[gpio_size - 1U] ^= 0x01U;
+    require(rfbridge::decode_rf_generic_gpio_record(
+                gpio_record, gpio_size, &profile_id, &tx_gpio, &rx_gpio) ==
+                rfbridge::RfGenericGpioFormatResult::kInvalidCrc,
+            "generic GPIO record rejects CRC corruption");
 }
 
 void test_recent_storage_format()
@@ -1558,6 +1634,29 @@ void test_web_forms()
                 !rfbridge::parse_web_hardware_form("hardware=GENERIC", 16, &hardware) &&
                 !rfbridge::parse_web_hardware_form("hardware=generic&extra=1", 24, &hardware),
             "Web RF hardware form rejects NUL suffixes, case changes, and extra fields");
+
+    rfbridge::WebGenericGpioForm generic_gpio{};
+    constexpr char generic_gpio_body[] = "tx_gpio=13&rx_gpio=4";
+    require(rfbridge::parse_web_generic_gpio_form(
+                generic_gpio_body, sizeof(generic_gpio_body) - 1U, &generic_gpio) &&
+                generic_gpio.tx_gpio == 13 && generic_gpio.rx_gpio == 4,
+            "Web generic GPIO form accepts bounded decimal values");
+    constexpr char generic_gpio_hex[] = "tx_gpio=0x20&rx_gpio=33";
+    require(rfbridge::parse_web_generic_gpio_form(generic_gpio_hex,
+                                                   sizeof(generic_gpio_hex) - 1U,
+                                                   &generic_gpio) &&
+                generic_gpio.tx_gpio == 32 && generic_gpio.rx_gpio == 33,
+            "Web generic GPIO form accepts hexadecimal values");
+    constexpr char generic_gpio_overflow[] = "tx_gpio=49&rx_gpio=4";
+    constexpr char generic_gpio_empty[] = "tx_gpio=13&rx_gpio=";
+    constexpr char generic_gpio_extra[] = "tx_gpio=13&rx_gpio=4&extra=1";
+    require(!rfbridge::parse_web_generic_gpio_form(
+                generic_gpio_overflow, sizeof(generic_gpio_overflow) - 1U, &generic_gpio) &&
+                !rfbridge::parse_web_generic_gpio_form(
+                    generic_gpio_empty, sizeof(generic_gpio_empty) - 1U, &generic_gpio) &&
+                !rfbridge::parse_web_generic_gpio_form(
+                    generic_gpio_extra, sizeof(generic_gpio_extra) - 1U, &generic_gpio),
+            "Web generic GPIO form rejects out-of-range and extra fields");
 
     require(rfbridge::web_form_content_type_is_valid("application/x-www-form-urlencoded"),
             "Web form content type accepted");

@@ -36,7 +36,7 @@ constexpr BoardInfo kBoards[] = {
         .psram_mib = 8,
         .combined_services = true,
         .cc1101 = {.sclk = 12, .miso = 13, .mosi = 11, .cs = 10, .gdo0 = 4, .gdo2 = 5,
-                   .generic_tx = 6, .generic_rx = 7},
+                   .generic_tx = 13, .generic_rx = 4},
         .activity_led_enabled = false,
         .activity_led_gpio = -1,
         .activity_led_active_high = true,
@@ -138,6 +138,12 @@ bool gpio_is_valid_for_role(BoardProfile profile, int gpio, bool output)
     return false;
 }
 
+bool generic_rx_gpio_supports_pull_down(BoardProfile profile, int gpio)
+{
+    // Classic ESP32 GPIO34-39 are input-only and have no internal pull resistors.
+    return profile != BoardProfile::kEsp32Devkit || gpio < 34;
+}
+
 }  // namespace
 
 const BoardInfo *board_info(BoardProfile profile)
@@ -178,17 +184,32 @@ bool board_generic_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &c
 {
     if (!board_cc1101_gpio_map_is_valid(profile, cc1101) ||
         !gpio_is_valid_for_role(profile, generic_tx, true) ||
-        !gpio_is_valid_for_role(profile, generic_rx, false) || generic_tx == generic_rx ||
+        !gpio_is_valid_for_role(profile, generic_rx, false) ||
+        !generic_rx_gpio_supports_pull_down(profile, generic_rx) || generic_tx == generic_rx ||
         generic_tx == activity_led_gpio || generic_rx == activity_led_gpio) {
         return false;
     }
-    const int cc_pins[] = {cc1101.sclk, cc1101.miso, cc1101.mosi, cc1101.cs,
-                           cc1101.gdo0, cc1101.gdo2};
-    for (const int pin : cc_pins) {
-        if (pin == generic_tx || pin == generic_rx) {
+    return true;
+}
+
+bool board_generic_gpio_options(BoardProfile profile, bool output, int activity_led_gpio,
+                                int *options, std::size_t capacity, std::size_t *count)
+{
+    if (options == nullptr || count == nullptr) {
+        return false;
+    }
+    std::size_t available = 0;
+    for (int gpio = 0; gpio <= 48; ++gpio) {
+        if (gpio == activity_led_gpio || !gpio_is_valid_for_role(profile, gpio, output) ||
+            (!output && !generic_rx_gpio_supports_pull_down(profile, gpio))) {
+            continue;
+        }
+        if (available >= capacity) {
             return false;
         }
+        options[available++] = gpio;
     }
+    *count = available;
     return true;
 }
 

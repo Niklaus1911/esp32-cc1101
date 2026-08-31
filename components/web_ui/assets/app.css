@@ -165,6 +165,9 @@ h2 svg { width: 15px; height: 15px; flex: none; color: var(--accent); opacity: .
 .system-summary .metric strong { min-height: 2.7em; font-size: var(--f-md); }
 .system-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-4); }
 #system-status > .system-status-band > .settings-row + .system-grid { margin-top: var(--s-4); }
+.generic-gpio-row { margin-top: var(--s-3); }
+.generic-gpio-row label { flex: 0 1 180px; }
+.generic-gpio-row button { flex: 0 0 auto; }
 .system-runtime-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .system-group { min-width: 0; padding: var(--s-4); }
 .system-group h3 { margin: 0; font-size: var(--f-xs); color: var(--accent-2); letter-spacing: 0; text-transform: uppercase; font-weight: 650; }
@@ -274,6 +277,7 @@ td { font-variant-numeric: tabular-nums; }
   .system-status-band .system-grid { gap: var(--s-3); }
   .system-status-band .system-group { padding: var(--s-3); }
   .system-status-band .system-group h3 { font-size: .7rem; }
+  .generic-gpio-row label, .generic-gpio-row button { width: 100%; flex-basis: 100%; }
   #system-status .details { grid-template-columns: minmax(104px, 132px) minmax(0, 1fr); gap: 4px 10px; font-size: var(--f-sm); line-height: 1.4; }
   #system-status .details dd { margin-bottom: 0; }
   .system-disclosure { margin-top: var(--s-3); }

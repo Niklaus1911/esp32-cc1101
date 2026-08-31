@@ -13,6 +13,7 @@
 #include "network_mdns.hpp"
 #include "network_mqtt.hpp"
 #include "network_wifi.hpp"
+#include "ota_update.hpp"
 #include "platform_board.hpp"
 #include "rf_automation.hpp"
 #include "rf_automation_event.hpp"
@@ -29,7 +30,7 @@ namespace {
 
 constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;
 constexpr std::size_t kMaximumActionBodySize = 2048;
-constexpr std::size_t kScratchSize = 512;
+constexpr std::size_t kScratchSize = 1024;
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
@@ -334,6 +335,8 @@ esp_err_t live_handler(httpd_req_t *request)
     RfFrame frame{};
     LearnedMatch match{};
     const esp_err_t radio_error = get_rf_radio_status(&radio);
+    RfGenericGpioConfig generic_gpio{};
+    const esp_err_t generic_gpio_error = get_rf_generic_gpio_config(&generic_gpio);
     const esp_err_t signals_error = get_rf_signals_status(&signals);
     const esp_err_t automation_error = rf_automation_get_status(&automation);
     const esp_err_t wifi_error = get_network_wifi_status(&wifi);
@@ -342,6 +345,18 @@ esp_err_t live_handler(httpd_req_t *request)
     const esp_err_t frame_error = get_last_rf_frame_with_match(&frame, &match);
     const BoardInfo &board = current_board_info();
     const BoardMemorySnapshot memory = board_memory_snapshot();
+    int generic_tx_options[kBoardGenericGpioOptionCapacity]{};
+    int generic_rx_options[kBoardGenericGpioOptionCapacity]{};
+    std::size_t generic_tx_option_count = 0;
+    std::size_t generic_rx_option_count = 0;
+    const int activity_led_gpio = board.activity_led_enabled ? board.activity_led_gpio : -1;
+    if (!board_generic_gpio_options(board.profile, true, activity_led_gpio, generic_tx_options,
+                                    std::size(generic_tx_options), &generic_tx_option_count) ||
+        !board_generic_gpio_options(board.profile, false, activity_led_gpio, generic_rx_options,
+                                    std::size(generic_rx_options), &generic_rx_option_count)) {
+        return send_api_error(request, "500 Internal Server Error", "gpio_options_unavailable",
+                              ESP_ERR_INVALID_RESPONSE);
+    }
 
     char escaped_ssid[kWifiSsidCapacity * 6U]{};
     char escaped_saved_ssid[kWifiSsidCapacity * 6U]{};
@@ -579,7 +594,9 @@ esp_err_t live_handler(httpd_req_t *request)
             "\"activity_led_enabled\":%s,\"activity_led_gpio\":%d,"
             "\"activity_led_active_high\":%s,\"cc1101\":{\"sclk\":%d,\"miso\":%d,"
             "\"mosi\":%d,\"cs\":%d,\"gdo0_tx\":%d,\"gdo2_rx\":%d},"
-            "\"generic\":{\"tx\":%d,\"rx\":%d}},",
+            "\"generic\":{\"tx\":%d,\"rx\":%d,\"default_tx\":%d,\"default_rx\":%d,"
+            "\"saved_tx\":%d,\"saved_rx\":%d,\"saved\":%s,\"pending\":%s,"
+            "\"overlap_cc1101\":%s,\"configuration_error\":\"%s\",\"tx_options\":[",
             board.profile_name, board.model_name, board.target_name, board.flash_mib,
             board.psram_mib,
             console_transport_name(board.console),
@@ -587,8 +604,31 @@ esp_err_t live_handler(httpd_req_t *request)
             board.activity_led_enabled ? "true" : "false", board.activity_led_gpio,
             board.activity_led_active_high ? "true" : "false", board.cc1101.sclk,
             board.cc1101.miso, board.cc1101.mosi, board.cc1101.cs, board.cc1101.gdo0,
-            board.cc1101.gdo2, board.cc1101.generic_tx, board.cc1101.generic_rx);
+            board.cc1101.gdo2, generic_gpio.active_tx_gpio, generic_gpio.active_rx_gpio,
+            generic_gpio.default_tx_gpio, generic_gpio.default_rx_gpio,
+            generic_gpio.saved_tx_gpio, generic_gpio.saved_rx_gpio,
+            generic_gpio.saved ? "true" : "false", generic_gpio.pending ? "true" : "false",
+            generic_gpio.overlap_cc1101 ? "true" : "false",
+            esp_err_to_name(generic_gpio.configuration_error != ESP_OK
+                                ? generic_gpio.configuration_error
+                                : generic_gpio_error));
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    for (std::size_t index = 0; error == ESP_OK && index < generic_tx_option_count; ++index) {
+        const int length = std::snprintf(scratch, sizeof(scratch), "%s%d",
+                                         index == 0 ? "" : ",", generic_tx_options[index]);
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        error = send_chunk(request, "],\"rx_options\":[");
+    }
+    for (std::size_t index = 0; error == ESP_OK && index < generic_rx_option_count; ++index) {
+        const int length = std::snprintf(scratch, sizeof(scratch), "%s%d",
+                                         index == 0 ? "" : ",", generic_rx_options[index]);
+        error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
+    }
+    if (error == ESP_OK) {
+        error = send_chunk(request, "]}},");
     }
     if (error == ESP_OK) {
         const int length = std::snprintf(
@@ -1095,6 +1135,46 @@ esp_err_t hardware_handler(httpd_req_t *request)
         request, bridge_control_set_rf_hardware(form.hardware, BridgeEventSource::kWeb));
 }
 
+esp_err_t generic_gpio_handler(httpd_req_t *request)
+{
+    std::unique_ptr<char[]> body;
+    std::size_t length = 0;
+    esp_err_t error = receive_action_form(request, &body, &length);
+    if (error != ESP_OK) {
+        return error;
+    }
+    WebGenericGpioForm form{};
+    if (!parse_web_generic_gpio_form(body.get(), length, &form)) {
+        return send_api_error(request, "400 Bad Request", "invalid_generic_gpio_request",
+                              ESP_ERR_INVALID_ARG);
+    }
+    error = reserve_system_reboot();
+    if (error != ESP_OK) {
+        return send_api_error(request, "503 Service Unavailable", esp_err_to_name(error), error);
+    }
+    bool reboot_required = false;
+    error = set_rf_generic_gpio_config(form.tx_gpio, form.rx_gpio, &reboot_required);
+    if (error != ESP_OK) {
+        cancel_system_reboot();
+        return send_api_error(request, status_for_error(error), esp_err_to_name(error), error);
+    }
+    if (!reboot_required) {
+        cancel_system_reboot();
+        return send_json(request, "200 OK", "{\"ok\":true,\"rebooting\":false}");
+    }
+    char response[kScratchSize]{};
+    const int response_length = std::snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"rebooting\":true,\"tx_gpio\":%u,\"rx_gpio\":%u}",
+        static_cast<unsigned>(form.tx_gpio), static_cast<unsigned>(form.rx_gpio));
+    if (response_length < 0 || static_cast<std::size_t>(response_length) >= sizeof(response)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const esp_err_t response_error = send_json(request, "202 Accepted", response);
+    commit_system_reboot();
+    return response_error;
+}
+
 esp_err_t register_handler(httpd_handle_t server, const char *uri, httpd_method_t method,
                            esp_err_t (*handler)(httpd_req_t *), void *context = nullptr)
 {
@@ -1166,6 +1246,7 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/api/rules", HTTP_DELETE, remove_rule_handler, nullptr},
         {"/api/rules", HTTP_PATCH, patch_rule_handler, nullptr},
         {"/api/radio/hardware", HTTP_POST, hardware_handler, nullptr},
+        {"/api/radio/generic-gpio", HTTP_POST, generic_gpio_handler, nullptr},
     };
     for (const Route &route : routes) {
         const esp_err_t error = register_handler(server, route.uri, route.method, route.handler,

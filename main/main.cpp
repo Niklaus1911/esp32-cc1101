@@ -65,6 +65,11 @@ extern "C" void app_main(void)
         ESP_LOGE(kTag, "Persistent RF storage unavailable: %s; NVS was not erased",
                  esp_err_to_name(storage_error));
     }
+    const esp_err_t generic_gpio_error = rfbridge::initialize_rf_generic_gpio_config();
+    if (generic_gpio_error != ESP_OK) {
+        ESP_LOGW(kTag, "Generic RF GPIO configuration unavailable: %s; using profile defaults",
+                 esp_err_to_name(generic_gpio_error));
+    }
     const esp_err_t network_error = rfbridge::initialize_network_wifi();
     if (network_error != ESP_OK) {
         ESP_LOGE(kTag, "Optional Wi-Fi unavailable: %s", esp_err_to_name(network_error));

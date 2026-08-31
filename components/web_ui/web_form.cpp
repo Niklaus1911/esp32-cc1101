@@ -559,6 +559,30 @@ bool parse_web_hardware_form(const char *body, std::size_t length, WebHardwareFo
     return false;
 }
 
+bool parse_web_generic_gpio_form(const char *body, std::size_t length,
+                                 WebGenericGpioForm *output)
+{
+    if (output == nullptr) {
+        return false;
+    }
+    Field fields[2]{};
+    std::size_t count = 0;
+    constexpr const char *keys[] = {"tx_gpio", "rx_gpio"};
+    if (!parse_fields(body, length, fields, std::size(fields), &count) ||
+        !exact_fields(fields, count, keys, std::size(keys))) {
+        return false;
+    }
+    uint64_t tx_gpio = 0;
+    uint64_t rx_gpio = 0;
+    if (!parse_bounded_field(find_field(fields, count, "tx_gpio"), 0, 48, &tx_gpio) ||
+        !parse_bounded_field(find_field(fields, count, "rx_gpio"), 0, 48, &rx_gpio)) {
+        return false;
+    }
+    output->tx_gpio = static_cast<uint8_t>(tx_gpio);
+    output->rx_gpio = static_cast<uint8_t>(rx_gpio);
+    return true;
+}
+
 bool web_form_content_type_is_valid(const char *content_type)
 {
     constexpr char expected[] = "application/x-www-form-urlencoded";

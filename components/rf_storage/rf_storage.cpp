@@ -21,6 +21,7 @@ constexpr char kRuleMetaNamespace[] = "rf_rule_meta";
 constexpr char kHardwareNamespace[] = "rf_hw";
 constexpr char kRecentNamespace[] = "rf_recent";
 constexpr char kHardwareKey[] = "selection";
+constexpr char kGenericGpioKey[] = "generic_gpio";
 constexpr char kRecentKey[] = "history";
 constexpr char kRuleEnabledKey[] = "enabled";
 constexpr char kRuleLogModeKey[] = "log_mode";
@@ -197,6 +198,19 @@ esp_err_t map_hardware_format_result(RfHardwareFormatResult result)
         case RfHardwareFormatResult::kInvalidCrc: return ESP_ERR_INVALID_CRC;
         case RfHardwareFormatResult::kBufferTooSmall: return ESP_ERR_INVALID_SIZE;
         case RfHardwareFormatResult::kInvalidRecord: return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_ERR_INVALID_RESPONSE;
+}
+
+esp_err_t map_generic_gpio_format_result(RfGenericGpioFormatResult result)
+{
+    switch (result) {
+        case RfGenericGpioFormatResult::kOk: return ESP_OK;
+        case RfGenericGpioFormatResult::kInvalidArgument: return ESP_ERR_INVALID_ARG;
+        case RfGenericGpioFormatResult::kInvalidVersion: return ESP_ERR_INVALID_VERSION;
+        case RfGenericGpioFormatResult::kInvalidCrc: return ESP_ERR_INVALID_CRC;
+        case RfGenericGpioFormatResult::kBufferTooSmall: return ESP_ERR_INVALID_SIZE;
+        case RfGenericGpioFormatResult::kInvalidRecord: return ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_ERR_INVALID_RESPONSE;
 }
@@ -630,6 +644,97 @@ esp_err_t rf_storage_hardware_set(RfHardware hardware)
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kHardwareKey, record, size), "rf_storage", "set hardware");
+    return nvs_commit(handle.get());
+}
+
+esp_err_t rf_storage_generic_gpio_get(uint8_t *profile_id, uint8_t *tx_gpio, uint8_t *rx_gpio,
+                                       bool *persisted)
+{
+    if (profile_id == nullptr || tx_gpio == nullptr || rx_gpio == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *profile_id = 0;
+    *tx_gpio = 0;
+    *rx_gpio = 0;
+    if (persisted != nullptr) {
+        *persisted = false;
+    }
+    const esp_err_t ready = s_hardware_initialization_error.load(std::memory_order_acquire);
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kHardwareNamespace, NVS_READONLY, &handle), "rf_storage",
+                        "open hardware");
+    std::size_t size = 0;
+    esp_err_t error = nvs_get_blob(handle.get(), kGenericGpioKey, nullptr, &size);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (error != ESP_OK || size > 32U) {
+        return error == ESP_OK ? ESP_ERR_INVALID_RESPONSE : error;
+    }
+    uint8_t record[32]{};
+    error = nvs_get_blob(handle.get(), kGenericGpioKey, record, &size);
+    if (error != ESP_OK) {
+        return error;
+    }
+    const esp_err_t decode_error = map_generic_gpio_format_result(
+        decode_rf_generic_gpio_record(record, size, profile_id, tx_gpio, rx_gpio));
+    if (decode_error == ESP_OK && persisted != nullptr) {
+        *persisted = true;
+    }
+    return decode_error;
+}
+
+esp_err_t rf_storage_generic_gpio_set(uint8_t profile_id, uint8_t tx_gpio, uint8_t rx_gpio)
+{
+    uint8_t record[32]{};
+    std::size_t size = 0;
+    ESP_RETURN_ON_ERROR(map_generic_gpio_format_result(encode_rf_generic_gpio_record(
+                            profile_id, tx_gpio, rx_gpio, record, sizeof(record), &size)),
+                        "rf_storage", "encode generic GPIO");
+    const esp_err_t ready = s_hardware_initialization_error.load(std::memory_order_acquire);
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kHardwareNamespace, NVS_READWRITE, &handle), "rf_storage",
+                        "open hardware");
+    bool matches = false;
+    std::size_t existing_size = 0;
+    esp_err_t existing_error = nvs_get_blob(handle.get(), kGenericGpioKey, nullptr, &existing_size);
+    if (existing_error == ESP_OK && existing_size <= sizeof(record)) {
+        uint8_t existing_record[32]{};
+        existing_error = nvs_get_blob(handle.get(), kGenericGpioKey, existing_record, &existing_size);
+        if (existing_error == ESP_OK) {
+            uint8_t existing_profile = 0;
+            uint8_t existing_tx = 0;
+            uint8_t existing_rx = 0;
+            matches = decode_rf_generic_gpio_record(existing_record, existing_size,
+                                                     &existing_profile, &existing_tx, &existing_rx) ==
+                          RfGenericGpioFormatResult::kOk &&
+                      existing_profile == profile_id && existing_tx == tx_gpio &&
+                      existing_rx == rx_gpio;
+        }
+    }
+    if (existing_error != ESP_OK && existing_error != ESP_ERR_NVS_NOT_FOUND &&
+        existing_error != ESP_ERR_NVS_TYPE_MISMATCH) {
+        return existing_error;
+    }
+    if (matches) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kGenericGpioKey, record, size), "rf_storage",
+                        "set generic GPIO");
     return nvs_commit(handle.get());
 }
 

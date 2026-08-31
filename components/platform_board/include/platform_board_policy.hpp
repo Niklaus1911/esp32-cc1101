@@ -56,11 +56,15 @@ struct BoardInfo {
     bool activity_led_active_high = true;
 };
 
+constexpr std::size_t kBoardGenericGpioOptionCapacity = 49;
+
 const BoardInfo *board_info(BoardProfile profile);
 bool board_profile_supports_combined_services(BoardProfile profile);
 bool board_cc1101_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &gpios);
 bool board_generic_gpio_map_is_valid(BoardProfile profile, const BoardGpioMap &cc1101,
                                      int generic_tx, int generic_rx, int activity_led_gpio = -1);
+bool board_generic_gpio_options(BoardProfile profile, bool output, int activity_led_gpio,
+                                int *options, std::size_t capacity, std::size_t *count);
 bool board_activity_led_gpio_is_valid(BoardProfile profile, int gpio,
                                       const int *unavailable_gpios,
                                       std::size_t unavailable_gpio_count);

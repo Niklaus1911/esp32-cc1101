@@ -82,6 +82,11 @@ struct WebHardwareForm {
     RfHardware hardware = RfHardware::kCc1101;
 };
 
+struct WebGenericGpioForm {
+    uint8_t tx_gpio = 0;
+    uint8_t rx_gpio = 0;
+};
+
 bool parse_web_learn_form(const char *body, std::size_t length, char *name,
                           std::size_t name_capacity);
 bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *output);
@@ -96,6 +101,8 @@ bool parse_web_rule_add_form(const char *body, std::size_t length, WebRuleAddFor
 bool parse_web_rule_remove_form(const char *body, std::size_t length, WebRuleRemoveForm *output);
 bool parse_web_rule_patch_form(const char *body, std::size_t length, WebRulePatchForm *output);
 bool parse_web_hardware_form(const char *body, std::size_t length, WebHardwareForm *output);
+bool parse_web_generic_gpio_form(const char *body, std::size_t length,
+                                 WebGenericGpioForm *output);
 bool web_form_content_type_is_valid(const char *content_type);
 bool web_octet_stream_content_type_is_valid(const char *content_type);
 bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_port);

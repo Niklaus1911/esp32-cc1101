@@ -78,6 +78,16 @@ TEST_CASE("responsive Web forms accept only exact bounded fields", "[web_ui]")
     constexpr char embedded_nul_body[] = "hardware=cc1101\0junk";
     TEST_ASSERT_FALSE(rfbridge::parse_web_hardware_form(
         embedded_nul_body, sizeof(embedded_nul_body) - 1U, &hardware));
+
+    rfbridge::WebGenericGpioForm generic_gpio{};
+    constexpr char generic_gpio_body[] = "tx_gpio=13&rx_gpio=4";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_generic_gpio_form(
+        generic_gpio_body, sizeof(generic_gpio_body) - 1U, &generic_gpio));
+    TEST_ASSERT_EQUAL_UINT8(13, generic_gpio.tx_gpio);
+    TEST_ASSERT_EQUAL_UINT8(4, generic_gpio.rx_gpio);
+    constexpr char generic_gpio_invalid[] = "tx_gpio=49&rx_gpio=4";
+    TEST_ASSERT_FALSE(rfbridge::parse_web_generic_gpio_form(
+        generic_gpio_invalid, sizeof(generic_gpio_invalid) - 1U, &generic_gpio));
 }
 
 TEST_CASE("responsive Web origin and escaping contracts are bounded", "[web_ui]")

@@ -166,6 +166,15 @@
           <button id="apply-radio-hardware" type="button" class="primary">Apply</button>
           <span id="radio-hardware-feedback" class="subtle" role="status"></span>
         </div>
+        <div class="settings-row generic-gpio-row">
+          <label>Generic TX GPIO<select id="generic-tx-gpio" aria-describedby="generic-gpio-warning"></select></label>
+          <label>Generic RX GPIO<select id="generic-rx-gpio" aria-describedby="generic-gpio-warning"></select></label>
+          <button id="apply-generic-gpio" type="button" class="primary">Save and reboot</button>
+          <span id="generic-gpio-feedback" class="subtle" role="status"></span>
+        </div>
+        <p id="generic-gpio-warning" class="security-note" role="alert">
+          Disconnect the Generic ASK/OOK and CC1101 modules before changing wiring or using overlapping GPIOs.
+        </p>
         <div class="system-grid">
           <div class="system-group">
             <h3>RF service</h3>

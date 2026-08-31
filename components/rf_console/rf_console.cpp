@@ -1509,6 +1509,12 @@ int render_service_status()
 int render_board_status()
 {
     const BoardInfo &board = current_board_info();
+    RfGenericGpioConfig generic{};
+    (void)get_rf_generic_gpio_config(&generic);
+    const int generic_tx = generic.active_tx_gpio >= 0 ? generic.active_tx_gpio
+                                                        : board.cc1101.generic_tx;
+    const int generic_rx = generic.active_rx_gpio >= 0 ? generic.active_rx_gpio
+                                                        : board.cc1101.generic_rx;
     if (current_console_style() == ConsoleStyle::kPlain) {
         std::printf(
             "BOARD profile=%s target=%s flash_mib=%u psram_mib=%u console=%s both=%u led=%s led_gpio=%d led_active_high=%u\n",
@@ -1519,8 +1525,7 @@ int render_board_status()
         std::printf("BOARD_CC1101 sclk=%d miso=%d mosi=%d cs=%d gdo0_tx=%d gdo2_rx=%d\n",
                     board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi,
                     board.cc1101.cs, board.cc1101.gdo0, board.cc1101.gdo2);
-        std::printf("BOARD_GENERIC tx_data=%d rx_data=%d\n", board.cc1101.generic_tx,
-                    board.cc1101.generic_rx);
+        std::printf("BOARD_GENERIC tx_data=%d rx_data=%d\n", generic_tx, generic_rx);
         return 0;
     }
     print_dashboard_header("Board profile");
@@ -1545,8 +1550,7 @@ int render_board_status()
     std::snprintf(left, sizeof(left), "TX GDO0 %d / RX GDO2 %d", board.cc1101.gdo0,
                   board.cc1101.gdo2);
     print_dashboard_value("CC1101 RMT", left, ConsoleTone::kInfo);
-    std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d", board.cc1101.generic_tx,
-                  board.cc1101.generic_rx);
+    std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d", generic_tx, generic_rx);
     print_dashboard_value("Generic RF", left, ConsoleTone::kInfo);
     print_dashboard_footer();
     return 0;

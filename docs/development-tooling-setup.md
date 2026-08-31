@@ -68,11 +68,11 @@ The production image artifacts and OTA slots are:
 | Profile | Image | Flash / PSRAM | Console / activity LED | CC1101 defaults (SCK/MISO/MOSI/CSN/GDO0/GDO2) | Generic TX/RX | OTA slot |
 |---|---|---|---|---|---|---:|
 | `esp32-devkit` | `build/esp32-devkit/esp32-cc1101.bin` | 4 MB / none | UART0 GPIO1/3 / GPIO2 active-high | `18/19/23/27/26/25` | `32/33` | `0x1e0000` |
-| `esp32s3-devkitc-n16r8` | `build/esp32s3-devkitc-n16r8/esp32-cc1101.bin` | 16 MB / 8 MB Octal | UART0 GPIO43/44 / disabled, GPIO48 reserved | `12/13/11/10/4/5` | `6/7` | `0x7e0000` |
+| `esp32s3-devkitc-n16r8` | `build/esp32s3-devkitc-n16r8/esp32-cc1101.bin` | 16 MB / 8 MB Octal | UART0 GPIO43/44 / disabled, GPIO48 reserved | `12/13/11/10/4/5` | `13/4` | `0x7e0000` |
 | `xiao-esp32s3` | `build/xiao-esp32s3/esp32-cc1101.bin` | 8 MB / 8 MB Octal | USB Serial/JTAG / GPIO21 active-low | `7/8/9/4/2/1` | `5/6` | `0x3e0000` |
 | `esp32s3-supermini-fh4r2` | `build/esp32s3-supermini-fh4r2/esp32-cc1101.bin` | 4 MB / 2 MB Quad | USB Serial/JTAG / disabled, GPIO48 reserved | `12/13/11/10/4/5` | `6/7` | `0x1e0000` |
 
-The generic DATA GPIOs are fixed by profile. CC1101 defaults may be intentionally overridden through the owning ESP-IDF configuration only when the selected board's GPIO validation and non-overlap rules remain satisfied.
+The table lists profile-default Generic DATA GPIOs. Valid Generic TX/RX GPIOs can be changed from Web UI **System > RF hardware** and apply after reboot. Generic pins may overlap any CC1101 pin because only one module set is connected at a time; the UI warns about this condition. CC1101 defaults may be intentionally overridden through the owning ESP-IDF configuration only when the selected board's GPIO validation and overlap rules remain satisfied. Never connect CC1101 and generic modules simultaneously, and perform all rewiring with power removed.
 
 ### LAN OTA workflow
 
@@ -242,7 +242,9 @@ The active servers are:
 |---|---|---|
 | `espressif-docs` | Streamable HTTP with OAuth | Search official Espressif documentation |
 | `esp-idf-tools` | Local stdio | Build, clean, set target, and flash ESP-IDF projects |
-| `playwright` | Local stdio | Drive a browser for Web UI validation |
+| `playwright` | Local stdio | Drive a browser for Web UI validation when the MCP server is available |
+
+Browser validation can use either this Playwright MCP server or OMP's native `browser` tool. Use Playwright MCP for the repository's complete validation workflow when it is available; use the native OMP browser for quick exploratory/interactive tasks or as the fallback when the MCP server is unavailable. OMP can filter browser MCP servers while `browser.enabled` is true, so these are selectable session/configuration paths rather than guaranteed simultaneous tools: disable `browser.enabled` when Playwright MCP is the required path, or leave it enabled when using the native browser. Check `/mcp` after changing the path and use the same local-mock, screenshot, console, network, viewport, and destructive-action safeguards with either implementation.
 
 The working ESP-IDF Tools launcher is equivalent to:
 
@@ -256,11 +258,11 @@ Espressif Documentation uses browser-based OAuth. Codex stores its credential ou
 
 `codex mcp list` reports `Auth: Unsupported` for the two local stdio servers. This is normal: they do not use Codex's OAuth mechanism. It does not mean that startup or tool discovery failed.
 
-## Playwright for Codex
+## Browser validation for Codex
 
-The active Codex browser workflow uses Microsoft's Playwright MCP server through `npx @playwright/mcp@latest`. In a fresh Codex session, `/mcp` should list browser navigation, interaction, console, network, viewport, snapshot, and screenshot tools under `playwright`.
+The preferred Codex browser workflow for full Web UI validation uses Microsoft's Playwright MCP server through `npx @playwright/mcp@latest`. In a fresh Codex session, `/mcp` should list browser navigation, interaction, console, network, viewport, snapshot, and screenshot tools under `playwright`. If Playwright MCP is unavailable, use OMP's native `browser` tool instead; it supports the required navigation, interaction, accessibility inspection, and screenshot checks for exploratory or fallback validation. If Playwright MCP is specifically required, set `browser.enabled: false` in the active OMP settings so OMP does not filter the browser MCP server, then restart or reload MCP and confirm it with `/mcp`.
 
-Validate against a deterministic local mock before using an authorized device. Intercept RF transmit, replay, destructive maintenance, OTA, and configuration-changing requests unless those effects are explicitly authorized. Do not reuse a personal authenticated browser profile.
+The selected browser path must still validate against a deterministic local mock before using an authorized device. Intercept RF transmit, replay, destructive maintenance, OTA, and configuration-changing requests unless those effects are explicitly authorized. Do not reuse a personal authenticated browser profile.
 
 Do not commit browser profiles, storage state, screenshots, traces, npm caches, or OAuth credentials.
 
