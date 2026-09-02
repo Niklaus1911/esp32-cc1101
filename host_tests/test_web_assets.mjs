@@ -166,6 +166,11 @@ assertOrder(genericGpioHandler, [
 ], "Generic GPIO reboot transaction");
 assert(!genericGpioHandler.includes('\\"saved\\":true'),
        "reboot reservation failure must not claim that GPIO settings were saved");
+assertOrder(genericGpioHandler, [
+  "response_length < 0",
+  "cancel_system_reboot()",
+  "return ESP_ERR_INVALID_SIZE;",
+], "Generic GPIO format failure must release the reboot reservation");
 const hardwareRenderer = sourceSection(js, "function renderRadioHardware(",
                                        "function formatState(", "RF hardware renderer");
 assert(hardwareRenderer.includes('["cc1101","generic"].includes') &&

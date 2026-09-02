@@ -157,5 +157,14 @@ assert(hardwareRead.includes("OutputGuard guard") && hardwareRead.includes("guar
 assert(consoleSource.includes('print_dashboard_row("Switch error"') &&
        consoleSource.includes('"Switches", right'),
        "pretty radio status must show switch diagnostics");
+const gpioLoad = sourceSection(
+  radio, "esp_err_t load_generic_gpio_config()", "const BoardGpioMap &active_gpio_map(",
+  "generic GPIO load");
+assert(gpioLoad.includes("load_error = profile_matches ? ESP_ERR_INVALID_RESPONSE : ESP_ERR_INVALID_STATE") &&
+       gpioLoad.includes("config.configuration_error = load_error"),
+       "profile-mismatch init error must match the cached configuration error");
+assert(consoleSource.includes("generic_config_error") &&
+       consoleSource.includes("BOARD_GENERIC tx_data=%d rx_data=%d config_error=%s"),
+       "console board status must surface the generic GPIO configuration error");
 
 console.log("RF hardware switch source contracts passed");

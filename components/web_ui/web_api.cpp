@@ -1168,6 +1168,7 @@ esp_err_t generic_gpio_handler(httpd_req_t *request)
         "{\"ok\":true,\"rebooting\":true,\"tx_gpio\":%u,\"rx_gpio\":%u}",
         static_cast<unsigned>(form.tx_gpio), static_cast<unsigned>(form.rx_gpio));
     if (response_length < 0 || static_cast<std::size_t>(response_length) >= sizeof(response)) {
+        cancel_system_reboot();
         return ESP_ERR_INVALID_SIZE;
     }
     const esp_err_t response_error = send_json(request, "202 Accepted", response);

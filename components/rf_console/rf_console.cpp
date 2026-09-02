@@ -1510,7 +1510,9 @@ int render_board_status()
 {
     const BoardInfo &board = current_board_info();
     RfGenericGpioConfig generic{};
-    (void)get_rf_generic_gpio_config(&generic);
+    const esp_err_t generic_error = get_rf_generic_gpio_config(&generic);
+    const esp_err_t generic_config_error =
+        generic_error != ESP_OK ? generic_error : generic.configuration_error;
     const int generic_tx = generic.active_tx_gpio >= 0 ? generic.active_tx_gpio
                                                         : board.cc1101.generic_tx;
     const int generic_rx = generic.active_rx_gpio >= 0 ? generic.active_rx_gpio
@@ -1525,7 +1527,12 @@ int render_board_status()
         std::printf("BOARD_CC1101 sclk=%d miso=%d mosi=%d cs=%d gdo0_tx=%d gdo2_rx=%d\n",
                     board.cc1101.sclk, board.cc1101.miso, board.cc1101.mosi,
                     board.cc1101.cs, board.cc1101.gdo0, board.cc1101.gdo2);
-        std::printf("BOARD_GENERIC tx_data=%d rx_data=%d\n", generic_tx, generic_rx);
+        if (generic_config_error == ESP_OK) {
+            std::printf("BOARD_GENERIC tx_data=%d rx_data=%d\n", generic_tx, generic_rx);
+        } else {
+            std::printf("BOARD_GENERIC tx_data=%d rx_data=%d config_error=%s\n", generic_tx,
+                        generic_rx, esp_err_to_name(generic_config_error));
+        }
         return 0;
     }
     print_dashboard_header("Board profile");
@@ -1550,8 +1557,15 @@ int render_board_status()
     std::snprintf(left, sizeof(left), "TX GDO0 %d / RX GDO2 %d", board.cc1101.gdo0,
                   board.cc1101.gdo2);
     print_dashboard_value("CC1101 RMT", left, ConsoleTone::kInfo);
-    std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d", generic_tx, generic_rx);
-    print_dashboard_value("Generic RF", left, ConsoleTone::kInfo);
+    if (generic_config_error == ESP_OK) {
+        std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d", generic_tx, generic_rx);
+    } else {
+        std::snprintf(left, sizeof(left), "TX DATA %d / RX DATA %d / %s", generic_tx, generic_rx,
+                      esp_err_to_name(generic_config_error));
+    }
+    print_dashboard_value("Generic RF", left,
+                          generic_config_error == ESP_OK ? ConsoleTone::kInfo
+                                                         : ConsoleTone::kWarning);
     print_dashboard_footer();
     return 0;
 }

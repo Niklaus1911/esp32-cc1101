@@ -146,6 +146,12 @@ std::atomic<uint32_t> s_hardware_switches{0};
 std::atomic<bool> s_generic_gpio_initialized{false};
 std::atomic_flag s_generic_gpio_initializing = ATOMIC_FLAG_INIT;
 portMUX_TYPE s_generic_gpio_mux = portMUX_INITIALIZER_UNLOCKED;
+// The active GPIO map has a single writer: load_generic_gpio_config() assigns it once
+// during boot initialization before publishing s_generic_gpio_initialized. Later calls
+// (including set_rf_generic_gpio_config()) only mutate the saved/pending fields of
+// s_generic_gpio_config, never the active map, so lock-free reads are safe. Any future
+// write to the active map after publication must take s_generic_gpio_mux and re-audit
+// every active_gpio_map() reader.
 BoardGpioMap s_active_gpio_map{};
 RfGenericGpioConfig s_generic_gpio_config{};
 rmt_receive_config_t s_receive_config{};
@@ -778,8 +784,8 @@ esp_err_t load_generic_gpio_config()
             config.saved_rx_gpio = rx_gpio;
             config.saved = true;
         } else {
-            load_error = ESP_ERR_INVALID_RESPONSE;
-            config.configuration_error = profile_matches ? load_error : ESP_ERR_INVALID_STATE;
+            load_error = profile_matches ? ESP_ERR_INVALID_RESPONSE : ESP_ERR_INVALID_STATE;
+            config.configuration_error = load_error;
         }
     } else if (load_error != ESP_OK) {
         config.configuration_error = load_error;
