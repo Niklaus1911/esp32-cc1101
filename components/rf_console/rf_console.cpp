@@ -42,7 +42,6 @@
 #include "rf_signals.hpp"
 #include "rf_storage.hpp"
 #include "sdkconfig.h"
-#include "web_auth.hpp"
 
 #if !CONFIG_ESP_CONSOLE_UART_DEFAULT && !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #error "rf_console requires the UART0 or USB Serial/JTAG primary console"
@@ -2077,55 +2076,6 @@ int ota_command(int argc, char **argv)
     return print_usage("usage: ota status (updates are uploaded from the PC HTTP client)");
 }
 
-int web_command(int argc, char **argv)
-{
-    if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
-        std::strcmp(argv[2], "status") == 0) {
-        const esp_err_t initialization_error = initialize_web_auth();
-        if (initialization_error != ESP_OK && initialization_error != ESP_ERR_NOT_FOUND &&
-            initialization_error != ESP_ERR_INVALID_RESPONSE) {
-            return print_result("web auth status", initialization_error);
-        }
-        WebAuthStatus status{};
-        const esp_err_t error = get_web_auth_status(&status);
-        if (error != ESP_OK) {
-            return print_result("web auth status", error);
-        }
-        char plain[128]{};
-        char pretty[128]{};
-        std::snprintf(plain, sizeof(plain),
-                       "WEB_AUTH available=%u provisioned=%u generation=%lu failures=%lu blocked_ms=%lu",
-                       status.available, status.provisioned,
-                       static_cast<unsigned long>(status.generation),
-                      static_cast<unsigned long>(status.failed_attempts),
-                      static_cast<unsigned long>(status.blocked_ms));
-        std::snprintf(pretty, sizeof(pretty), "Provisioned %s | blocked %lu ms",
-                      status.provisioned ? "yes" : "no",
-                      static_cast<unsigned long>(status.blocked_ms));
-        print_tagged_line(ConsoleTone::kInfo, "WEB", plain, pretty, false);
-        return 0;
-    }
-    if (argc == 3 && std::strcmp(argv[1], "auth") == 0 &&
-        std::strcmp(argv[2], "rotate") == 0) {
-        char token[kWebAuthTokenLength + 1U]{};
-        const esp_err_t error = rotate_web_auth_token(token, sizeof(token));
-        if (error != ESP_OK) {
-            return print_result("web auth rotate", error);
-        }
-        OutputGuard guard;
-        if (!guard.locked()) {
-            std::memset(token, 0, sizeof(token));
-            return 1;
-        }
-        std::printf("\nLEGACY WEB AUTH TOKEN %s\nStore this token; it will not be shown again.\n",
-                    token);
-        std::fflush(stdout);
-        std::memset(token, 0, sizeof(token));
-        return 0;
-    }
-    return print_usage("usage: web auth <status|rotate>");
-}
-
 int radio_command(int argc, char **argv)
 {
     if (argc == 2 && std::strcmp(argv[1], "info") == 0) {
@@ -2781,8 +2731,6 @@ constexpr CommandDefinition kCommands[] = {
     {"mqtt", "Configure native Home Assistant MQTT buttons", "<status|configure <ipv4> <username> [port]|forget>", mqtt_command},
     {"hostname", "Configure shared DHCP and mDNS identity", "<status|set <label>|reset>", hostname_command},
     {"ota", "Show LAN OTA service diagnostics", "<status>", ota_command},
-    {"web", "Inspect or rotate the legacy Web authentication record",
-     "auth <status|rotate>", web_command},
     {"radio", "Start, inspect, reset, or select RF hardware", "<start|info|reset|hardware>", radio_command},
     {"last", "Print the latest RAM frame", nullptr, last_command},
     {"recent", "List or use the five persistent decoded receptions",

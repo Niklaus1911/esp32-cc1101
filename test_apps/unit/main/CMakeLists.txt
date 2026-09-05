@@ -14,6 +14,6 @@ idf_component_register(
         "test_rf_storage_component.cpp"
         "test_web_form_component.cpp"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES platform_board platform_nvs network_wifi network_mdns network_mqtt app_maintenance ota_update cc1101 bridge_control bridge_events rf_automation rf_console rf_ook rf_signals rf_storage web_auth web_ui esp_hw_support nvs_flash unity
+    PRIV_REQUIRES platform_board platform_nvs network_wifi network_mdns network_mqtt app_maintenance ota_update cc1101 bridge_control bridge_events rf_automation rf_console rf_ook rf_signals rf_storage web_ui esp_hw_support nvs_flash unity
     WHOLE_ARCHIVE
 )

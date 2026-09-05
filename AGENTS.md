@@ -15,7 +15,6 @@
 - `components/rf_signals/`: learned-signal matching, learning state, replay ownership, and snapshots.
 - `components/platform_nvs/`: shared NVS initialization and availability state.
 - `components/web_ui/`: responsive assets, typed HTTP API, polling, request validation, and shared HTTP server ownership.
-- `components/web_auth/`: legacy token storage and UART token administration; the current trusted-LAN Web UI is unauthenticated.
 - `host_tests/`: portable C++17 codec/parser/storage/automation tests.
 - `test_apps/unit/`: dedicated ESP-IDF Unity image. Building it does not run its on-device tests.
 - `README.md`: authoritative hardware, command, RF, and safety documentation.
