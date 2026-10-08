@@ -13,6 +13,14 @@ It provides:
 - Versioned named-signal storage plus the five newest decoded receptions in NVS; the separate unnamed latest decoded or raw frame remains RAM-only.
 - Optional runtime Wi-Fi station mode with reboot-selected Web, MQTT, or (on any ESP32-S3 profile) simultaneous Web+MQTT operation. Web provides DHCP, collision-aware `.local` discovery, the trusted-LAN UI, and LAN OTA; MQTT provides native Home Assistant MQTT Discovery, learned-signal buttons, RF/automation activity, retained snapshots, and automation controls. RF, storage, automation, and the physical console remain shared by every mode.
 
+## License
+
+Copyright (c) 2026 Niklaus1911 and contributors.
+
+The original code, web assets, scripts, tests, and documentation are licensed under **GNU GPL version 3 or any later version** (`GPL-3.0-or-later`); see [LICENSE](LICENSE). This permits use, modification, and commercial redistribution under the license's conditions. Distributed derivatives must preserve the GPL's source-sharing requirements. The software is provided without warranty.
+
+Third-party material retains its own notices and terms: the adapted rc-switch protocol definitions are LGPL-2.1-or-later, and the bundled linenoise code is BSD-2-Clause. See [NOTICE.md](NOTICE.md) for attribution, license scope, and firmware distribution requirements.
+
 ## Hardware
 
 CC1101 and low-cost ASK/OOK module connector orders are not standardized. Wire by each module's **printed signal names**, not by physical header position.
@@ -641,7 +649,7 @@ The codec was ported from the hardened native `RF_Bridge_Mqtt` implementation us
 - One-bit-different raw identities, PWM topology changes, timing jitter, scaling, and cyclic capture phase.
 - Capacity/truncation rejection and 4–64-bit bounds.
 
-The 12 protocol timing definitions follow [`sui77/rc-switch`](https://github.com/sui77/rc-switch), LGPL-2.1-or-later; see `components/rf_codec/NOTICE.md` and `components/rf_codec/COPYING.LESSER`. The Arduino interrupt implementation is not included.
+The 12 protocol timing definitions follow [`sui77/rc-switch`](https://github.com/sui77/rc-switch), LGPL-2.1-or-later; see [components/rf_codec/NOTICE.md](components/rf_codec/NOTICE.md) and [components/rf_codec/COPYING.LESSER](components/rf_codec/COPYING.LESSER). The Arduino interrupt implementation is not included. The independently written project code is GPL-3.0-or-later, as described in [License](#license).
 
 ## Limits and safety
 
