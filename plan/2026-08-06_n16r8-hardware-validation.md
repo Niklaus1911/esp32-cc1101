@@ -32,7 +32,7 @@ During the user-owned monitor window, the user will:
 ```text
 wifi connect <ssid>
 # Enter the Wi-Fi password and wait for WIFI CONNECTED.
-mqtt configure 192.0.2.35 example_broker_user
+mqtt configure <broker-ipv4> <username>
 # Enter the MQTT password at the masked prompt.
 service mode both
 service status

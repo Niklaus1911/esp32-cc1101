@@ -5,9 +5,36 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly IDF_EXPORT="$HOME/.espressif/v6.0.2/esp-idf/export.sh"
-readonly CLASSIC_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00"
-readonly N16R8_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_N16R8-if00"
-readonly SUPERMINI_FH4R2_APPROVED_PORT="/dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00"
+readonly BOARD_PORTS_FILE="${RFBRIDGE_PORT_CONFIG:-$PROJECT_ROOT/.local/board-ports.conf}"
+CLASSIC_APPROVED_PORT=""
+N16R8_APPROVED_PORT=""
+SUPERMINI_FH4R2_APPROVED_PORT=""
+
+load_approved_ports() {
+    [[ -f "$BOARD_PORTS_FILE" ]] || return 0
+    local line key value
+    local -A seen=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            CLASSIC_APPROVED_PORT|N16R8_APPROVED_PORT|SUPERMINI_FH4R2_APPROVED_PORT) ;;
+            *) printf 'Invalid board port configuration key\n' >&2; exit 1 ;;
+        esac
+        if [[ "$line" != *=* || -n "${seen[$key]:-}" ]]; then
+            printf 'Invalid or duplicate board port configuration entry\n' >&2
+            exit 1
+        fi
+        if [[ -n "$value" && ( "$value" != /dev/serial/by-id/?* ||
+              "${value#/dev/serial/by-id/}" == */* ) ]]; then
+            printf 'Configured board port must be an exact /dev/serial/by-id/ path\n' >&2
+            exit 1
+        fi
+        seen[$key]=1
+        printf -v "$key" '%s' "$value"
+    done < "$BOARD_PORTS_FILE"
+}
 
 usage() {
     printf 'usage: %s <esp32-devkit|esp32s3-devkitc-n16r8|xiao-esp32s3|esp32s3-supermini-fh4r2> <build|size|flash|monitor> [--port <path>]\n' "$0" >&2
@@ -24,6 +51,11 @@ if [[ $# -ne 0 ]]; then
     [[ $# -eq 2 && "$1" == "--port" ]] || usage
     asserted_port="$2"
 fi
+
+case "$action" in
+    flash|monitor) load_approved_ports ;;
+esac
+readonly CLASSIC_APPROVED_PORT N16R8_APPROVED_PORT SUPERMINI_FH4R2_APPROVED_PORT
 
 case "$profile" in
     esp32-devkit)
@@ -80,16 +112,6 @@ readonly BOARD_DEFAULTS="$PROJECT_ROOT/boards/$profile/sdkconfig.defaults"
 readonly LOCK_FILE="$PROJECT_ROOT/dependencies.lock.$target"
 readonly SDKCONFIG_DEFAULTS="$PROJECT_ROOT/sdkconfig.defaults;$TARGET_DEFAULTS;$BOARD_DEFAULTS"
 
-if [[ ! -f "$IDF_EXPORT" || ! -f "$TARGET_DEFAULTS" || ! -f "$BOARD_DEFAULTS" ||
-      ! -f "$LOCK_FILE" ]]; then
-    printf 'Required ESP-IDF export, profile defaults, or dependency lock is missing\n' >&2
-    exit 1
-fi
-
-source "$IDF_EXPORT" >/dev/null
-readonly IDF_PYTHON="$IDF_PYTHON_ENV_PATH/bin/python"
-readonly IDF_CLI="$IDF_PATH/tools/idf.py"
-
 idf_command() {
     "$IDF_PYTHON" "$IDF_CLI" -C "$PROJECT_ROOT" -B "$BUILD_DIR" \
         -DIDF_TARGET="$target" -DSDKCONFIG="$GENERATED_SDKCONFIG" \
@@ -137,6 +159,20 @@ validate_hardware_port() {
 }
 
 case "$action" in
+    flash|monitor) validate_hardware_port ;;
+esac
+
+if [[ ! -f "$IDF_EXPORT" || ! -f "$TARGET_DEFAULTS" || ! -f "$BOARD_DEFAULTS" ||
+      ! -f "$LOCK_FILE" ]]; then
+    printf 'Required ESP-IDF export, profile defaults, or dependency lock is missing\n' >&2
+    exit 1
+fi
+
+source "$IDF_EXPORT" >/dev/null
+readonly IDF_PYTHON="$IDF_PYTHON_ENV_PATH/bin/python"
+readonly IDF_CLI="$IDF_PATH/tools/idf.py"
+
+case "$action" in
     build)
         idf_command build
         ;;
@@ -144,13 +180,11 @@ case "$action" in
         idf_command size
         ;;
     flash)
-        validate_hardware_port
         idf_command build
         validate_built_profile
         idf_command -p "$approved_port" flash
         ;;
     monitor)
-        validate_hardware_port
         validate_built_profile
         idf_command -p "$approved_port" monitor
         ;;

@@ -74,6 +74,9 @@ add_test(NAME push_ota_script_tests
 add_test(NAME documentation_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_documentation.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME board_port_script_tests
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_board_ports.sh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME web_asset_contract_tests
     COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_web_assets.mjs"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")

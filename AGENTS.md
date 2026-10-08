@@ -25,7 +25,7 @@ Run commands from the repository root. Start Codex CLI from this directory so pr
 
 At the start of every new coding-agent session, read `docs/development-tooling-setup.md` completely before using ESP-IDF, MCP tools, Playwright, or connected hardware. That guide is authoritative for the machine-local toolchain, profile workflow, and approved board-to-port mappings.
 
-Use `tools/build-board.sh <profile> <build|size|flash|monitor> [--port <approved-by-id-path>]` for every profile-specific production build, size report, flash, or monitor operation. Do not bypass its target, profile, image-header, `RFBD` descriptor, and persistent by-id checks with direct `esptool`, generic `idf.py flash`/`monitor`, the ESP-IDF Tools MCP `flash_project` operation, `/dev/ttyUSB*` or `/dev/ttyACM*` paths, or port auto-detection. Flash and monitor still require explicit approval for the confirmed board and exact approved path; keep the exact mappings authoritative in the tooling guide rather than duplicating them here.
+Use `tools/build-board.sh <profile> <build|size|flash|monitor> [--port <approved-by-id-path>]` for every profile-specific production build, size report, flash, or monitor operation. Do not bypass its target, profile, image-header, `RFBD` descriptor, and persistent by-id checks with direct `esptool`, generic `idf.py flash`/`monitor`, the ESP-IDF Tools MCP `flash_project` operation, `/dev/ttyUSB*` or `/dev/ttyACM*` paths, or port auto-detection. Flash and monitor still require explicit approval for the confirmed board and exact approved path; keep exact machine-local mappings only in the ignored `.local/board-ports.conf`, following the tooling guide.
 
 Run host tests from a clean native shell before activating the ESP-IDF cross-toolchain:
 

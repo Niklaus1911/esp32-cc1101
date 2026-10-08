@@ -17,6 +17,7 @@ Last verified with ESP-IDF 6.0.2, all four production profiles, both Unity targe
 | Active Codex MCP configuration and trust | `$HOME/.codex/config.toml` |
 | Legacy Pi MCP configuration | `.pi/mcp.json` |
 | Legacy Pi package declaration | `.pi/settings.json` |
+| Private approved board mappings | `.local/board-ports.conf` (ignored) |
 
 All committed configuration should use `$HOME` or discover the Git root. Do not commit user-specific absolute home paths, OAuth credentials, browser profiles, or generated package caches.
 
@@ -116,19 +117,28 @@ tools/build-board.sh esp32-devkit build
 
 The extension's generic target/flash buttons are not a substitute for selecting the profile. Never run `set-target`, `menuconfig`, or edit generated `sdkconfig` as part of a profile switch. Put durable defaults in the shared, target-specific, or board-specific defaults files instead.
 
-Native USB Serial/JTAG devices can disappear and re-enumerate during reset, bootloader entry, or a flash. The FH4R2 must return on its approved by-id path; a future XIAO path must meet the same persistence requirement before hardware access is enabled. Do not rely on `/dev/ttyACM*` auto-detection. The N16R8 profile uses its separate USB-UART connector on UART0 GPIO43/44 and has the fixed path listed below.
+Native USB Serial/JTAG devices can disappear and re-enumerate during reset, bootloader entry, or a flash. The FH4R2 must return on its approved by-id path; a future XIAO path must meet the same persistence requirement before hardware access is enabled. Do not rely on `/dev/ttyACM*` auto-detection. The N16R8 profile uses its separate USB-UART connector on UART0 GPIO43/44 and requires its own approved mapping in the private configuration below.
 
 ## Hardware Access Contract
 
-The currently approved production boards have separate exact paths:
+Exact board-to-port mappings belong in the ignored `.local/board-ports.conf`, never in committed documentation or scripts. Initialize it once:
 
-```text
-esp32-devkit:              /dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00
-esp32s3-devkitc-n16r8:     /dev/serial/by-id/usb-EXAMPLE_N16R8-if00
-esp32s3-supermini-fh4r2:   /dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00
+```bash
+mkdir -p .local
+install -m 600 tools/board-ports.example.conf .local/board-ports.conf
 ```
 
-`tools/build-board.sh` checks that the selected profile's exact symlink exists and resolves to a character device before allowing `flash` or `monitor`; it also validates the built target, flash header, profile define, and `RFBD` descriptor. Do not substitute a `/dev/ttyUSB*` or `/dev/ttyACM*` path, swap paths between boards, or use port auto-detection. The XIAO profile has no approved local wired path and is intentionally rejected for `flash`/`monitor` until one is explicitly added. FH4R2 validation in this workflow is limited to offline boot, native USB console, PSRAM, and local board diagnostics; no Wi-Fi-dependent test is authorized.
+Fill the matching key with the confirmed persistent `/dev/serial/by-id/` path for each explicitly approved board:
+
+| Profile | Private configuration key |
+|---|---|
+| `esp32-devkit` | `CLASSIC_APPROVED_PORT` |
+| `esp32s3-devkitc-n16r8` | `N16R8_APPROVED_PORT` |
+| `esp32s3-supermini-fh4r2` | `SUPERMINI_FH4R2_APPROVED_PORT` |
+
+Use plain `KEY=value` entries without quotes, whitespace around `=`, or shell expansion. Empty or missing mappings disable wired hardware access. The file is parsed as data and is never executed. `RFBRIDGE_PORT_CONFIG` can select a different private configuration file.
+
+`tools/build-board.sh` checks that the selected profile's exact symlink exists and resolves to a character device before activating ESP-IDF for `flash` or `monitor`; it also validates the built target, flash header, profile define, and `RFBD` descriptor. An explicit `--port` must match the configured path. Do not substitute a `/dev/ttyUSB*` or `/dev/ttyACM*` path, swap paths between boards, or use port auto-detection. The XIAO profile has no approved local wired path and is intentionally rejected for `flash`/`monitor` until support is explicitly added. FH4R2 validation in this workflow is limited to offline boot, native USB console, PSRAM, and local board diagnostics; no Wi-Fi-dependent test is authorized.
 
 ## Python Environments
 

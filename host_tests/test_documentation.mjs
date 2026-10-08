@@ -114,16 +114,18 @@ for (const profile of profiles) {
          `${profile.name} second OTA slot mismatch`);
 }
 
-const approvedPaths = [
-  "/dev/serial/by-id/usb-EXAMPLE_CLASSIC-if00",
-  "/dev/serial/by-id/usb-EXAMPLE_N16R8-if00",
-  "/dev/serial/by-id/usb-EXAMPLE_SUPERMINI_FH4R2-if00",
-];
-for (const path of approvedPaths) {
-  assert(tooling.includes(path), `tooling guide approved path missing: ${path}`);
-  assert(buildScript.includes(path), `build wrapper approved path missing: ${path}`);
-  assert(!readme.includes(path), `machine-local path must not be duplicated in README: ${path}`);
+const portExample = read("tools", "board-ports.example.conf");
+for (const key of [
+  "CLASSIC_APPROVED_PORT", "N16R8_APPROVED_PORT", "SUPERMINI_FH4R2_APPROVED_PORT",
+]) {
+  assert(tooling.includes(key), `tooling guide port configuration key missing: ${key}`);
+  assert(buildScript.includes(key), `build wrapper port configuration key missing: ${key}`);
+  assert(portExample.split("\n").includes(`${key}=`), `example must disable access by default: ${key}`);
 }
+assert(read(".gitignore").includes("/.local/"), "private configuration directory must be ignored");
+assert(tooling.includes(".local/board-ports.conf") && readme.includes(".local/board-ports.conf"),
+       "private board configuration workflow must be documented");
+assert(!buildScript.includes("/dev/serial/by-id/usb-"), "build wrapper must not embed device identifiers");
 
 for (const requirement of [
   "### First wired installation or migration",

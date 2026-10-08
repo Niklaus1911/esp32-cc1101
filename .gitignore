@@ -86,6 +86,7 @@ ehthumbs.db
 Desktop.ini
 
 # User-specific configuration files
+/.local/
 *.user
 # General workspace and Visual Studio user files
 *.workspace

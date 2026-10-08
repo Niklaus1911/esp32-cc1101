@@ -190,7 +190,7 @@ A blank board, legacy single-app image, or different board profile cannot receiv
 | `xiao-esp32s3` | Blocked until a persistent XIAO by-id path is supplied and explicitly approved |
 | `esp32s3-supermini-fh4r2` | Enabled with its approved persistent by-id path |
 
-The exact machine-local mappings are authoritative in [Development Tooling Setup](docs/development-tooling-setup.md#hardware-access-contract). For an enabled profile, use only the validated wrapper and its matching path:
+Store exact machine-local mappings in the ignored `.local/board-ports.conf`, initialized from `tools/board-ports.example.conf` as described in [Development Tooling Setup](docs/development-tooling-setup.md#hardware-access-contract). Missing or empty mappings disable wired hardware access. For an enabled profile, use only the validated wrapper and its matching path:
 
 ```bash
 tools/build-board.sh <profile> flash --port <approved-by-id-path>
@@ -328,7 +328,7 @@ mqtt status
 Configure a broker and select a service mode from UART:
 
 ```text
-mqtt configure 192.0.2.20 rfbridge
+mqtt configure <broker-ipv4> <username>
 # Enter the broker password at the masked prompt.
 service mode mqtt
 # On an S3, use `service mode both` for simultaneous Web and MQTT.
