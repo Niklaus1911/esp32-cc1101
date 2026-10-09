@@ -1603,6 +1603,23 @@ void test_web_forms()
             "Web raw transmit form accepts bounded alternating pulses");
     require(!rfbridge::parse_web_raw_form("start_level=0&durations=100,200,300&repeats=2", 45, &raw),
             "Web raw transmit form rejects short signals");
+    for (const char *start_level : {"0", "1", "0x0", "0x1"}) {
+        char body[128]{};
+        std::snprintf(body, sizeof(body),
+                      "start_level=%s&durations=100,200,300,400,500,600,700,800&repeats=2",
+                      start_level);
+        require(rfbridge::parse_web_raw_form(body, std::strlen(body), &raw) &&
+                    raw.start_level <= 1,
+                "Web raw transmit accepts both bounded start levels in decimal and hex");
+    }
+    for (const char *start_level : {"2", "9", "256", "257", "0x2", "0xf", "0x100"}) {
+        char body[128]{};
+        std::snprintf(body, sizeof(body),
+                      "start_level=%s&durations=100,200,300,400,500,600,700,800&repeats=2",
+                      start_level);
+        require(!rfbridge::parse_web_raw_form(body, std::strlen(body), &raw),
+                "Web raw transmit rejects out-of-range start levels before narrowing");
+    }
 
     rfbridge::WebRuleAddForm rule{};
     require(rfbridge::parse_web_rule_add_form("trigger=gate&target=lamp&repeats=3", 34, &rule) &&
@@ -1613,6 +1630,15 @@ void test_web_forms()
     rfbridge::WebRulePatchForm patch{};
     require(rfbridge::parse_web_rule_patch_form("enabled=1", 9, &patch) && patch.enabled,
             "Web rule enabled patch accepts boolean");
+    require(rfbridge::parse_web_rule_patch_form("enabled=0", 9, &patch) && !patch.enabled,
+            "Web rule enabled patch accepts false");
+    require(rfbridge::parse_web_rule_patch_form("enabled=0x1", 11, &patch) && patch.enabled,
+            "Web rule enabled patch accepts bounded hexadecimal boolean");
+    for (const char *body : {"enabled=2", "enabled=9", "enabled=256", "enabled=0x2",
+                             "enabled=0xf", "enabled=0x100"}) {
+        require(!rfbridge::parse_web_rule_patch_form(body, std::strlen(body), &patch),
+                "Web rule enabled patch rejects numeric values above one");
+    }
     require(rfbridge::parse_web_rule_patch_form("log_mode=verbose", 16, &patch) &&
                 patch.patch == rfbridge::WebRulePatch::kLogMode,
             "Web rule log patch accepts exact mode");

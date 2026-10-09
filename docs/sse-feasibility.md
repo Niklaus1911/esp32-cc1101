@@ -71,6 +71,10 @@ The browser creates one `EventSource` only while the page is visible and no conf
 
 The browser closes the stream when hidden, reconnects with bounded exponential backoff after errors, and continues the existing polling loop whenever the stream cannot be opened. A second tab that receives the single-client rejection remains usable through polling. No RF transmit, deletion, hardware switching, or OTA request is initiated by the stream itself.
 
+Connection, resync, and watchdog refreshes also fetch the visible signal catalog, recent history, and rules. Polling follows automation configuration revisions immediately and reconciles visible catalogs and rules every 30 seconds to recover missed events and catalog changes without a revision counter. Unchanged snapshots preserve existing list inputs and focus.
+
+OTA confirmation keeps polling while the stream, lists, and mutations are paused for reboot. The page reloads only after the expected image and partition report successful boot validation.
+
 ## Risks and Go/No-Go Gates
 
 SSE is a good fit for event latency, but it is not a free optimization. The implementation is a go only if all of the following hold:

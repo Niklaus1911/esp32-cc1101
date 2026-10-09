@@ -120,7 +120,7 @@ bool parse_unsigned(const Field &field, uint64_t maximum, uint64_t *output)
         } else if (base == 16 && character >= 'A' && character <= 'F') {
             digit = character - 'A' + 10U;
         }
-        if (digit >= base || value > (maximum - digit) / base) {
+        if (digit >= base || digit > maximum || value > (maximum - digit) / base) {
             return false;
         }
         value = value * base + digit;
@@ -132,7 +132,8 @@ bool parse_unsigned(const Field &field, uint64_t maximum, uint64_t *output)
 bool parse_bounded_field(const Field *field, uint64_t minimum, uint64_t maximum,
                          uint64_t *output)
 {
-    return field != nullptr && parse_unsigned(*field, maximum, output) && *output >= minimum;
+    return field != nullptr && parse_unsigned(*field, maximum, output) &&
+           *output >= minimum && *output <= maximum;
 }
 
 bool valid_name(const Field &field, char *output, std::size_t capacity)

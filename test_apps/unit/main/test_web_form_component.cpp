@@ -109,3 +109,33 @@ TEST_CASE("responsive Web origin and escaping contracts are bounded", "[web_ui]"
     char small[4]{};
     TEST_ASSERT_FALSE(rfbridge::escape_web_html("<", small, sizeof(small)));
 }
+
+TEST_CASE("Web boolean fields reject values above one before narrowing", "[web_ui]")
+{
+    rfbridge::WebRulePatchForm patch{};
+    TEST_ASSERT_TRUE(rfbridge::parse_web_rule_patch_form("enabled=0", 9, &patch));
+    TEST_ASSERT_FALSE(patch.enabled);
+    TEST_ASSERT_TRUE(rfbridge::parse_web_rule_patch_form("enabled=1", 9, &patch));
+    TEST_ASSERT_TRUE(patch.enabled);
+    const char *invalid_enabled[] = {
+        "enabled=2", "enabled=9", "enabled=256", "enabled=0x2", "enabled=0xf",
+    };
+    for (const char *body : invalid_enabled) {
+        TEST_ASSERT_FALSE(rfbridge::parse_web_rule_patch_form(body, std::strlen(body), &patch));
+    }
+
+    rfbridge::WebRawForm raw{};
+    constexpr char valid_raw[] =
+        "start_level=1&durations=100,200,300,400,500,600,700,800&repeats=2";
+    TEST_ASSERT_TRUE(rfbridge::parse_web_raw_form(valid_raw, sizeof(valid_raw) - 1U, &raw));
+    TEST_ASSERT_EQUAL_UINT8(1, raw.start_level);
+    const char *invalid_raw[] = {
+        "start_level=2&durations=100,200,300,400,500,600,700,800&repeats=2",
+        "start_level=256&durations=100,200,300,400,500,600,700,800&repeats=2",
+        "start_level=257&durations=100,200,300,400,500,600,700,800&repeats=2",
+        "start_level=0xf&durations=100,200,300,400,500,600,700,800&repeats=2",
+    };
+    for (const char *body : invalid_raw) {
+        TEST_ASSERT_FALSE(rfbridge::parse_web_raw_form(body, std::strlen(body), &raw));
+    }
+}

@@ -25,12 +25,16 @@ pulseAction:null,
 learningRevision:null,
 live:null,
 signals:[],
+signalsRefreshedAt:null,
 recent:[],
 recentRevision:null,
 recentLoading:false,
 sigBusy:false,
 rulesBusy:false,
 rules:[],
+rulesRevision:null,
+rulesRefreshedAt:null,
+rulesSnapshot:null,
 activity:[],
 radioDirty:false,
 genericGpioDirty:false,
@@ -46,6 +50,7 @@ const otaConfirmationTimeoutMs = 120000;
 const genericRebootConfirmationTimeoutMs = 60000;
 const genericRebootRetryMs = 1000;
 const requestTimeoutMs = 10000;
+const listSnapshotIntervalMs = 30000;
 const otaStallTimeoutMs = 15000;
 const otaSuccessStorageKey = "rfbridge.ota-success.v1";
 const otaImagePrefixSize = 304;
@@ -115,14 +120,33 @@ async function refreshViews() {
 const pending=[...state.kinds];
 state.kinds.clear();
 cancelPolling();
-await pollLive();
+await pollLive(pending);
+}
+async function reconcileVisibleViews(live, pending) {
 if (paused()) return;
 const signalsView=document.querySelector('[data-panel="signals"]');
 const rulesView=document.querySelector('[data-panel="rules"]');
-if (pending.includes("rx") && !signalsView.hidden) await refreshRecent();
-if (pending.includes("learning") && !signalsView.hidden) await refreshSignals();
-if (pending.includes("catalog") && (!signalsView.hidden || !rulesView.hidden)) await refreshSignalsAndRules();
-if (pending.includes("automation_config") && !rulesView.hidden) await refreshRules();
+const full=pending.some((kind)=>["hello","resync","watchdog"].includes(kind));
+const polling=!state.sse || state.sse.readyState !== 1;
+const now=Date.now();
+const catalogDue=polling && (state.signalsRefreshedAt === null ||
+now-state.signalsRefreshedAt >= listSnapshotIntervalMs);
+const catalog=full || pending.includes("catalog") || catalogDue;
+const learningChanged=state.learningRevision !== null &&
+live.learning.revision !== state.learningRevision && live.learning.state !== "armed";
+state.learningRevision=live.learning.revision;
+const recentRevision=live.recent?.revision;
+if (!signalsView.hidden && (full || pending.includes("rx") ||
+(Number.isInteger(recentRevision) && recentRevision !== state.recentRevision))) await refreshRecent();
+if (paused()) return;
+if ((!signalsView.hidden || !rulesView.hidden) &&
+(catalog || learningChanged || pending.includes("learning"))) await refreshSignals();
+if (paused()) return;
+const rulesDue=polling && (state.rulesRefreshedAt === null ||
+now-state.rulesRefreshedAt >= listSnapshotIntervalMs);
+const revision=live.automation.configuration_revision;
+if (!rulesView.hidden && (catalog || pending.includes("automation_config") || rulesDue ||
+(Number.isInteger(revision) && revision !== state.rulesRevision))) await refreshRules();
 }
 function queueRefresh(kind="live") {
 state.kinds.add(kind);
@@ -318,12 +342,12 @@ resumeLive();
 }
 function schedulePoll(delay = state.backoff) {
 clearTimeout(state.pollTimer);
-if (!document.hidden && !state.busy && !state.otaRebooting && !state.genericRebooting && !state.pollController &&
+if (!document.hidden && !state.busy && !state.genericRebooting && !state.pollController &&
 (!state.sse || state.sse.readyState !== 1)) {
 state.pollTimer = setTimeout(pollLive, delay);
 }
 }
-async function pollLive() {
+async function pollLive(pending = []) {
 if (document.hidden || state.busy || state.pollController) return;
 const generation = state.pollGeneration;
 const controller = new AbortController();
@@ -338,6 +362,7 @@ if (generation !== state.pollGeneration) return;
 state.backoff = 1000;
 setConnection(true, state.sse && state.sse.readyState === 1 ? "Connected" : "Polling");
 renderLive(live);
+await reconcileVisibleViews(live, pending);
 if (state.otaAttempt) await reconcileOtaAttempt();
 } catch (error) {
 if (generation === state.pollGeneration && (error.name !== "AbortError" || timedOut)) {
@@ -894,15 +919,6 @@ pulseRule(live.automation.last_trigger,live.automation.last_action_id);
 state.pulseAction=null;
 }
 });
-safeRender("revisions", () => {
-if (state.learningRevision !== null && live.learning.revision !== state.learningRevision &&
-live.learning.state !== "armed") refreshSignals();
-state.learningRevision = live.learning.revision;
-const recentRevision=live.recent?.revision;
-const signalsView=document.querySelector('[data-panel="signals"]');
-if (Number.isInteger(recentRevision) && recentRevision !== state.recentRevision &&
-!signalsView.hidden && !state.busy) refreshRecent();
-});
 safeRender("metrics", () => {
 byId("radio-state").textContent = live.radio.running ? "Running" : "Faulted";
 byId("radio-state").className = live.radio.running ? "value-ok" : "value-bad";
@@ -1049,8 +1065,12 @@ if (state.sigBusy) return;
 state.sigBusy = true;
 try {
 const payload = await readJson("/api/signals");
-state.signals = payload.signals || [];
+const signals = payload.signals || [];
+if (state.signalsRefreshedAt === null || JSON.stringify(signals) !== JSON.stringify(state.signals)) {
+state.signals = signals;
 renderSignals();
+}
+state.signalsRefreshedAt = Date.now();
 } catch (error) {
 showNotice(error.message || "Could not load signals", "error");
 } finally {
@@ -1088,7 +1108,14 @@ async function refreshRules() {
 if (state.rulesBusy) return;
 state.rulesBusy = true;
 try {
-renderRules(await readJson("/api/rules"));
+const payload = await readJson("/api/rules");
+const snapshot = JSON.stringify(payload);
+if (snapshot !== state.rulesSnapshot) {
+renderRules(payload);
+state.rulesSnapshot = snapshot;
+}
+state.rulesRevision = payload.revision;
+state.rulesRefreshedAt = Date.now();
 } catch (error) {
 showNotice(error.message || "Could not load rules", "error");
 } finally {
