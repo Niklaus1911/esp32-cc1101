@@ -8,6 +8,9 @@
 #include <cstring>
 
 #include "esp_check.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
@@ -34,6 +37,11 @@ std::atomic<esp_err_t> s_rule_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_rule_meta_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_hardware_initialization_error{ESP_ERR_INVALID_STATE};
 std::atomic<esp_err_t> s_recent_initialization_error{ESP_ERR_INVALID_STATE};
+// Write-back buffer for recent history. s_recent_unsaved is guarded by StorageLock; the dirty
+// flag and its timestamp are atomic so the write-back deadline can be polled without the lock.
+RfRecentHistory s_recent_unsaved{};
+std::atomic<bool> s_recent_dirty{false};
+std::atomic<int64_t> s_recent_dirty_since_us{0};
 std::atomic<bool> s_rule_namespace_known_absent{false};
 
 class StorageLock {
@@ -273,6 +281,55 @@ esp_err_t load_recent_history_owned(RfRecentHistory *history)
     return map_recent_format_result(decode_rf_recent_record(record, record_size, history));
 }
 
+esp_err_t current_recent_history_owned(RfRecentHistory *history)
+{
+    if (s_recent_dirty.load(std::memory_order_acquire)) {
+        *history = s_recent_unsaved;
+        return ESP_OK;
+    }
+    return load_recent_history_owned(history);
+}
+
+esp_err_t write_recent_history_owned(const RfRecentHistory &history)
+{
+    uint8_t record[kRfRecentMaxRecordSize]{};
+    std::size_t record_size = 0;
+    ESP_RETURN_ON_ERROR(map_recent_format_result(
+                            encode_rf_recent_record(history, record, sizeof(record), &record_size)),
+                        "rf_storage", "encode recent history");
+    NvsHandle handle;
+    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READWRITE, &handle), "rf_storage",
+                        "open recent history");
+    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kRecentKey, record, record_size), "rf_storage",
+                        "set recent history");
+    return nvs_commit(handle.get());
+}
+
+esp_err_t flush_recent_history_owned()
+{
+    if (!s_recent_dirty.load(std::memory_order_acquire)) {
+        return ESP_OK;
+    }
+    const esp_err_t error = write_recent_history_owned(s_recent_unsaved);
+    if (error != ESP_OK) {
+        // Keep the buffer and retry after another full delay instead of hammering NVS.
+        s_recent_dirty_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        return error;
+    }
+    s_recent_dirty.store(false, std::memory_order_release);
+    return ESP_OK;
+}
+
+void flush_recent_history_on_shutdown()
+{
+    StorageLock lock;
+    const esp_err_t error = lock.locked() ? flush_recent_history_owned() : ESP_ERR_TIMEOUT;
+    if (error != ESP_OK) {
+        ESP_LOGW("rf_storage", "Recent history not saved before restart: %s",
+                 esp_err_to_name(error));
+    }
+}
+
 esp_err_t load_rule_owned(nvs_handle_t handle, const char *trigger_name, RfStoredRule *rule)
 {
     std::size_t record_size = 0;
@@ -363,6 +420,14 @@ esp_err_t initialize_rf_storage()
         hardware_error = initialize_namespace(kHardwareNamespace, &hardware_absent);
         bool recent_absent = false;
         recent_error = initialize_namespace(kRecentNamespace, &recent_absent);
+    }
+    if (recent_error == ESP_OK) {
+        const esp_err_t shutdown_error =
+            esp_register_shutdown_handler(flush_recent_history_on_shutdown);
+        if (shutdown_error != ESP_OK) {
+            ESP_LOGW("rf_storage", "Recent history will not be saved on restart: %s",
+                     esp_err_to_name(shutdown_error));
+        }
     }
 
     s_rule_initialization_error.store(rule_error, std::memory_order_release);
@@ -754,22 +819,17 @@ esp_err_t rf_storage_recent_append(const DecodedSignal &decoded, RfRecentSignal 
         return ESP_ERR_TIMEOUT;
     }
     RfRecentHistory history{};
-    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    ESP_RETURN_ON_ERROR(current_recent_history_owned(&history), "rf_storage",
+                        "load recent history");
     RfRecentSignal candidate{};
     ESP_RETURN_ON_ERROR(map_recent_format_result(
                             append_rf_recent_history(&history, decoded, &candidate)),
                         "rf_storage", "append recent history");
-    uint8_t record[kRfRecentMaxRecordSize]{};
-    std::size_t record_size = 0;
-    ESP_RETURN_ON_ERROR(map_recent_format_result(
-                            encode_rf_recent_record(history, record, sizeof(record), &record_size)),
-                        "rf_storage", "encode recent history");
-    NvsHandle handle;
-    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READWRITE, &handle), "rf_storage",
-                        "open recent history");
-    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kRecentKey, record, record_size), "rf_storage",
-                        "set recent history");
-    ESP_RETURN_ON_ERROR(nvs_commit(handle.get()), "rf_storage", "commit recent history");
+    s_recent_unsaved = history;
+    if (!s_recent_dirty.load(std::memory_order_acquire)) {
+        s_recent_dirty_since_us.store(esp_timer_get_time(), std::memory_order_release);
+        s_recent_dirty.store(true, std::memory_order_release);
+    }
     if (appended != nullptr) {
         *appended = candidate;
     }
@@ -791,7 +851,8 @@ esp_err_t rf_storage_recent_list(RfRecentSignal *entries, std::size_t capacity,
         return ESP_ERR_TIMEOUT;
     }
     RfRecentHistory history{};
-    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    ESP_RETURN_ON_ERROR(current_recent_history_owned(&history), "rf_storage",
+                        "load recent history");
     *count = history.count;
     if (entries == nullptr && capacity == 0) {
         return ESP_OK;
@@ -817,7 +878,8 @@ esp_err_t rf_storage_recent_load(uint64_t id, RfRecentSignal *entry)
         return ESP_ERR_TIMEOUT;
     }
     RfRecentHistory history{};
-    ESP_RETURN_ON_ERROR(load_recent_history_owned(&history), "rf_storage", "load recent history");
+    ESP_RETURN_ON_ERROR(current_recent_history_owned(&history), "rf_storage",
+                        "load recent history");
     for (std::size_t index = 0; index < history.count; ++index) {
         if (history.entries[index].id == id) {
             *entry = history.entries[index];
@@ -838,7 +900,7 @@ esp_err_t rf_storage_recent_clear()
         return ESP_ERR_TIMEOUT;
     }
     RfRecentHistory history{};
-    const esp_err_t load_error = load_recent_history_owned(&history);
+    const esp_err_t load_error = current_recent_history_owned(&history);
     if (load_error == ESP_ERR_INVALID_RESPONSE || load_error == ESP_ERR_INVALID_VERSION ||
         load_error == ESP_ERR_INVALID_CRC) {
         history = {};
@@ -847,17 +909,30 @@ esp_err_t rf_storage_recent_clear()
     }
     history.count = 0;
     std::fill(history.entries, history.entries + kRfRecentSignalCapacity, RfRecentSignal{});
-    uint8_t record[kRfRecentMaxRecordSize]{};
-    std::size_t record_size = 0;
-    ESP_RETURN_ON_ERROR(map_recent_format_result(
-                            encode_rf_recent_record(history, record, sizeof(record), &record_size)),
-                        "rf_storage", "encode empty recent history");
-    NvsHandle handle;
-    ESP_RETURN_ON_ERROR(open_namespace(kRecentNamespace, NVS_READWRITE, &handle), "rf_storage",
-                        "open recent history");
-    ESP_RETURN_ON_ERROR(nvs_set_blob(handle.get(), kRecentKey, record, record_size), "rf_storage",
+    ESP_RETURN_ON_ERROR(write_recent_history_owned(history), "rf_storage",
                         "clear recent history");
-    return nvs_commit(handle.get());
+    s_recent_dirty.store(false, std::memory_order_release);
+    return ESP_OK;
+}
+
+esp_err_t rf_storage_recent_flush()
+{
+    const esp_err_t ready = rf_storage_recent_initialization_error();
+    if (ready != ESP_OK) {
+        return ready;
+    }
+    StorageLock lock;
+    if (!lock.locked()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return flush_recent_history_owned();
+}
+
+int64_t rf_storage_recent_flush_wait_us()
+{
+    const bool dirty = s_recent_dirty.load(std::memory_order_acquire);
+    return rf_recent_write_back_wait_us(
+        dirty, s_recent_dirty_since_us.load(std::memory_order_acquire), esp_timer_get_time());
 }
 
 

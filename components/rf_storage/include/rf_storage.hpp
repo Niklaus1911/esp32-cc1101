@@ -22,11 +22,16 @@ esp_err_t rf_storage_generic_gpio_get(uint8_t *profile_id, uint8_t *tx_gpio, uin
                                        bool *persisted = nullptr);
 esp_err_t rf_storage_generic_gpio_set(uint8_t profile_id, uint8_t tx_gpio, uint8_t rx_gpio);
 esp_err_t rf_storage_recent_initialization_error();
+// Appends are buffered in RAM and visible to list/load immediately; they reach NVS through
+// rf_storage_recent_flush(), which also runs on every software restart. Clear writes at once.
 esp_err_t rf_storage_recent_append(const DecodedSignal &decoded,
                                    RfRecentSignal *appended = nullptr);
 esp_err_t rf_storage_recent_list(RfRecentSignal *entries, std::size_t capacity,
                                  std::size_t *count);
 esp_err_t rf_storage_recent_load(uint64_t id, RfRecentSignal *entry);
 esp_err_t rf_storage_recent_clear();
+esp_err_t rf_storage_recent_flush();
+// Microseconds until buffered history is due for write-back, 0 when due, -1 when none.
+int64_t rf_storage_recent_flush_wait_us();
 
 }  // namespace rfbridge

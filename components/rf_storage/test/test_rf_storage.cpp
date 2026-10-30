@@ -450,6 +450,8 @@ TEST_CASE("recent decoded history persists rotates clears and preserves learned 
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::initialize_rf_storage());
     std::size_t learned_before = 0;
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_list(nullptr, 0, &learned_before));
+    // Start from NVS as the source of truth: this test seeds and inspects the record directly.
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_flush());
 
     nvs_handle_t handle = 0;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READWRITE, &handle));
@@ -500,6 +502,23 @@ TEST_CASE("recent decoded history persists rotates clears and preserves learned 
     decoded.code = 77;
     TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_append(decoded, &loaded));
     TEST_ASSERT_EQUAL_UINT64(106, loaded.id);
+
+    // The append is visible at once but stays in RAM until its write-back.
+    TEST_ASSERT_TRUE(rfbridge::rf_storage_recent_flush_wait_us() > 0);
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_list(
+                                  entries, std::size(entries), &count));
+    TEST_ASSERT_EQUAL_size_t(1, count);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READONLY, &handle));
+    record_size = sizeof(record);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_get_blob(handle, "history", record, &record_size));
+    nvs_close(handle);
+    rfbridge::RfRecentHistory stored{};
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfRecentFormatResult::kOk),
+                      static_cast<int>(rfbridge::decode_rf_recent_record(
+                          record, record_size, &stored)));
+    TEST_ASSERT_EQUAL_size_t(0, stored.count);
+    TEST_ASSERT_EQUAL(ESP_OK, rfbridge::rf_storage_recent_flush());
+    TEST_ASSERT_EQUAL_INT64(-1, rfbridge::rf_storage_recent_flush_wait_us());
 
     TEST_ASSERT_EQUAL(ESP_OK, nvs_open("rf_recent", NVS_READWRITE, &handle));
     record_size = sizeof(record);

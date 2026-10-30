@@ -1248,6 +1248,24 @@ void test_recent_storage_format()
             "recent history rejects duplicate or unordered IDs");
 }
 
+void test_recent_write_back_policy()
+{
+    constexpr int64_t delay = rfbridge::kRfRecentWriteBackDelayUs;
+    require(delay >= 1000000 && delay <= 60000000,
+            "recent write-back delay bounds both flash wear and power-loss exposure");
+    require(rfbridge::rf_recent_write_back_wait_us(false, 0, 5 * delay) == -1,
+            "clean recent history needs no write-back");
+    require(rfbridge::rf_recent_write_back_wait_us(true, 1000, 1000) == delay,
+            "a new reception waits the full write-back delay");
+    require(rfbridge::rf_recent_write_back_wait_us(true, 1000, 1000 + delay - 1) == 1,
+            "write-back waits only for the remaining delay");
+    require(rfbridge::rf_recent_write_back_wait_us(true, 1000, 1000 + delay) == 0 &&
+                rfbridge::rf_recent_write_back_wait_us(true, 1000, 1000 + 3 * delay) == 0,
+            "write-back is due at and after the deadline");
+    require(rfbridge::rf_recent_write_back_wait_us(true, 5000, 1000) == 0,
+            "a timestamp from the future writes back immediately instead of stalling");
+}
+
 
 rfbridge::RfStorageRuleEntry make_rule(const char *trigger, const char *target)
 {
@@ -1879,6 +1897,7 @@ int main()
     test_learned_signal_matching();
     test_storage_format();
     test_recent_storage_format();
+    test_recent_write_back_policy();
     test_wifi_config();
     test_network_hostname_config();
     test_network_mdns_policy();

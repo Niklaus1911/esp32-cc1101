@@ -314,17 +314,37 @@ void process_frame(const Message &message, PendingLearn *pending)
     }
 }
 
+// Waits until the next timed duty: the learning deadline or the recent-history write-back.
 TickType_t next_wait(const PendingLearn &pending)
 {
-    if (!pending.active) {
+    int64_t wait_us = rf_storage_recent_flush_wait_us();
+    if (pending.active) {
+        const int64_t remaining_us =
+            std::max<int64_t>(0, pending.deadline_us - esp_timer_get_time());
+        wait_us = wait_us < 0 ? remaining_us : std::min(wait_us, remaining_us);
+    }
+    if (wait_us < 0) {
         return portMAX_DELAY;
     }
-    const int64_t remaining_us = pending.deadline_us - esp_timer_get_time();
-    if (remaining_us <= 0) {
+    if (wait_us == 0) {
         return 0;
     }
-    const uint64_t remaining_ms = (static_cast<uint64_t>(remaining_us) + 999U) / 1000U;
-    return std::max<TickType_t>(1, pdMS_TO_TICKS(static_cast<uint32_t>(remaining_ms)));
+    const uint64_t wait_ms = (static_cast<uint64_t>(wait_us) + 999U) / 1000U;
+    return std::max<TickType_t>(1, pdMS_TO_TICKS(static_cast<uint32_t>(wait_ms)));
+}
+
+void write_back_recent_if_due()
+{
+    if (rf_storage_recent_flush_wait_us() != 0) {
+        return;
+    }
+    std::size_t count = 0;
+    esp_err_t error = rf_storage_recent_flush();
+    if (error == ESP_OK) {
+        error = rf_storage_recent_list(nullptr, 0, &count);
+    }
+    // Report the outcome so a failed write-back is visible and a later success clears it.
+    update_recent_status(error, false, count);
 }
 
 void service_task(void *)
@@ -337,6 +357,7 @@ void service_task(void *)
             clear_pending(&pending, RfLearningState::kFailed, ESP_ERR_INVALID_SIZE);
             publish_learn(BridgeEventType::kLearnFailed, cancelled, ESP_ERR_INVALID_SIZE);
         }
+        write_back_recent_if_due();
         Message message{};
         if (xQueueReceive(s_queue, &message, next_wait(pending)) == pdTRUE) {
             if (message.type == MessageType::kFrame) {

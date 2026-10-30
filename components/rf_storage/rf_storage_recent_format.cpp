@@ -193,4 +193,16 @@ RfRecentFormatResult decode_rf_recent_record(const uint8_t *record, std::size_t 
     return RfRecentFormatResult::kOk;
 }
 
+int64_t rf_recent_write_back_wait_us(bool dirty, int64_t dirty_since_us, int64_t now_us)
+{
+    if (!dirty) {
+        return -1;
+    }
+    const int64_t elapsed_us = now_us - dirty_since_us;
+    if (elapsed_us < 0 || elapsed_us >= kRfRecentWriteBackDelayUs) {
+        return 0;
+    }
+    return kRfRecentWriteBackDelayUs - elapsed_us;
+}
+
 }  // namespace rfbridge

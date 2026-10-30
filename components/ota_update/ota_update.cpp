@@ -27,7 +27,9 @@ namespace rfbridge {
 namespace {
 
 constexpr TickType_t kMutexWait = pdMS_TO_TICKS(1000);
-constexpr uint32_t kRebootTaskStackSize = 2048;
+// esp_restart() runs the registered shutdown handlers (Wi-Fi stop, recent-history NVS
+// write-back) on this task's stack.
+constexpr uint32_t kRebootTaskStackSize = 4096;
 constexpr UBaseType_t kRebootTaskPriority = 3;
 constexpr std::size_t kReceiveChunkSize = 2048;
 constexpr uint32_t kProgressStepBytes = 65536;
