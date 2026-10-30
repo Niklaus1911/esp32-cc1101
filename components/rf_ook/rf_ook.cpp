@@ -72,7 +72,6 @@ enum class CommandState : uint8_t {
 enum class RadioCommandType : uint8_t {
     kTransmitDecoded,
     kTransmitRaw,
-    kReplayLast,
     kGetLast,
     kGetStatus,
     kReset,
@@ -1241,15 +1240,6 @@ bool execute_command(const RadioCommand &command)
         case RadioCommandType::kTransmitRaw:
             reply.result = transmit_raw_owned(command.raw, command.repeats);
             break;
-        case RadioCommandType::kReplayLast:
-            if (!s_has_last_frame) {
-                reply.result = ESP_ERR_NOT_FOUND;
-            } else if (s_last_frame.encoding == RfEncoding::kDecoded) {
-                reply.result = transmit_decoded_owned(s_last_frame.decoded, command.repeats);
-            } else {
-                reply.result = transmit_raw_owned(s_last_frame.raw, command.repeats);
-            }
-            break;
         case RadioCommandType::kGetLast:
             if (!s_has_last_frame) {
                 reply.result = ESP_ERR_NOT_FOUND;
@@ -1581,8 +1571,7 @@ bool capture_input_is_valid(const uint8_t *levels, const uint16_t *durations, st
 bool command_is_blocked_by_maintenance(RadioCommandType type)
 {
     return type == RadioCommandType::kTransmitDecoded ||
-           type == RadioCommandType::kTransmitRaw || type == RadioCommandType::kReplayLast ||
-           type == RadioCommandType::kReset;
+           type == RadioCommandType::kTransmitRaw || type == RadioCommandType::kReset;
 }
 
 esp_err_t send_command(RadioCommand command, RadioReply *reply, bool internal = false)
@@ -1918,14 +1907,6 @@ esp_err_t transmit_rf_raw(const RawSignal &signal, uint16_t repeats)
     RadioCommand command{};
     command.type = RadioCommandType::kTransmitRaw;
     command.raw = signal;
-    command.repeats = repeats;
-    return send_command(command, nullptr);
-}
-
-esp_err_t replay_last_rf_frame(uint16_t repeats)
-{
-    RadioCommand command{};
-    command.type = RadioCommandType::kReplayLast;
     command.repeats = repeats;
     return send_command(command, nullptr);
 }

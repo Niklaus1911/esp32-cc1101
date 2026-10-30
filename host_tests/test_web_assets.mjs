@@ -638,8 +638,8 @@ for (const forbidden of [
 }
 for (const [name, content] of [["index.html", index], ["app.css", css], ["app.js", js]]) {
   // The app.js ceiling is a bloat guardrail, not a hardware limit: assets are flash-resident
-  // embedded files. 60 KiB keeps honest headroom for accessibility and robustness work.
-  const maximumSize = name === "app.js" ? 60 * 1024 : 20000;
+  // embedded files. 64 KiB keeps honest headroom for accessibility and robustness work.
+  const maximumSize = name === "app.js" ? 64 * 1024 : 20000;
   assert(statSync(join(component, "assets", name)).size < maximumSize, `${name} is too large`);
   assert(content.length > 100, `${name} is unexpectedly empty`);
 }

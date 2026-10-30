@@ -150,11 +150,54 @@ for (const kind of ["hello", "resync", "watchdog"]) {
   h.failures.add("/api/rules");
   await h.pollLive();
   assert.equal(h.state.rulesRevision, 1, "failed refresh must not acknowledge the new revision");
-  h.failures.clear();
+  assert.equal(h.notices.length, 1);
   h.requests.length = 0;
+  h.advance(1000);
   await h.pollLive();
-  assert(h.requests.includes("/api/rules"), "failed rule refresh must retry on the next poll");
+  assert.deepEqual(h.requests, ["/api/live"], "a failing list must not be re-requested on every poll");
+  assert.equal(h.notices.length, 1, "a failing list must not raise an error notice on every poll");
+  h.failures.clear();
+  h.advance(4000);
+  await h.pollLive();
+  assert(h.requests.includes("/api/rules"), "failed rule refresh must retry after the retry delay");
   assert.equal(h.state.rulesRevision, 2);
+}
+
+{
+  const h = harness("signals");
+  await h.seed();
+  const rendered = h.renders.recent;
+  await h.event("rx");
+  await h.event("watchdog");
+  assert.equal(h.requests.filter((path) => path === "/api/recent").length, 2);
+  assert.equal(h.renders.recent, rendered,
+               "unchanged history must preserve in-progress names, repeats, and focus");
+  h.data.recent.entries.push({ id: "8", code: "0x8" });
+  await h.event("rx");
+  assert.equal(h.renders.recent, rendered + 1, "changed history must re-render");
+}
+
+{
+  const h = harness("signals");
+  await h.seed();
+  h.failures.add("/api/recent");
+  await h.event("rx");
+  assert(h.requests.includes("/api/recent"));
+  h.requests.length = 0;
+  for (let index = 0; index < 3; index++) {
+    h.advance(1000);
+    await h.event("rx");
+  }
+  assert(!h.requests.includes("/api/recent"), "receive bursts must not hammer a failing history endpoint");
+  assert.equal(h.notices.length, 1);
+  h.failures.clear();
+  const rendered = h.renders.recent;
+  h.advance(2000);
+  await h.event("tx");
+  assert(h.requests.includes("/api/recent"),
+         "a failed history load must retry after the delay without a new history trigger");
+  assert.equal(h.renders.recent, rendered + 1,
+               "recovery must re-render unchanged history to replace the unavailable state");
 }
 
 {

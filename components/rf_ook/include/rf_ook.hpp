@@ -71,7 +71,6 @@ esp_err_t start_rf_ook(RfFrameCallback callback, void *context);
 void stop_rf_ook();
 esp_err_t transmit_rf_decoded(const DecodedSignal &signal, uint16_t repeats);
 esp_err_t transmit_rf_raw(const RawSignal &signal, uint16_t repeats);
-esp_err_t replay_last_rf_frame(uint16_t repeats);
 esp_err_t get_last_rf_frame(RfFrame *frame);
 esp_err_t get_rf_radio_status(RfRadioStatus *status);
 esp_err_t initialize_rf_generic_gpio_config();

@@ -28,7 +28,9 @@ signals:[],
 signalsRefreshedAt:null,
 recent:[],
 recentRevision:null,
+recentSnapshot:null,
 recentLoading:false,
+listFailedAt:{recent:null,signals:null,rules:null},
 sigBusy:false,
 rulesBusy:false,
 rules:[],
@@ -51,6 +53,7 @@ const genericRebootConfirmationTimeoutMs = 60000;
 const genericRebootRetryMs = 1000;
 const requestTimeoutMs = 10000;
 const listSnapshotIntervalMs = 30000;
+const listRetryDelayMs = 5000;
 const otaStallTimeoutMs = 15000;
 const otaSuccessStorageKey = "rfbridge.ota-success.v1";
 const otaImagePrefixSize = 304;
@@ -122,6 +125,11 @@ state.kinds.clear();
 cancelPolling();
 await pollLive(pending);
 }
+// A failed list stays due until it loads; automatic retries wait so a failing endpoint is not hit on every poll or event.
+function listRefreshDue(kind, now, triggered) {
+const failedAt=state.listFailedAt[kind];
+return failedAt === null ? triggered : now-failedAt >= listRetryDelayMs;
+}
 async function reconcileVisibleViews(live, pending) {
 if (paused()) return;
 const signalsView=document.querySelector('[data-panel="signals"]');
@@ -136,16 +144,16 @@ const learningChanged=state.learningRevision !== null &&
 live.learning.revision !== state.learningRevision && live.learning.state !== "armed";
 state.learningRevision=live.learning.revision;
 const recentRevision=live.recent?.revision;
-if (!signalsView.hidden && (full || pending.includes("rx") ||
+if (!signalsView.hidden && listRefreshDue("recent", now, full || pending.includes("rx") ||
 (Number.isInteger(recentRevision) && recentRevision !== state.recentRevision))) await refreshRecent();
 if (paused()) return;
 if ((!signalsView.hidden || !rulesView.hidden) &&
-(catalog || learningChanged || pending.includes("learning"))) await refreshSignals();
+listRefreshDue("signals", now, catalog || learningChanged || pending.includes("learning"))) await refreshSignals();
 if (paused()) return;
 const rulesDue=polling && (state.rulesRefreshedAt === null ||
 now-state.rulesRefreshedAt >= listSnapshotIntervalMs);
 const revision=live.automation.configuration_revision;
-if (!rulesView.hidden && (catalog || pending.includes("automation_config") || rulesDue ||
+if (!rulesView.hidden && listRefreshDue("rules", now, catalog || pending.includes("automation_config") || rulesDue ||
 (Number.isInteger(revision) && revision !== state.rulesRevision))) await refreshRules();
 }
 function queueRefresh(kind="live") {
@@ -946,12 +954,17 @@ return signal.encoding === "decoded"
 function renderRecent() {
 byId("recent-count").textContent = `${state.recent.length} stored / 5 maximum`;
 const target = byId("recent-list");
+// Keep edits and focus for entries that survive a history change.
+const drafts=new Map([...target.children].map((row)=>[row.dataset.recentId,row.querySelectorAll("input")]));
+const active=document.activeElement,row=target.contains(active)&&active.closest("[data-recent-id]");
+const focus=row&&[row.dataset.recentId,[...row.querySelectorAll("input,button")].indexOf(active),active.selectionStart,active.selectionEnd];
 if (state.recent.length === 0) {
 target.replaceChildren(element("p", "empty", "No decoded signals stored."));
 return;
 }
 const fragment = document.createDocumentFragment();
 state.recent.forEach((entry) => {
+const draft = drafts.get(String(entry.id));
 const item = element("div", "item");
 item.dataset.recentId = entry.id;
 item.append(element("div", "item-title", `#${entry.id} / ${entry.code}`),
@@ -961,7 +974,7 @@ const repeats = document.createElement("input");
 repeats.type = "number";
 repeats.min = "1";
 repeats.max = "20";
-repeats.value = "8";
+repeats.value = draft ? draft[0].value : "8";
 repeats.dataset.role = "repeats";
 repeats.setAttribute("aria-label", `Repeats for recent signal ${entry.id}`);
 const replay = element("button", "primary", "Replay");
@@ -973,6 +986,7 @@ name.maxLength = 15;
 name.pattern = "[A-Za-z][A-Za-z0-9_\\-]{0,14}";
 name.required = true;
 name.placeholder = "Learned name";
+name.value = draft ? draft[1].value : "";
 name.dataset.role = "name";
 name.setAttribute("aria-label", `Learned name for recent signal ${entry.id}`);
 const save = element("button", "", "Save");
@@ -983,6 +997,11 @@ item.append(actions);
 fragment.append(item);
 });
 target.replaceChildren(fragment);
+const restored=focus&&[...target.children].find((item)=>item.dataset.recentId===focus[0])?.querySelectorAll("input,button")[focus[1]];
+if (restored) {
+restored.focus({ preventScroll: true });
+if (focus[2] != null) restored.setSelectionRange(focus[2], focus[3]);
+}
 }
 
 async function refreshRecent() {
@@ -990,10 +1009,18 @@ if (state.recentLoading) return;
 state.recentLoading = true;
 try {
 const payload = await readJson("/api/recent");
-state.recent = payload.entries || [];
-state.recentRevision = payload.revision;
+const entries = payload.entries || [];
+const snapshot = JSON.stringify(entries);
+if (snapshot !== state.recentSnapshot) {
+state.recent = entries;
 renderRecent();
+state.recentSnapshot = snapshot;
+}
+state.recentRevision = payload.revision;
+state.listFailedAt.recent=null;
 } catch (error) {
+state.recentSnapshot = null; // Re-render after recovery to replace "Unavailable".
+state.listFailedAt.recent=Date.now();
 byId("recent-count").textContent = "Unavailable";
 showNotice(error.message || "Could not load recent signals", "error");
 } finally {
@@ -1071,7 +1098,9 @@ state.signals = signals;
 renderSignals();
 }
 state.signalsRefreshedAt = Date.now();
+state.listFailedAt.signals=null;
 } catch (error) {
+state.listFailedAt.signals=Date.now();
 showNotice(error.message || "Could not load signals", "error");
 } finally {
 state.sigBusy = false;
@@ -1116,7 +1145,9 @@ state.rulesSnapshot = snapshot;
 }
 state.rulesRevision = payload.revision;
 state.rulesRefreshedAt = Date.now();
+state.listFailedAt.rules=null;
 } catch (error) {
+state.listFailedAt.rules=Date.now();
 showNotice(error.message || "Could not load rules", "error");
 } finally {
 state.rulesBusy = false;
@@ -1297,6 +1328,7 @@ if (!name.reportValidity()) return;
 const rows = [...byId("recent-list").querySelectorAll("[data-recent-id]")];
 const index = rows.indexOf(item);
 const saved = await requestAction("/api/recent", "POST", formBody({ action: "save", id, name: name.value }));
+if (saved) name.value = "";
 await refreshRecent();
 restoreListFocus("recent-list", "[data-recent-id]", id, index);
 if (saved) await refreshSignals();

@@ -237,9 +237,13 @@ esp_err_t bridge_control_replay_last(uint16_t repeats, BridgeEventSource source,
     if (load_error != ESP_OK) {
         return load_error;
     }
+    // Transmit the snapshot itself so the events describe exactly what was sent,
+    // even if a newer frame is received before the radio task runs the command.
     publish_tx_event(BridgeEventType::kTxStarted, source, operation_id, repeats, &frame, nullptr,
                      ESP_OK);
-    const esp_err_t error = replay_last_rf_frame(repeats);
+    const esp_err_t error = frame.encoding == RfEncoding::kDecoded
+                                ? transmit_rf_decoded(frame.decoded, repeats)
+                                : transmit_rf_raw(frame.raw, repeats);
     publish_tx_event(BridgeEventType::kTxCompleted, source, operation_id, repeats, &frame, nullptr,
                      error);
     return error;
