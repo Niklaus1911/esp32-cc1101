@@ -274,6 +274,22 @@ The preferred Codex browser workflow for full Web UI validation uses Microsoft's
 
 The selected browser path must still validate against a deterministic local mock before using an authorized device. Intercept RF transmit, replay, destructive maintenance, OTA, and configuration-changing requests unless those effects are explicitly authorized. Do not reuse a personal authenticated browser profile.
 
+The repository's mock is `tools/web-mock.mjs` (Node, no dependencies). It serves the real embedded assets on `127.0.0.1`, answers `/api/*` from scripted scenarios, and records and intercepts every mutation, including OTA uploads:
+
+```bash
+node tools/web-mock.mjs --port 8765 --scenario healthy
+```
+
+Scenarios are `healthy`, `empty`, `busy` (full lists, maximum-length names, raw frame, S3 with PSRAM), `degraded` (faults and errors), `list-failure`, `disconnected`, and `rebooting`. Switch at runtime with `GET /mock/scenario?name=<scenario>`, push SSE events with `/mock/emit?kind=<event>` or `/mock/add-recent`, and read recorded traffic with `/mock/log`. Applying new Generic GPIOs simulates the reboot window. The `web_mock_api_contract_tests` host test fails if the mock's JSON fields drift from the firmware handlers.
+
+For before/after visual review, `tools/web-screenshots.mjs` drives the local headless Chromium against the mock and writes full-page PNGs of every view, reporting page errors and horizontal overflow:
+
+```bash
+node tools/web-screenshots.mjs .local/web-screenshots/<label> --scenario healthy --scheme dark
+```
+
+Keep screenshots under the ignored `.local/` directory.
+
 Do not commit browser profiles, storage state, screenshots, traces, npm caches, or OAuth credentials.
 
 ## Verification Checklist
