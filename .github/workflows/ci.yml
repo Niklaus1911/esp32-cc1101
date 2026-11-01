@@ -120,6 +120,27 @@ jobs:
             /tmp/esp32-cc1101-production/*/build/flash_args
             /tmp/esp32-cc1101-production/*/logs/
 
+      # Package the images this job just verified (licenses and downloaded components are
+      # available here, inside the ESP-IDF container). Every run exercises packaging; on
+      # tags the images must report the tag as their version, and only tags publish.
+      - name: Package release assets
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_version"])' \
+              /tmp/esp32-cc1101-production/esp32-devkit/build/project_description.json)"
+          fi
+          tools/package-release.sh "$version" /tmp/esp32-cc1101-production release-assets
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+
   unity:
     name: Unity image (${{ matrix.target }})
     runs-on: nscloud-ubuntu-24.04-amd64-4x8
@@ -171,3 +192,33 @@ jobs:
         with:
           path: .ccache
           key: ccache-unity-${{ matrix.target }}-${{ github.sha }}
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host-tests, production, unity]
+    # Publishing only needs the gh CLI, which GitHub-hosted runners always provide.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "::error::Missing $notes; commit release notes before tagging." >&2
+            exit 1
+          fi
+          (cd release-assets && sha256sum -c SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "RFBridge $GITHUB_REF_NAME" \
+            --notes-file "$notes" release-assets/*
