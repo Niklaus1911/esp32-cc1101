@@ -53,6 +53,9 @@ jobs:
       # ESP-IDF leaves ccache off by default. CCACHE_DIR is set per step because the
       # workspace path inside the container is only known at run time.
       IDF_CCACHE_ENABLE: "1"
+      # Identify the compiler by content: a freshly unpacked container can give the
+      # toolchain new timestamps on every run, which made every lookup miss.
+      CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 1G
     defaults:
       run:
@@ -93,7 +96,7 @@ jobs:
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" CCACHE_BASEDIR="$GITHUB_WORKSPACE"
           ccache --zero-stats
           RFBRIDGE_IDF_EXPORT="$IDF_PATH/export.sh" tools/verify-production.sh
-          ccache --show-stats
+          ccache --show-stats --verbose
 
       - name: Save compiler cache
         if: github.ref == 'refs/heads/main'
@@ -128,6 +131,7 @@ jobs:
         target: [esp32, esp32s3]
     env:
       IDF_CCACHE_ENABLE: "1"
+      CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     defaults:
       run:
@@ -159,7 +163,7 @@ jobs:
             -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.${{ matrix.target }}" \
             -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.${{ matrix.target }}" \
             build
-          ccache --show-stats
+          ccache --show-stats --verbose
 
       - name: Save compiler cache
         if: github.ref == 'refs/heads/main'
