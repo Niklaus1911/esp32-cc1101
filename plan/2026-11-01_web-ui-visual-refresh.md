@@ -62,6 +62,8 @@ Result: a `prefers-color-scheme: light` block overrides only tokens, and `index.
 
 ### 5. Verification and release
 
+Result (done except release): host tests pass (12/12). Against the mock in the built-in browser: SSE live updates added a reception immediately; a simulated outage showed Disconnected with the System view marked stale, then recovered to Connected over SSE without a reload; the Generic GPIO flow went Rebooting, reconnected, and confirmed the new TX GPIO with a success toast; an intercepted OTA upload showed an error toast and restored the controls. Both mutations carried the page's own Origin and the exact content types the firmware validates (`application/x-www-form-urlencoded`, `application/octet-stream`); the mock now records these headers. The console showed only the expected network errors from the simulated outages and the intercepted upload. Before/after comparison images are in the ignored `.local/web-screenshots/`. CI run 41342747552 passed the four-profile production verifier at `a9b3a9f`, which contains every firmware-affecting change of the refresh. Not done: on-device check (needs hardware approval) and a release.
+
 - Host tests, with deliberately updated CSS assertions.
 - Browser validation on the mock per `AGENTS.md`: desktop/tablet/mobile, both color schemes, horizontal overflow, console errors, polling and SSE fallback, same-origin mutation headers, OTA and Generic GPIO reboot recovery, and visual review of full-page screenshots against the baseline.
 - `tools/verify-production.sh` once on the final candidate.

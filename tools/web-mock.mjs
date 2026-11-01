@@ -262,7 +262,9 @@ export function createMockServer({ assets = DEFAULT_ASSETS, scenario = "healthy"
     request.on("data", (chunk) => { if (chunks.length < 64) chunks.push(chunk); });
     request.on("end", () => {
       const body = path === "/api/v1/ota" ? "<firmware upload intercepted>" : Buffer.concat(chunks).toString("utf8").slice(0, 2048);
-      state.mutations.push({ method: request.method, path, body });
+      // Headers the firmware's same-origin and form checks depend on.
+      state.mutations.push({ method: request.method, path, body, origin: request.headers.origin ?? null,
+                             contentType: request.headers["content-type"] ?? null });
       if (path === "/api/v1/ota") return json(409, { error: "mock_ota_intercepted" });
       if (path === "/api/signals/random") {
         const signal = { name: `random_${(state.extraSignals.length + 0xd30a91).toString(16).toUpperCase()}`, ...decoded(0xd30a91 + state.extraSignals.length) };
