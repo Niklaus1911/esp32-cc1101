@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: nscloud-ubuntu-24.04-amd64-4x8
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install host toolchain
+        run: |
+          if ! command -v cmake >/dev/null || ! command -v g++ >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends cmake g++ make
+          fi
+          cmake --version
+          g++ --version
+
+      # Native toolchain only: host tests must not see the ESP-IDF cross environment.
+      - name: Build host tests
+        run: |
+          cmake -S host_tests -B build-host
+          cmake --build build-host -j "$(nproc)"
+
+      - name: Run host tests
+        run: ctest --test-dir build-host --output-on-failure
+
+  production:
+    name: Production firmware (4 profiles)
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
+    timeout-minutes: 45
+    container: espressif/idf:v6.0.2
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: ESP-IDF derives the firmware version from `git describe`.
+          fetch-depth: 0
+
+      - name: Install image inspection tools
+        run: |
+          if ! command -v objdump >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends binutils
+          fi
+
+      - name: Check ESP-IDF version
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          idf.py --version | tee /dev/stderr | grep -q 'v6\.0\.2'
+
+      - name: Verify production builds
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          RFBRIDGE_IDF_EXPORT="$IDF_PATH/export.sh" tools/verify-production.sh
+
+      - name: Upload firmware images
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            /tmp/esp32-cc1101-production/*/build/esp32-cc1101.bin
+            /tmp/esp32-cc1101-production/*/build/esp32-cc1101.elf
+            /tmp/esp32-cc1101-production/*/build/bootloader/bootloader.bin
+            /tmp/esp32-cc1101-production/*/build/partition_table/partition-table.bin
+            /tmp/esp32-cc1101-production/*/build/ota_data_initial.bin
+            /tmp/esp32-cc1101-production/*/build/flash_args
+            /tmp/esp32-cc1101-production/*/logs/
+
+  unity:
+    name: Unity image (${{ matrix.target }})
+    runs-on: nscloud-ubuntu-24.04-amd64-4x8
+    timeout-minutes: 30
+    container: espressif/idf:v6.0.2
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # Compile only: on-device Unity tests need hardware and explicit approval.
+      - name: Build Unity image
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          source "$IDF_PATH/export.sh" >/dev/null
+          build="/tmp/esp32-cc1101-unit-${{ matrix.target }}"
+          idf.py -C test_apps/unit -B "$build" \
+            -DIDF_TARGET=${{ matrix.target }} \
+            -DSDKCONFIG="$build/sdkconfig" \
+            -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.${{ matrix.target }}" \
+            -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.${{ matrix.target }}" \
+            build

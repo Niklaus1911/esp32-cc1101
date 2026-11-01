@@ -4,7 +4,8 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly IDF_EXPORT="$HOME/.espressif/v6.0.2/esp-idf/export.sh"
+# CI points this at the official espressif/idf:v6.0.2 image's export script.
+readonly IDF_EXPORT="${RFBRIDGE_IDF_EXPORT:-$HOME/.espressif/v6.0.2/esp-idf/export.sh}"
 readonly OUTPUT_ROOT="/tmp/esp32-cc1101-production"
 readonly MDNS_MANIFEST="$PROJECT_ROOT/components/network_mdns/idf_component.yml"
 readonly CLASSIC_LOCK="$PROJECT_ROOT/dependencies.lock.esp32"

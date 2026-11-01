@@ -292,6 +292,20 @@ Keep screenshots under the ignored `.local/` directory.
 
 Do not commit browser profiles, storage state, screenshots, traces, npm caches, or OAuth credentials.
 
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs on Namespace GitHub Actions runners (the Namespace GitHub app is installed on the repository) for pushes to `main`, `v*` tags, pull requests, and manual dispatch:
+
+| Job | Runner | What it proves |
+|---|---|---|
+| Host tests | `nscloud-ubuntu-24.04-amd64-4x8` | The full `host_tests` suite with a native toolchain and Node 24 |
+| Production firmware | `nscloud-ubuntu-24.04-amd64-8x16`, container `espressif/idf:v6.0.2` | `tools/verify-production.sh` for all four profiles; uploads the images, ELF files, wired-install files, and logs as the `firmware-<sha>` artifact (14 days) |
+| Unity image | `nscloud-ubuntu-24.04-amd64-4x8`, container `espressif/idf:v6.0.2` | The Unity test image compiles for `esp32` and `esp32s3` |
+
+The verifier normally sources the machine-local `$HOME/.espressif/v6.0.2/esp-idf/export.sh`; CI sets `RFBRIDGE_IDF_EXPORT` to the container's export script instead. CI never flashes hardware or runs on-device tests, and its success does not replace hardware validation.
+
+The ESP-IDF image is large (about 5 GB). To avoid pulling it on every run, create a Namespace runner profile with cache volumes (container images enabled) and replace the `nscloud-ubuntu-…` labels with `namespace-profile-<name>`.
+
 ## Verification Checklist
 
 Use this checklist after environment changes:

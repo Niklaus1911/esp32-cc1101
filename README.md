@@ -671,6 +671,8 @@ Do not attempt to clone security or access-control devices. Follow local 433 MHz
 
 ## Tests
 
+CI (`.github/workflows/ci.yml`, on Namespace runners) runs the host tests, the four-profile production verifier, and the Unity image build for every push and pull request; see [Development Tooling Setup](docs/development-tooling-setup.md#continuous-integration).
+
 Run portable codec/parser regressions from a clean native shell (outside an activated ESP-IDF cross-toolchain environment):
 
 ```bash
