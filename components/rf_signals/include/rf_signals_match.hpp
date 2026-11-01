@@ -16,7 +16,7 @@ enum class RfLearnFrameDisposition : uint8_t {
 
 struct LearnedSignalEntry {
     RfStorageName name{};
-    RfStoredSignal signal{};
+    RfCompactSignal signal{};
 };
 
 RfLearnFrameDisposition classify_learn_frame_window(int64_t armed_us, int64_t deadline_us,

@@ -13,9 +13,9 @@ TEST_CASE("learned signal matching is bounded and ambiguity aware", "[rf_signals
 
     rfbridge::LearnedSignalEntry entries[2]{};
     std::strcpy(entries[0].name.value, "gate");
-    entries[0].signal = incoming;
+    TEST_ASSERT_TRUE(rfbridge::rf_compact_signal_assign(&entries[0].signal, incoming));
     std::strcpy(entries[1].name.value, "porch");
-    entries[1].signal = incoming;
+    TEST_ASSERT_TRUE(rfbridge::rf_compact_signal_assign(&entries[1].signal, incoming));
 
     rfbridge::LearnedMatch match =
         rfbridge::find_learned_signal_match(incoming, entries, 1, true);

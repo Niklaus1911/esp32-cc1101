@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <new>
 
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -163,6 +165,15 @@ esp_err_t save_stored_signal(const char *name, const RfStoredSignal &stored,
     (void)rf_signals_refresh_catalog();
     publish_catalog_changed(name, source);
     return ESP_OK;
+}
+
+// Caller holds s_catalog_mutex, or no other task can reach the catalog yet.
+void release_catalog_entries()
+{
+    for (LearnedSignalEntry &entry : s_catalog) {
+        rf_compact_signal_release(&entry.signal);
+        entry.name = {};
+    }
 }
 
 LearnedMatch match_stored_signal(const RfStoredSignal &stored)
@@ -401,7 +412,7 @@ void destroy_initialization_resources()
         s_mutex = nullptr;
     }
     s_task = nullptr;
-    s_catalog = {};
+    release_catalog_entries();
     s_catalog_count = 0;
     s_catalog_available = false;
 }
@@ -550,6 +561,7 @@ esp_err_t rf_signals_refresh_catalog()
     if (!lock.locked()) {
         return ESP_ERR_TIMEOUT;
     }
+    release_catalog_entries();
     std::size_t count = 0;
     esp_err_t error = rf_storage_list(nullptr, 0, &count);
     if (error != ESP_OK) {
@@ -566,9 +578,20 @@ esp_err_t rf_signals_refresh_catalog()
         if (error == ESP_OK && loaded_count != count) {
             error = ESP_ERR_INVALID_SIZE;
         }
+        // One full-size record on the heap instead of on the caller's stack.
+        std::unique_ptr<RfStoredSignal> loaded(new (std::nothrow) RfStoredSignal{});
+        if (error == ESP_OK && !loaded) {
+            error = ESP_ERR_NO_MEM;
+        }
         for (std::size_t index = 0; error == ESP_OK && index < count; ++index) {
             s_catalog[index].name = names[index];
-            error = rf_storage_load(names[index].value, &s_catalog[index].signal);
+            error = rf_storage_load(names[index].value, loaded.get());
+            if (error == ESP_OK && !rf_compact_signal_assign(&s_catalog[index].signal, *loaded)) {
+                error = ESP_ERR_NO_MEM;
+            }
+        }
+        if (error != ESP_OK) {
+            release_catalog_entries();
         }
         s_catalog_available = error == ESP_OK;
         s_catalog_count = error == ESP_OK ? count : 0;

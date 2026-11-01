@@ -29,6 +29,16 @@ struct RfStoredSignal {
     RawSignal raw{};
 };
 
+// In-RAM form for tables that hold many signals. RfStoredSignal embeds a 516-byte RawSignal that
+// decoded signals never use; here decoded signals are inline and only raw signals own a heap
+// RawSignal. All-zero bytes are a valid empty decoded signal, so zero-filled storage is usable
+// as is. Copying the struct copies the owning pointer: keep exactly one live copy.
+struct RfCompactSignal {
+    RfStoredEncoding encoding = RfStoredEncoding::kDecoded;
+    DecodedSignal decoded{};
+    RawSignal *raw = nullptr;
+};
+
 struct RfStorageName {
     char value[kRfStorageNameCapacity]{};
 };
@@ -61,6 +71,15 @@ enum class RfGenericGpioFormatResult : uint8_t {
 };
 
 bool rf_storage_name_is_valid(const char *name);
+// PSRAM first where the board has it; release with rf_compact_raw_free().
+RawSignal *rf_compact_raw_allocate();
+void rf_compact_raw_free(RawSignal *raw);
+// Replaces *signal with a copy of stored, releasing its previous raw buffer. A raw copy takes
+// *spare when it is non-null (and clears it), otherwise it allocates. Returns false, leaving
+// *signal released, when that allocation fails.
+bool rf_compact_signal_assign(RfCompactSignal *signal, const RfStoredSignal &stored,
+                              RawSignal **spare = nullptr);
+void rf_compact_signal_release(RfCompactSignal *signal);
 RfStorageFormatResult encode_rf_storage_record(const RfStoredSignal &signal, uint8_t *output,
                                                std::size_t capacity, std::size_t *output_size);
 RfStorageFormatResult decode_rf_storage_record(const uint8_t *record, std::size_t size,

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <cerrno>
 #include <initializer_list>
 #include <iterator>
@@ -1053,9 +1054,10 @@ void test_learned_signal_matching()
     incoming.decoded.protocol = 1;
     rfbridge::LearnedSignalEntry entries[2]{};
     std::strcpy(entries[0].name.value, "gate");
-    entries[0].signal = incoming;
+    require(rfbridge::rf_compact_signal_assign(&entries[0].signal, incoming), "compact decoded entry");
     std::strcpy(entries[1].name.value, "porch");
-    entries[1].signal = incoming;
+    require(rfbridge::rf_compact_signal_assign(&entries[1].signal, incoming), "compact decoded entry");
+    require(entries[0].signal.raw == nullptr, "decoded compact signal owns no raw buffer");
 
     rfbridge::LearnedMatch match =
         rfbridge::find_learned_signal_match(incoming, entries, 1, true);
@@ -1072,6 +1074,106 @@ void test_learned_signal_matching()
     match = rfbridge::find_learned_signal_match(incoming, nullptr, 0, false);
     require(match.kind == LearnedMatchKind::kUnavailable,
             "unavailable learned catalog remains distinguishable");
+
+    // A learned raw entry keeps its pulses on the heap and still matches the decoded remote.
+    rfbridge::RfStoredSignal raw_stored{};
+    raw_stored.encoding = rfbridge::RfStoredEncoding::kRaw;
+    require(rfbridge::build_decoded_raw(incoming.decoded, &raw_stored.raw), "raw waveform builds");
+    require(rfbridge::rf_compact_signal_assign(&entries[1].signal, raw_stored) &&
+                entries[1].signal.raw != nullptr &&
+                entries[1].signal.encoding == rfbridge::RfStoredEncoding::kRaw &&
+                entries[1].signal.raw->count == raw_stored.raw.count,
+            "raw compact entry copies the pulses");
+    match = rfbridge::find_learned_signal_match(incoming, entries, 2, true);
+    require(match.kind == LearnedMatchKind::kUnique && std::strcmp(match.name, "porch") == 0,
+            "decoded frame matches a compact raw entry");
+    match = rfbridge::find_learned_signal_match(raw_stored, entries, 2, true);
+    require(match.kind == LearnedMatchKind::kUnique && std::strcmp(match.name, "porch") == 0,
+            "raw frame matches a compact raw entry");
+    rfbridge::rf_compact_signal_release(&entries[0].signal);
+    rfbridge::rf_compact_signal_release(&entries[1].signal);
+}
+
+void test_compact_signal_storage()
+{
+    rfbridge::RfStoredSignal decoded{};
+    decoded.decoded.code = 0x5A5A5A;
+    decoded.decoded.pulse_us = 350;
+    decoded.decoded.bits = 24;
+    decoded.decoded.protocol = 1;
+    rfbridge::RfStoredSignal raw{};
+    raw.encoding = rfbridge::RfStoredEncoding::kRaw;
+    require(rfbridge::build_decoded_raw(decoded.decoded, &raw.raw), "raw waveform builds");
+
+    static_assert(sizeof(rfbridge::RfCompactSignal) * 8U < sizeof(rfbridge::RfStoredSignal),
+                  "compact signals are much smaller than stored records");
+    // Mirrors the zero-filled rule storage: the bytes implicitly create the signal.
+    alignas(rfbridge::RfCompactSignal) unsigned char zero_bytes[sizeof(rfbridge::RfCompactSignal)]{};
+    auto *zeroed = std::launder(reinterpret_cast<rfbridge::RfCompactSignal *>(zero_bytes));
+    require(zeroed->encoding == rfbridge::RfStoredEncoding::kDecoded && zeroed->raw == nullptr,
+            "zero bytes are an empty decoded compact signal");
+    rfbridge::rf_compact_signal_release(zeroed);
+
+    rfbridge::RfCompactSignal compact{};
+    require(rfbridge::rf_compact_signal_assign(&compact, raw) && compact.raw != nullptr &&
+                std::memcmp(compact.raw, &raw.raw, sizeof(raw.raw)) == 0,
+            "raw assign copies the full pulse train");
+    require(rfbridge::rf_compact_signal_assign(&compact, decoded) && compact.raw == nullptr &&
+                compact.encoding == rfbridge::RfStoredEncoding::kDecoded &&
+                compact.decoded.code == decoded.decoded.code,
+            "reassigning a decoded signal frees the raw buffer");
+
+    rfbridge::RawSignal *spare = rfbridge::rf_compact_raw_allocate();
+    require(spare != nullptr, "spare raw buffer allocates");
+    rfbridge::RawSignal *const reserved = spare;
+    require(rfbridge::rf_compact_signal_assign(&compact, decoded, &spare) && spare == reserved,
+            "a decoded assign leaves the spare buffer with the caller");
+    require(rfbridge::rf_compact_signal_assign(&compact, raw, &spare) && spare == nullptr &&
+                compact.raw == reserved,
+            "a raw assign takes the spare buffer");
+    rfbridge::rf_compact_signal_release(&compact);
+    require(compact.raw == nullptr && compact.encoding == rfbridge::RfStoredEncoding::kDecoded,
+            "release resets the compact signal");
+
+    rfbridge::RfCompactSignal compact_decoded{};
+    rfbridge::RfCompactSignal compact_raw{};
+    require(rfbridge::rf_compact_signal_assign(&compact_decoded, decoded) &&
+                rfbridge::rf_compact_signal_assign(&compact_raw, raw),
+            "compact pair assigns");
+    require(rfbridge::rf_stored_signals_equivalent(decoded, compact_raw) &&
+                rfbridge::rf_stored_signals_equivalent(compact_raw, decoded) &&
+                rfbridge::rf_stored_signals_equivalent(compact_decoded, compact_raw) &&
+                rfbridge::rf_stored_signals_equivalent(raw, compact_raw) &&
+                rfbridge::rf_stored_signals_equivalent(raw, compact_decoded),
+            "compact and stored signals compare like stored signals");
+    rfbridge::RfStoredSignal other = decoded;
+    other.decoded.code ^= 0x10U;
+    require(!rfbridge::rf_stored_signals_equivalent(other, compact_raw) &&
+                !rfbridge::rf_stored_signals_equivalent(other, compact_decoded),
+            "different codes stay distinct through compact signals");
+    rfbridge::RfCompactSignal broken{};
+    broken.encoding = rfbridge::RfStoredEncoding::kRaw;
+    require(!rfbridge::rf_stored_signals_equivalent(raw, broken) &&
+                !rfbridge::rf_stored_signals_equivalent(broken, broken),
+            "a raw compact signal without pulses never matches");
+
+    const rfbridge::RfCompactSignal *triggers[] = {&compact_decoded, &compact_raw};
+    std::size_t matched = 9;
+    std::size_t count = 0;
+    require(rfbridge::rf_find_unique_stored_signal_match(other, triggers, 2, &matched, &count) ==
+                    rfbridge::RfAutomationMatchResult::kNone &&
+                count == 0,
+            "compact trigger table reports no match");
+    require(rfbridge::rf_find_unique_stored_signal_match(decoded, triggers, 2, &matched, &count) ==
+                    rfbridge::RfAutomationMatchResult::kAmbiguous &&
+                count == 2,
+            "equivalent compact triggers are ambiguous");
+    require(rfbridge::rf_find_unique_stored_signal_match(decoded, triggers, 1, &matched, &count) ==
+                    rfbridge::RfAutomationMatchResult::kUnique &&
+                matched == 0,
+            "a unique compact trigger matches");
+    rfbridge::rf_compact_signal_release(&compact_decoded);
+    rfbridge::rf_compact_signal_release(&compact_raw);
 }
 
 void test_storage_format()
@@ -1940,6 +2042,7 @@ int main()
     test_rf_activity_led_policy();
     test_platform_board_policy();
     test_learned_signal_matching();
+    test_compact_signal_storage();
     test_storage_format();
     test_recent_storage_format();
     test_recent_write_back_policy();

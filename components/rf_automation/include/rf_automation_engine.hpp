@@ -16,8 +16,16 @@ enum class RfAutomationMatchResult : uint8_t {
 };
 
 bool rf_stored_signals_equivalent(const RfStoredSignal &left, const RfStoredSignal &right);
+// A raw RfCompactSignal without its raw buffer is never equivalent to anything.
+bool rf_stored_signals_equivalent(const RfStoredSignal &left, const RfCompactSignal &right);
+bool rf_stored_signals_equivalent(const RfCompactSignal &left, const RfStoredSignal &right);
+bool rf_stored_signals_equivalent(const RfCompactSignal &left, const RfCompactSignal &right);
 RfAutomationMatchResult rf_find_unique_stored_signal_match(const RfStoredSignal &incoming,
                                                            const RfStoredSignal *const *triggers, std::size_t count,
+                                                           std::size_t *matched_index,
+                                                           std::size_t *match_count = nullptr);
+RfAutomationMatchResult rf_find_unique_stored_signal_match(const RfStoredSignal &incoming,
+                                                           const RfCompactSignal *const *triggers, std::size_t count,
                                                            std::size_t *matched_index,
                                                            std::size_t *match_count = nullptr);
 bool rf_automation_event_is_current(uint32_t event_generation, uint32_t current_generation, int64_t captured_us,

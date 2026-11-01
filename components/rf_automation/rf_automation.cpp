@@ -45,8 +45,8 @@ constexpr std::size_t kFrameQueueDepth = 4;
 
 struct RuntimeRule {
     RfStorageRuleEntry entry{};
-    RfStoredSignal trigger_signal{};
-    RfStoredSignal target_signal{};
+    RfCompactSignal trigger_signal{};
+    RfCompactSignal target_signal{};
     int64_t last_fired_us = 0;
 };
 
@@ -210,8 +210,18 @@ uint32_t elapsed_milliseconds(int64_t start_us, int64_t end_us)
     return elapsed_ms > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed_ms);
 }
 
+void release_runtime_rule(RuntimeRule *rule)
+{
+    rf_compact_signal_release(&rule->trigger_signal);
+    rf_compact_signal_release(&rule->target_signal);
+}
+
+// Every slot, not just the first s_rule_count: a failed load can leave a partly filled slot.
 void clear_runtime_rules()
 {
+    for (RuntimeRule &rule : s_rules) {
+        release_runtime_rule(&rule);
+    }
     std::memset(s_rules.data(), 0, sizeof(s_rules));
     s_rule_count = 0;
 }
@@ -314,7 +324,7 @@ void process_frame(const FrameEvent &event)
 
     ++s_status.frames_seen;
     const RfStoredSignal incoming = stored_signal_from_frame(event.frame);
-    std::array<const RfStoredSignal *, CONFIG_RF_MAX_AUTOMATION_RULES> triggers{};
+    std::array<const RfCompactSignal *, CONFIG_RF_MAX_AUTOMATION_RULES> triggers{};
     for (std::size_t index = 0; index < s_rule_count; ++index) {
         triggers[index] = &s_rules[index].trigger_signal;
     }
@@ -364,7 +374,7 @@ void process_frame(const FrameEvent &event)
     const esp_err_t error = matched->target_signal.encoding == RfStoredEncoding::kDecoded
                                 ? transmit_rf_decoded(matched->target_signal.decoded,
                                                       matched->entry.rule.repeats)
-                                : transmit_rf_raw(matched->target_signal.raw,
+                                : transmit_rf_raw(*matched->target_signal.raw,
                                                   matched->entry.rule.repeats);
     const int64_t completed_us = esp_timer_get_time();
     s_status.last_error = error;
@@ -406,17 +416,29 @@ esp_err_t load_runtime_rules()
     }
 
     clear_runtime_rules();
+    // One full-size record on the heap instead of on the caller's stack.
+    std::unique_ptr<RfStoredSignal> loaded(new (std::nothrow) RfStoredSignal{});
+    if (count > 0 && !loaded) {
+        return ESP_ERR_NO_MEM;
+    }
     for (std::size_t index = 0; index < count; ++index) {
         RuntimeRule &runtime = s_rules[s_rule_count];
+        release_runtime_rule(&runtime);
         std::memset(&runtime, 0, sizeof(runtime));
         runtime.entry = s_graph_scratch[index];
         if (std::strcmp(runtime.entry.trigger_name, runtime.entry.rule.target_name) == 0) {
             return ESP_ERR_INVALID_STATE;
         }
-        ESP_RETURN_ON_ERROR(rf_storage_load(runtime.entry.trigger_name, &runtime.trigger_signal), "rf_automation",
+        ESP_RETURN_ON_ERROR(rf_storage_load(runtime.entry.trigger_name, loaded.get()), "rf_automation",
                             "load trigger signal");
-        ESP_RETURN_ON_ERROR(rf_storage_load(runtime.entry.rule.target_name, &runtime.target_signal), "rf_automation",
+        if (!rf_compact_signal_assign(&runtime.trigger_signal, *loaded)) {
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_RETURN_ON_ERROR(rf_storage_load(runtime.entry.rule.target_name, loaded.get()), "rf_automation",
                             "load target signal");
+        if (!rf_compact_signal_assign(&runtime.target_signal, *loaded)) {
+            return ESP_ERR_NO_MEM;
+        }
         if (rf_stored_signals_equivalent(runtime.trigger_signal, runtime.target_signal)) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -551,17 +573,33 @@ esp_err_t rf_automation_add_rule(const char *trigger_name, const char *target_na
         AddValidationContext context{trigger_name, target_name};
         RfStoredSignal trigger_signal{};
         RfStoredSignal target_signal{};
-        ESP_RETURN_ON_ERROR(rf_storage_rule_create_validated(
-                                trigger_name, stored_rule, validate_new_rule_signals, &context,
-                                &trigger_signal, &target_signal),
-                            "rf_automation", "persist validated rule");
+        // Reserved before persisting so a failed allocation can never leave a rule in NVS
+        // without its runtime copy. Decoded signals hand theirs back below.
+        RawSignal *trigger_raw = rf_compact_raw_allocate();
+        RawSignal *target_raw = rf_compact_raw_allocate();
+        if (trigger_raw == nullptr || target_raw == nullptr) {
+            rf_compact_raw_free(trigger_raw);
+            rf_compact_raw_free(target_raw);
+            return ESP_ERR_NO_MEM;
+        }
+        const esp_err_t persist_error = rf_storage_rule_create_validated(
+            trigger_name, stored_rule, validate_new_rule_signals, &context, &trigger_signal, &target_signal);
+        if (persist_error != ESP_OK) {
+            rf_compact_raw_free(trigger_raw);
+            rf_compact_raw_free(target_raw);
+            ESP_LOGE("rf_automation", "persist validated rule: %s", esp_err_to_name(persist_error));
+            return persist_error;
+        }
 
         RuntimeRule &runtime = s_rules[s_rule_count++];
+        release_runtime_rule(&runtime);
         std::memset(&runtime, 0, sizeof(runtime));
         copy_name(runtime.entry.trigger_name, trigger_name);
         runtime.entry.rule = stored_rule;
-        runtime.trigger_signal = trigger_signal;
-        runtime.target_signal = target_signal;
+        rf_compact_signal_assign(&runtime.trigger_signal, trigger_signal, &trigger_raw);
+        rf_compact_signal_assign(&runtime.target_signal, target_signal, &target_raw);
+        rf_compact_raw_free(trigger_raw);
+        rf_compact_raw_free(target_raw);
         s_status.rule_count = static_cast<uint16_t>(s_rule_count);
         s_status.configuration_revision = ++s_configuration_revision;
         advance_generation();
@@ -605,6 +643,7 @@ esp_err_t rf_automation_remove_rule(const char *trigger_name)
             return ESP_ERR_NOT_FOUND;
         }
         ESP_RETURN_ON_ERROR(rf_storage_rule_remove(trigger_name), "rf_automation", "remove rule");
+        release_runtime_rule(&s_rules[index]);
         if (index + 1U < s_rule_count) {
             std::memmove(&s_rules[index], &s_rules[index + 1U],
                          (s_rule_count - index - 1U) * sizeof(RuntimeRule));

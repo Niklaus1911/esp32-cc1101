@@ -4,6 +4,80 @@
 
 namespace rfbridge {
 
+namespace {
+
+// Stored and compact signals differ only in where the raw pulses live.
+struct SignalView {
+    RfStoredEncoding encoding;
+    const DecodedSignal *decoded;
+    const RawSignal *raw;
+};
+
+SignalView view_of(const RfStoredSignal &signal)
+{
+    return {signal.encoding, &signal.decoded, &signal.raw};
+}
+
+SignalView view_of(const RfCompactSignal &signal)
+{
+    return {signal.encoding, &signal.decoded, signal.raw};
+}
+
+bool signal_views_equivalent(const SignalView &left, const SignalView &right)
+{
+    if ((left.encoding == RfStoredEncoding::kRaw && left.raw == nullptr) ||
+        (right.encoding == RfStoredEncoding::kRaw && right.raw == nullptr)) {
+        return false;
+    }
+    if (left.encoding == RfStoredEncoding::kDecoded && right.encoding == RfStoredEncoding::kDecoded) {
+        return decoded_signals_match(*left.decoded, *right.decoded);
+    }
+    if (left.encoding == RfStoredEncoding::kRaw && right.encoding == RfStoredEncoding::kRaw) {
+        return raw_signals_match(*left.raw, *right.raw);
+    }
+    if (left.encoding == RfStoredEncoding::kDecoded && right.encoding == RfStoredEncoding::kRaw) {
+        return raw_signal_matches_decoded(*right.raw, *left.decoded);
+    }
+    if (left.encoding == RfStoredEncoding::kRaw && right.encoding == RfStoredEncoding::kDecoded) {
+        return raw_signal_matches_decoded(*left.raw, *right.decoded);
+    }
+    return false;
+}
+
+template <typename Trigger>
+RfAutomationMatchResult find_unique_signal_match(const RfStoredSignal &incoming, const Trigger *const *triggers,
+                                                 std::size_t count, std::size_t *matched_index,
+                                                 std::size_t *match_count)
+{
+    if ((triggers == nullptr && count != 0) || matched_index == nullptr) {
+        return RfAutomationMatchResult::kAmbiguous;
+    }
+    std::size_t matches = 0;
+    std::size_t selected = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (triggers[index] == nullptr) {
+            return RfAutomationMatchResult::kAmbiguous;
+        }
+        if (rf_stored_signals_equivalent(incoming, *triggers[index])) {
+            selected = index;
+            ++matches;
+        }
+    }
+    if (match_count != nullptr) {
+        *match_count = matches;
+    }
+    if (matches == 0) {
+        return RfAutomationMatchResult::kNone;
+    }
+    if (matches > 1) {
+        return RfAutomationMatchResult::kAmbiguous;
+    }
+    *matched_index = selected;
+    return RfAutomationMatchResult::kUnique;
+}
+
+}  // namespace
+
 bool rf_automation_log_mode_is_valid(RfAutomationLogMode mode)
 {
     return mode == RfAutomationLogMode::kOff || mode == RfAutomationLogMode::kActions ||
@@ -36,19 +110,22 @@ const char *rf_automation_log_mode_name(RfAutomationLogMode mode)
 
 bool rf_stored_signals_equivalent(const RfStoredSignal &left, const RfStoredSignal &right)
 {
-    if (left.encoding == RfStoredEncoding::kDecoded && right.encoding == RfStoredEncoding::kDecoded) {
-        return decoded_signals_match(left.decoded, right.decoded);
-    }
-    if (left.encoding == RfStoredEncoding::kRaw && right.encoding == RfStoredEncoding::kRaw) {
-        return raw_signals_match(left.raw, right.raw);
-    }
-    if (left.encoding == RfStoredEncoding::kDecoded && right.encoding == RfStoredEncoding::kRaw) {
-        return raw_signal_matches_decoded(right.raw, left.decoded);
-    }
-    if (left.encoding == RfStoredEncoding::kRaw && right.encoding == RfStoredEncoding::kDecoded) {
-        return raw_signal_matches_decoded(left.raw, right.decoded);
-    }
-    return false;
+    return signal_views_equivalent(view_of(left), view_of(right));
+}
+
+bool rf_stored_signals_equivalent(const RfStoredSignal &left, const RfCompactSignal &right)
+{
+    return signal_views_equivalent(view_of(left), view_of(right));
+}
+
+bool rf_stored_signals_equivalent(const RfCompactSignal &left, const RfStoredSignal &right)
+{
+    return signal_views_equivalent(view_of(left), view_of(right));
+}
+
+bool rf_stored_signals_equivalent(const RfCompactSignal &left, const RfCompactSignal &right)
+{
+    return signal_views_equivalent(view_of(left), view_of(right));
 }
 
 RfAutomationMatchResult rf_find_unique_stored_signal_match(const RfStoredSignal &incoming,
@@ -56,31 +133,15 @@ RfAutomationMatchResult rf_find_unique_stored_signal_match(const RfStoredSignal 
                                                            std::size_t *matched_index,
                                                            std::size_t *match_count)
 {
-    if ((triggers == nullptr && count != 0) || matched_index == nullptr) {
-        return RfAutomationMatchResult::kAmbiguous;
-    }
-    std::size_t matches = 0;
-    std::size_t selected = 0;
-    for (std::size_t index = 0; index < count; ++index) {
-        if (triggers[index] == nullptr) {
-            return RfAutomationMatchResult::kAmbiguous;
-        }
-        if (rf_stored_signals_equivalent(incoming, *triggers[index])) {
-            selected = index;
-            ++matches;
-        }
-    }
-    if (match_count != nullptr) {
-        *match_count = matches;
-    }
-    if (matches == 0) {
-        return RfAutomationMatchResult::kNone;
-    }
-    if (matches > 1) {
-        return RfAutomationMatchResult::kAmbiguous;
-    }
-    *matched_index = selected;
-    return RfAutomationMatchResult::kUnique;
+    return find_unique_signal_match(incoming, triggers, count, matched_index, match_count);
+}
+
+RfAutomationMatchResult rf_find_unique_stored_signal_match(const RfStoredSignal &incoming,
+                                                           const RfCompactSignal *const *triggers, std::size_t count,
+                                                           std::size_t *matched_index,
+                                                           std::size_t *match_count)
+{
+    return find_unique_signal_match(incoming, triggers, count, matched_index, match_count);
 }
 
 bool rf_automation_event_is_current(uint32_t event_generation, uint32_t current_generation, int64_t captured_us,

@@ -1,6 +1,12 @@
 #include "rf_storage_format.hpp"
 
+#include <cstdlib>
 #include <cstring>
+
+#if defined(ESP_PLATFORM)
+#include "esp_heap_caps.h"
+#include "sdkconfig.h"
+#endif
 
 namespace rfbridge {
 namespace {
@@ -113,6 +119,57 @@ bool rf_hardware_from_name(const char *name, RfHardware *hardware)
         return true;
     }
     return false;
+}
+
+RawSignal *rf_compact_raw_allocate()
+{
+#if defined(ESP_PLATFORM) && CONFIG_SPIRAM
+    // Only tasks read these buffers, never with the flash cache disabled, so PSRAM is safe.
+    return static_cast<RawSignal *>(heap_caps_malloc_prefer(sizeof(RawSignal), 2,
+                                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#else
+    return static_cast<RawSignal *>(std::malloc(sizeof(RawSignal)));
+#endif
+}
+
+void rf_compact_raw_free(RawSignal *raw)
+{
+    std::free(raw);
+}
+
+bool rf_compact_signal_assign(RfCompactSignal *signal, const RfStoredSignal &stored, RawSignal **spare)
+{
+    if (signal == nullptr) {
+        return false;
+    }
+    rf_compact_signal_release(signal);
+    if (stored.encoding == RfStoredEncoding::kRaw) {
+        RawSignal *raw = nullptr;
+        if (spare != nullptr && *spare != nullptr) {
+            raw = *spare;
+            *spare = nullptr;
+        } else {
+            raw = rf_compact_raw_allocate();
+        }
+        if (raw == nullptr) {
+            return false;
+        }
+        *raw = stored.raw;
+        signal->raw = raw;
+    }
+    signal->encoding = stored.encoding;
+    signal->decoded = stored.decoded;
+    return true;
+}
+
+void rf_compact_signal_release(RfCompactSignal *signal)
+{
+    if (signal == nullptr) {
+        return;
+    }
+    rf_compact_raw_free(signal->raw);
+    *signal = {};
 }
 
 bool rf_storage_name_is_valid(const char *name)
