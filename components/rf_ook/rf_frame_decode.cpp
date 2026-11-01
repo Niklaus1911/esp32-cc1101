@@ -525,8 +525,14 @@ bool decode_rf_pulses(const uint8_t *levels, const uint16_t *durations_us, std::
     if (make_raw_frame(levels, durations_us, count, frame)) {
         return true;
     }
-    return decode_known_protocol(levels, durations_us, count, frame, capture_started_after_idle, 1) ==
-           KnownDecodeResult::kDecoded;
+    // Decoded in place: a second RfFrame would cost the radio task about 560 bytes of stack.
+    if (decode_known_protocol(levels, durations_us, count, frame, capture_started_after_idle, 1) !=
+            KnownDecodeResult::kDecoded ||
+        frame->decoded.bits < kRfMinimumSingleFrameBits) {
+        *frame = {};
+        return false;
+    }
+    return true;
 }
 
 bool rf_frames_equivalent(const RfFrame &left, const RfFrame &right)

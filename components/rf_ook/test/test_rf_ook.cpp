@@ -213,6 +213,78 @@ TEST_CASE("single decoded fallback is disabled for truncation suspicion", "[rf_o
     TEST_ASSERT_FALSE(rfbridge::decode_rf_pulses(levels, durations, count, &frame, true, true));
 }
 
+TEST_CASE("short lone frames are rejected as noise but repeated short codes decode", "[rf_ook][short_tap][noise]")
+{
+    rfbridge::RfFrame frame{};
+    for (uint8_t bits : {4, 5, 7}) {
+        uint8_t levels[32]{};
+        uint16_t durations[32]{};
+        std::size_t count = 0;
+        append_protocol1_frame(levels, durations, &count, 0x5, bits, 386);
+        TEST_ASSERT_FALSE(rfbridge::decode_rf_pulses(levels, durations, count, &frame, false, true));
+    }
+
+    uint8_t levels[64]{};
+    uint16_t durations[64]{};
+    std::size_t count = 0;
+    append_protocol1_frame(levels, durations, &count, 0xA5, rfbridge::kRfMinimumSingleFrameBits, 386);
+    TEST_ASSERT_TRUE(rfbridge::decode_rf_pulses(levels, durations, count, &frame, false, true));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfFrameConfidence::kSingleDecoded),
+                      static_cast<int>(frame.confidence));
+    TEST_ASSERT_EQUAL_UINT64(0xA5, frame.decoded.code);
+
+    count = 0;
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        append_protocol1_frame(levels, durations, &count, 0x9, 4, 386);
+    }
+    TEST_ASSERT_TRUE(rfbridge::decode_rf_pulses(levels, durations, count, &frame, false, true));
+    TEST_ASSERT_EQUAL(static_cast<int>(rfbridge::RfFrameConfidence::kRepeatedEvidence),
+                      static_cast<int>(frame.confidence));
+    TEST_ASSERT_EQUAL_UINT8(4, frame.decoded.bits);
+    TEST_ASSERT_EQUAL_UINT64(0x9, frame.decoded.code);
+}
+
+TEST_CASE("random and unit-structured noise is not accepted", "[rf_ook][noise]")
+{
+    // Deterministic xorshift so failures reproduce. Without the minimum lone-frame length this
+    // seed first accepts noise at capture 6373 (as a 4-bit code, like the phantom history seen on
+    // hardware), so 8000 captures fail on the old decoder and pass on the current one.
+    uint32_t state = 0x2545F491U;
+    const auto next = [&state]() {
+        state ^= state << 13U;
+        state ^= state >> 17U;
+        state ^= state << 5U;
+        return state;
+    };
+    constexpr uint16_t kFactors[] = {1, 1, 1, 2, 3, 3, 4, 6, 10, 14, 23, 31};
+    static uint8_t levels[rfbridge::kRfMaxCapturePulses];
+    static uint16_t durations[rfbridge::kRfMaxCapturePulses];
+    uint32_t accepted = 0;
+    for (int capture = 0; capture < 8000; ++capture) {
+        const std::size_t count = 16 + next() % 300;
+        const bool structured = (capture & 1) != 0;
+        const uint32_t base = 100 + next() % 600;
+        uint8_t level = static_cast<uint8_t>(next() & 1U);
+        for (std::size_t index = 0; index < count; ++index) {
+            const uint32_t jitter = 70 + next() % 61;  // 70-130 %
+            uint32_t duration = structured ? base * kFactors[next() % 12] * jitter / 100U
+                                           : 100 + next() % 2900;
+            duration = duration < 100 ? 100 : (duration > 29000 ? 29000 : duration);
+            levels[index] = level;
+            durations[index] = static_cast<uint16_t>(duration);
+            level ^= 1U;
+        }
+        if ((next() & 1U) != 0) {
+            durations[count - 1U] = rfbridge::kRfCaptureStopDurationUs;
+        }
+        rfbridge::RfFrame frame{};
+        if (rfbridge::decode_rf_pulses(levels, durations, count, &frame, false, (next() & 1U) != 0)) {
+            ++accepted;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, accepted);
+}
+
 TEST_CASE("rc-switch protocol 1 repeated frame decodes", "[rf_ook]")
 {
     uint8_t levels[64]{};

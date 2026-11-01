@@ -12,6 +12,10 @@ constexpr std::size_t kRfMaxCapturePulses = 896;
 // The RMT idle threshold: a final pulse of exactly this length was cut off, not measured.
 constexpr uint16_t kRfCaptureStopDurationUs = 30000;
 constexpr uint16_t kRfTerminalIdleMinimumUs = 25000;
+// A lone frame (no repeat in the capture) must carry at least this many bits. Random and
+// receiver-AGC noise fits a protocol's timing for a few bits plus a sync gap far more often than
+// for a full code; short codes still decode when they repeat.
+constexpr uint8_t kRfMinimumSingleFrameBits = 8;
 
 enum class RfEncoding : uint8_t {
     kDecoded,
