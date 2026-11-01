@@ -44,6 +44,8 @@ struct NetworkWifiStatus {
     NetworkWifiState state = NetworkWifiState::kOff;
     char active_ssid[kWifiSsidCapacity]{};
     char saved_ssid[kWifiSsidCapacity]{};
+    // Last requested network that failed and fell back to the saved one; empty otherwise.
+    char failed_ssid[kWifiSsidCapacity]{};
     uint32_t ip = 0;
     uint32_t netmask = 0;
     uint32_t gateway = 0;

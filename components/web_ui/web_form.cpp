@@ -22,7 +22,7 @@ bool slice_equals(const char *value, std::size_t length, const char *expected)
 }
 
 bool parse_fields(const char *body, std::size_t length, Field *fields, std::size_t capacity,
-                  std::size_t *count)
+                  std::size_t *count, bool encoded_values = false)
 {
     if (body == nullptr || fields == nullptr || count == nullptr || length == 0) {
         return false;
@@ -44,7 +44,7 @@ bool parse_fields(const char *body, std::size_t length, Field *fields, std::size
         ++offset;
         const std::size_t value_start = offset;
         while (offset < length && body[offset] != '&') {
-            if (body[offset] == '%' || body[offset] == '+') {
+            if (!encoded_values && (body[offset] == '%' || body[offset] == '+')) {
                 return false;
             }
             ++offset;
@@ -153,6 +153,50 @@ bool valid_name(const Field &field, char *output, std::size_t capacity)
     }
     std::memcpy(output, field.value, field.value_length);
     output[field.value_length] = '\0';
+    return true;
+}
+
+int hex_digit(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+// Percent-decodes a form value into printable ASCII; rejects malformed escapes and overflow.
+bool decode_form_value(const Field &field, char *output, std::size_t capacity)
+{
+    std::size_t used = 0;
+    for (std::size_t index = 0; index < field.value_length; ++index) {
+        char value = field.value[index];
+        if (value == '+') {
+            value = ' ';
+        } else if (value == '%') {
+            if (index + 2U >= field.value_length) {
+                return false;
+            }
+            const int high = hex_digit(field.value[index + 1U]);
+            const int low = hex_digit(field.value[index + 2U]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            value = static_cast<char>(high * 16 + low);
+            index += 2U;
+        }
+        const unsigned char byte = static_cast<unsigned char>(value);
+        if (byte < 0x20U || byte > 0x7eU || used + 1U >= capacity) {
+            return false;
+        }
+        output[used++] = value;
+    }
+    output[used] = '\0';
     return true;
 }
 
@@ -581,6 +625,27 @@ bool parse_web_generic_gpio_form(const char *body, std::size_t length,
     }
     output->tx_gpio = static_cast<uint8_t>(tx_gpio);
     output->rx_gpio = static_cast<uint8_t>(rx_gpio);
+    return true;
+}
+
+bool parse_web_wifi_form(const char *body, std::size_t length, WebWifiForm *output)
+{
+    if (output == nullptr) {
+        return false;
+    }
+    Field fields[3]{};
+    std::size_t count = 0;
+    constexpr const char *keys[] = {"ssid", "password"};
+    WebWifiForm parsed{};
+    if (!parse_fields(body, length, fields, std::size(fields), &count, true) ||
+        !exact_fields(fields, count, keys, std::size(keys)) ||
+        !decode_form_value(*find_field(fields, count, "ssid"), parsed.ssid, sizeof(parsed.ssid)) ||
+        !decode_form_value(*find_field(fields, count, "password"), parsed.password,
+                           sizeof(parsed.password)) ||
+        parsed.ssid[0] == '\0') {
+        return false;
+    }
+    *output = parsed;
     return true;
 }
 

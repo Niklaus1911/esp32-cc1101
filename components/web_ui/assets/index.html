@@ -203,6 +203,12 @@
             <dl id="system-network-details" class="details"><dt>State</dt><dd>Loading</dd></dl>
           </div>
         </div>
+        <form id="wifi-form" class="form-grid wifi-form" autocomplete="off">
+          <label>Network name (SSID)<input name="ssid" maxlength="32" required></label>
+          <label>Password<input name="password" type="password" maxlength="64" pattern="(.{8,63}|[0-9A-Fa-f]{64})?" autocomplete="new-password" placeholder="Empty for an open network"></label>
+          <button type="submit" class="primary command">Join network</button>
+          <p class="subtle wide">The device leaves its current network. If it can't join within about a minute, it returns to the saved network.</p>
+        </form>
         <details class="system-disclosure">
           <summary>Wi-Fi diagnostics</summary>
           <dl id="system-wifi-diagnostics" class="details"><dt>State</dt><dd>Loading</dd></dl>

@@ -595,6 +595,9 @@ void start_connection_now(const WifiCredentials &credentials, bool candidate)
         StatusLock lock;
         if (lock.locked()) {
             copy_text(s_status.active_ssid, sizeof(s_status.active_ssid), credentials.ssid);
+            if (candidate) {
+                s_status.failed_ssid[0] = '\0';
+            }
             s_status.active_saved = !candidate;
             s_status.retry_count = 0;
             s_status.disconnect_reason = 0;
@@ -658,10 +661,31 @@ void schedule_retry(int32_t reason)
         s_status.disconnect_reason = reason;
         retry_count = ++s_status.retry_count;
     }
-    if (!s_had_ip && retry_count > kInitialRetryLimit) {
-        s_retry_pending = false;
-        set_state(NetworkWifiState::kFault, ESP_ERR_WIFI_CONN);
-        return;
+    const bool saved_differs = wifi_credentials_are_valid(s_saved_credentials) &&
+                               !credentials_equal(s_active_credentials, s_saved_credentials);
+    switch (network_wifi_retry_action(s_had_ip, retry_count, kInitialRetryLimit,
+                                      s_active_candidate, saved_differs)) {
+        case NetworkWifiRetryAction::kRetry:
+            break;
+        case NetworkWifiRetryAction::kGiveUp:
+            s_retry_pending = false;
+            set_state(NetworkWifiState::kFault, ESP_ERR_WIFI_CONN);
+            return;
+        case NetworkWifiRetryAction::kFallBackToSaved: {
+            ESP_LOGW(kTag, "Could not join %s; returning to the saved network %s",
+                     s_active_credentials.ssid, s_saved_credentials.ssid);
+            {
+                StatusLock lock;
+                if (lock.locked()) {
+                    copy_text(s_status.failed_ssid, sizeof(s_status.failed_ssid),
+                              s_active_credentials.ssid);
+                }
+            }
+            s_retry_pending = false;
+            const WifiCredentials saved = s_saved_credentials;
+            begin_connection(saved, false);
+            return;
+        }
     }
     const uint32_t delay_ms = network_wifi_retry_delay_ms(retry_count);
     s_retry_due_us = esp_timer_get_time() + static_cast<int64_t>(delay_ms) * 1000;

@@ -47,7 +47,7 @@ const occurrenceCount = (content, value) => content.split(value).length - 1;
 
 assert.match(lifecycle, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(lifecycle, /constexpr uint32_t kHttpTaskStackSize = CONFIG_OTA_HTTP_TASK_STACK_SIZE;/);
-assert.match(lifecycle, /config\.max_uri_handlers = 24;/);
+assert.match(lifecycle, /config\.max_uri_handlers = 28;/);
 assert.match(lifecycle, /config\.max_open_sockets = 3;/);
 assert.match(api, /constexpr uint16_t kHttpPort = CONFIG_OTA_HTTP_PORT;/);
 assert.match(api, /Referrer-Policy", "same-origin/);
@@ -76,7 +76,23 @@ for (const route of [
   '"/api/rules", HTTP_PATCH, patch_rule_handler',
   '"/api/radio/hardware", HTTP_POST, hardware_handler',
   '"/api/radio/generic-gpio", HTTP_POST, generic_gpio_handler',
+  '"/api/wifi", HTTP_POST, wifi_handler',
 ]) assert(api.includes(route), `missing Web route: ${route}`);
+// Every registered route (Web + 2 OTA) must fit the handler table with headroom.
+const routeCount = occurrenceCount(api, ", HTTP_") + 2;
+assert(routeCount < 28, `${routeCount} routes leave no URI handler headroom`);
+
+// Wi-Fi setup: the password is a masked field, sent percent-encoded, wiped after use,
+// and never part of any API response.
+assert(index.includes('id="wifi-form"') && /name="password" type="password"/.test(index),
+       "Wi-Fi form with a masked password field missing");
+assert(js.includes('requestAction("/api/wifi","POST",body)') &&
+       js.includes("encodeURIComponent(f.password.value)") && js.includes('f.password.value=""'),
+       "Wi-Fi join must percent-encode and clear the password");
+assert(!/\\"password\\"/.test(api), "API responses must never include a password field");
+assert(compactSource(api).includes("wipe(body.get(), length);") &&
+       compactSource(api).includes("wipe(&credentials, sizeof(credentials));"),
+       "Wi-Fi handler must wipe buffers that held the password");
 
 assert(source.includes("register_ota_http_handlers"), "OTA must share the Web server");
 assert(source.includes("authorize_web_ota_request"), "OTA must use Host/origin authorization");

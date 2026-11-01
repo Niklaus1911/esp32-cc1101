@@ -683,6 +683,7 @@ D("system-wifi-details",[
 ["State",T(w.state)],["Active SSID",w.ssid||"-"],["Signal",w.online?signal:"-"],
 ["Saved network",w.saved_known == null?"-":!w.saved_known?"Unknown":!w.saved?"Not configured" :
 w.active_saved?"Active":"Configured"],
+["Last failed join",w.failed_ssid||"None"],
 ]);
 D("system-network-details",[
 ["IP address",A(w.ip)],["Gateway",A(w.gateway)],
@@ -1290,6 +1291,16 @@ state.genericGpioDirty=false;
 renderGenericGpio(state.live?.board?.generic||{});
 }
 };
+
+// SSID and password can hold any printable character, so this form is percent-encoded.
+byId("wifi-form").addEventListener("submit", async (event) => {
+event.preventDefault();
+const f=event.currentTarget.elements,ssid=f.ssid.value;
+if (!confirm(`Join "${ssid}"? The device leaves its current network and this page may stop updating. If it can't join, it returns to the saved network.`)) return;
+const body=`ssid=${encodeURIComponent(ssid)}&password=${encodeURIComponent(f.password.value)}`;
+f.password.value="";
+if (await requestAction("/api/wifi","POST",body)) showNotice(`Joining ${ssid}. If this page stops updating, open http://${state.live?.mdns?.effective_hostname||"<device>"}.local/ from that network.`,"success",true);
+});
 
 byId("signal-list").addEventListener("click", async (event) => {
 const button = event.target.closest("[data-action]");

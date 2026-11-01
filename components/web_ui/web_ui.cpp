@@ -116,7 +116,9 @@ esp_err_t start_server() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kHttpPort;
     config.stack_size = kHttpTaskStackSize;
-    config.max_uri_handlers = 24;
+    // 23 Web routes plus 2 OTA routes, with headroom so a new route can't silently
+    // fail registration.
+    config.max_uri_handlers = 28;
     config.max_open_sockets = 3;
     config.open_fn = accept_ready_session;
     config.lru_purge_enable = true;

@@ -87,6 +87,14 @@ struct WebGenericGpioForm {
     uint8_t rx_gpio = 0;
 };
 
+constexpr std::size_t kWebWifiSsidCapacity = 33;
+constexpr std::size_t kWebWifiPasswordCapacity = 65;
+
+struct WebWifiForm {
+    char ssid[kWebWifiSsidCapacity]{};
+    char password[kWebWifiPasswordCapacity]{};
+};
+
 bool parse_web_learn_form(const char *body, std::size_t length, char *name,
                           std::size_t name_capacity);
 bool parse_web_replay_form(const char *body, std::size_t length, WebReplayForm *output);
@@ -103,6 +111,9 @@ bool parse_web_rule_patch_form(const char *body, std::size_t length, WebRulePatc
 bool parse_web_hardware_form(const char *body, std::size_t length, WebHardwareForm *output);
 bool parse_web_generic_gpio_form(const char *body, std::size_t length,
                                  WebGenericGpioForm *output);
+// Unlike the other forms, SSIDs and passwords are percent-decoded ('+' is a space) because
+// they may contain spaces and symbols. Credential policy is checked by the caller.
+bool parse_web_wifi_form(const char *body, std::size_t length, WebWifiForm *output);
 bool web_form_content_type_is_valid(const char *content_type);
 bool web_octet_stream_content_type_is_valid(const char *content_type);
 bool web_host_matches_ipv4(const char *host, uint32_t ipv4, uint16_t expected_port);

@@ -119,7 +119,8 @@ function live(state) {
     network: {
       available: true, online: !bad, rssi: bad ? -88 : -57, state: bad ? "retry_wait" : "online",
       driver_initialized: true, driver_started: true, scan_running: false, ota_locked: false,
-      ssid: bad ? "" : "home-iot", saved_ssid: "home-iot", saved_known: true, saved: true, active_saved: !bad,
+      ssid: bad ? "" : "home-iot", saved_ssid: "home-iot", failed_ssid: bad ? "guest-network" : "",
+      saved_known: true, saved: true, active_saved: !bad,
       ip: bad ? "0.0.0.0" : "127.0.0.1", netmask: "255.255.255.0", gateway: "127.0.0.1", dns: "127.0.0.1",
       retries: bad ? 14 : 0, event_drops: 0, disconnect_reason: bad ? 201 : 0, initialization_error: "ESP_OK",
       persistence_error: "ESP_OK", last_error: bad ? "ESP_ERR_WIFI_NOT_CONNECT" : "ESP_OK",
@@ -261,7 +262,9 @@ export function createMockServer({ assets = DEFAULT_ASSETS, scenario = "healthy"
     const chunks = [];
     request.on("data", (chunk) => { if (chunks.length < 64) chunks.push(chunk); });
     request.on("end", () => {
-      const body = path === "/api/v1/ota" ? "<firmware upload intercepted>" : Buffer.concat(chunks).toString("utf8").slice(0, 2048);
+      let body = path === "/api/v1/ota" ? "<firmware upload intercepted>" : Buffer.concat(chunks).toString("utf8").slice(0, 2048);
+      const wifi = path === "/api/wifi" ? new URLSearchParams(body) : null;
+      if (wifi) body = `ssid=${encodeURIComponent(wifi.get("ssid") ?? "")}&password=<redacted>`;
       // Headers the firmware's same-origin and form checks depend on.
       state.mutations.push({ method: request.method, path, body, origin: request.headers.origin ?? null,
                              contentType: request.headers["content-type"] ?? null });
@@ -283,6 +286,7 @@ export function createMockServer({ assets = DEFAULT_ASSETS, scenario = "healthy"
         for (const stream of streams) stream.destroy();
         return undefined;
       }
+      if (wifi) return json(202, { ok: true, ssid: wifi.get("ssid") ?? "" });
       if (path === "/api/recent" && new URLSearchParams(body).get("action") === "clear") {
         state.extraRecent = [];
         state.recentRevision++;

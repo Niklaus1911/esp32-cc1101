@@ -1308,6 +1308,20 @@ void test_wifi_config()
                 rfbridge::network_wifi_retry_delay_ms(6) == 30000 &&
                 rfbridge::network_wifi_retry_delay_ms(20) == 30000,
             "Wi-Fi reconnect backoff is bounded");
+    using rfbridge::NetworkWifiRetryAction;
+    require(rfbridge::network_wifi_retry_action(false, 5, 5, true, true) ==
+                    NetworkWifiRetryAction::kRetry &&
+                rfbridge::network_wifi_retry_action(true, 50, 5, true, true) ==
+                    NetworkWifiRetryAction::kRetry,
+            "Wi-Fi keeps retrying within the limit or after having had an address");
+    require(rfbridge::network_wifi_retry_action(false, 6, 5, true, true) ==
+                NetworkWifiRetryAction::kFallBackToSaved,
+            "a failed new network falls back to the saved one instead of stranding the device");
+    require(rfbridge::network_wifi_retry_action(false, 6, 5, false, true) ==
+                    NetworkWifiRetryAction::kGiveUp &&
+                rfbridge::network_wifi_retry_action(false, 6, 5, true, false) ==
+                    NetworkWifiRetryAction::kGiveUp,
+            "saved networks and candidates without a different fallback give up as before");
     char connected_line[192]{};
     require(rfbridge::format_network_wifi_connected_line(
                 "Workshop WiFi", 0x2a01a8c0U, 0x00ffffffU, 0x0101a8c0U,
@@ -1701,6 +1715,37 @@ void test_web_forms()
                 !rfbridge::parse_web_generic_gpio_form(
                     generic_gpio_extra, sizeof(generic_gpio_extra) - 1U, &generic_gpio),
             "Web generic GPIO form rejects out-of-range and extra fields");
+
+    rfbridge::WebWifiForm wifi{};
+    constexpr char wifi_encoded[] = "ssid=Caf%C3%A9+Guest%26Co&password=p%40ss+w0rd%25%2B";
+    require(!rfbridge::parse_web_wifi_form(wifi_encoded, sizeof(wifi_encoded) - 1U, &wifi),
+            "Web Wi-Fi form rejects non-ASCII bytes the credential record cannot store");
+    constexpr char wifi_symbols[] = "ssid=Home+Guest%26Co&password=p%40ss+w0rd%25%2B";
+    require(rfbridge::parse_web_wifi_form(wifi_symbols, sizeof(wifi_symbols) - 1U, &wifi) &&
+                std::strcmp(wifi.ssid, "Home Guest&Co") == 0 &&
+                std::strcmp(wifi.password, "p@ss w0rd%+") == 0,
+            "Web Wi-Fi form percent-decodes spaces and symbols");
+    constexpr char wifi_open[] = "ssid=Open&password=";
+    require(rfbridge::parse_web_wifi_form(wifi_open, sizeof(wifi_open) - 1U, &wifi) &&
+                std::strcmp(wifi.ssid, "Open") == 0 && wifi.password[0] == '\0',
+            "Web Wi-Fi form accepts an open network");
+    const char *invalid_wifi[] = {
+        "ssid=&password=secret123",          // empty SSID
+        "ssid=Home&password=bad%2",          // truncated escape
+        "ssid=Home&password=bad%zz11",       // non-hex escape
+        "ssid=Home%0A&password=secret123",   // control character
+        "ssid=Home&password=secret123&x=1",  // extra field
+        "password=secret123",                // missing SSID
+        "ssid=123456789012345678901234567890123&password=",  // SSID over 32 bytes
+    };
+    for (const char *body : invalid_wifi) {
+        require(!rfbridge::parse_web_wifi_form(body, std::strlen(body), &wifi),
+                "Web Wi-Fi form rejects malformed or oversized input");
+    }
+    char long_password[128] = "ssid=Home&password=";
+    std::memset(long_password + std::strlen(long_password), 'a', 65);
+    require(!rfbridge::parse_web_wifi_form(long_password, std::strlen(long_password), &wifi),
+            "Web Wi-Fi form rejects passwords over 64 bytes");
 
     require(rfbridge::web_form_content_type_is_valid("application/x-www-form-urlencoded"),
             "Web form content type accepted");

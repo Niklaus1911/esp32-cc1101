@@ -204,6 +204,7 @@ h2 svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
 .form-grid .command { width: 100%; }
 .signal-save-form { grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.4fr) repeat(3, minmax(90px, .7fr)) auto; margin-bottom: var(--s-4); }
 .raw-form { grid-template-columns: repeat(2, minmax(140px, 220px)); }
+.wifi-form { grid-template-columns: repeat(2, minmax(160px, 1fr)) auto; margin-top: var(--s-4); }
 .toggle { display: flex; align-items: center; gap: var(--s-2); min-height: 40px; padding: 0 var(--s-3); border: 1px solid var(--line-2); border-radius: var(--r-2); background: var(--surface-2); color: var(--text); font-size: var(--f-md); font-weight: 550; cursor: pointer; }
 .toggle:hover { border-color: var(--line-strong); background: var(--raised); }
 .toggle input { width: 17px; min-height: 17px; accent-color: var(--accent); cursor: pointer; }

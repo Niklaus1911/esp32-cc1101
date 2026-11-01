@@ -360,6 +360,7 @@ esp_err_t live_handler(httpd_req_t *request)
 
     char escaped_ssid[kWifiSsidCapacity * 6U]{};
     char escaped_saved_ssid[kWifiSsidCapacity * 6U]{};
+    char escaped_failed_ssid[kWifiSsidCapacity * 6U]{};
     char ip[16]{};
     char netmask[16]{};
     char gateway[16]{};
@@ -367,6 +368,8 @@ esp_err_t live_handler(httpd_req_t *request)
     if (!escape_web_json_string(wifi.active_ssid, escaped_ssid, sizeof(escaped_ssid)) ||
         !escape_web_json_string(wifi.saved_ssid, escaped_saved_ssid,
                                 sizeof(escaped_saved_ssid)) ||
+        !escape_web_json_string(wifi.failed_ssid, escaped_failed_ssid,
+                                sizeof(escaped_failed_ssid)) ||
         !format_web_ipv4(wifi.ip, ip, sizeof(ip)) ||
         !format_web_ipv4(wifi.netmask, netmask, sizeof(netmask)) ||
         !format_web_ipv4(wifi.gateway, gateway, sizeof(gateway)) ||
@@ -538,9 +541,10 @@ esp_err_t live_handler(httpd_req_t *request)
     if (error == ESP_OK) {
         const int length = std::snprintf(
             scratch, sizeof(scratch),
-            "\"ssid\":\"%s\",\"saved_ssid\":\"%s\",\"saved_known\":%s,"
-            "\"saved\":%s,\"active_saved\":%s,",
-            escaped_ssid, escaped_saved_ssid, wifi.saved_known ? "true" : "false",
+            "\"ssid\":\"%s\",\"saved_ssid\":\"%s\",\"failed_ssid\":\"%s\","
+            "\"saved_known\":%s,\"saved\":%s,\"active_saved\":%s,",
+            escaped_ssid, escaped_saved_ssid, escaped_failed_ssid,
+            wifi.saved_known ? "true" : "false",
             wifi.saved ? "true" : "false", wifi.active_saved ? "true" : "false");
         error = send_formatted_chunk(request, scratch, length, sizeof(scratch));
     }
@@ -1176,6 +1180,68 @@ esp_err_t generic_gpio_handler(httpd_req_t *request)
     return response_error;
 }
 
+static_assert(kWebWifiSsidCapacity == kWifiSsidCapacity &&
+                  kWebWifiPasswordCapacity == kWifiPasswordCapacity,
+              "Web Wi-Fi form must match the credential record");
+
+// Volatile so the compiler cannot drop the wipe of buffers that held a password.
+void wipe(void *data, std::size_t size)
+{
+    volatile unsigned char *bytes = static_cast<volatile unsigned char *>(data);
+    while (size-- > 0) {
+        *bytes++ = 0;
+    }
+}
+
+esp_err_t wifi_handler(httpd_req_t *request)
+{
+    std::unique_ptr<char[]> body;
+    std::size_t length = 0;
+    const esp_err_t receive_error = receive_action_form(request, &body, &length);
+    if (receive_error != ESP_OK) {
+        return receive_error;
+    }
+    WebWifiForm form{};
+    const bool parsed = parse_web_wifi_form(body.get(), length, &form);
+    wipe(body.get(), length);
+    WifiCredentials credentials{};
+    std::memcpy(credentials.ssid, form.ssid, sizeof(credentials.ssid));
+    std::memcpy(credentials.password, form.password, sizeof(credentials.password));
+    wipe(&form, sizeof(form));
+    NetworkWifiStatus status{};
+    const char *rejection = nullptr;
+    if (!parsed || !wifi_credentials_are_valid(credentials)) {
+        rejection = "invalid_wifi_request";
+    } else if (get_network_wifi_status(&status) != ESP_OK || !status.available ||
+               status.ota_locked || ota_update_upload_is_active()) {
+        rejection = "wifi_busy";
+    }
+    if (rejection != nullptr) {
+        wipe(&credentials, sizeof(credentials));
+        const bool invalid = std::strcmp(rejection, "invalid_wifi_request") == 0;
+        return send_api_error(request, invalid ? "400 Bad Request" : "409 Conflict", rejection,
+                              invalid ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE);
+    }
+    char escaped_ssid[kWifiSsidCapacity * 6U]{};
+    char response[kScratchSize]{};
+    const int response_length =
+        escape_web_json_string(credentials.ssid, escaped_ssid, sizeof(escaped_ssid))
+            ? std::snprintf(response, sizeof(response), "{\"ok\":true,\"ssid\":\"%s\"}",
+                            escaped_ssid)
+            : -1;
+    if (response_length < 0 || static_cast<std::size_t>(response_length) >= sizeof(response)) {
+        wipe(&credentials, sizeof(credentials));
+        return send_api_error(request, "500 Internal Server Error", "response_too_large",
+                              ESP_ERR_INVALID_SIZE);
+    }
+    // Answer first: the station may leave this network as soon as the change is queued.
+    // A failed join falls back to the saved network (see network_wifi_retry_action).
+    const esp_err_t response_error = send_json(request, "202 Accepted", response);
+    (void)connect_network_wifi(credentials);
+    wipe(&credentials, sizeof(credentials));
+    return response_error;
+}
+
 esp_err_t register_handler(httpd_handle_t server, const char *uri, httpd_method_t method,
                            esp_err_t (*handler)(httpd_req_t *), void *context = nullptr)
 {
@@ -1248,6 +1314,7 @@ esp_err_t register_web_handlers(httpd_handle_t server)
         {"/api/rules", HTTP_PATCH, patch_rule_handler, nullptr},
         {"/api/radio/hardware", HTTP_POST, hardware_handler, nullptr},
         {"/api/radio/generic-gpio", HTTP_POST, generic_gpio_handler, nullptr},
+        {"/api/wifi", HTTP_POST, wifi_handler, nullptr},
     };
     for (const Route &route : routes) {
         const esp_err_t error = register_handler(server, route.uri, route.method, route.handler,
