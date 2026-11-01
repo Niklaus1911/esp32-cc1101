@@ -1107,7 +1107,7 @@ void print_pretty_radio_status(const RfRadioStatus &status, bool include_summary
                             ConsoleTone::kAction);
         print_dashboard_row("Carrier", "module-defined", ConsoleTone::kMuted, "TX power",
                             "module-defined", ConsoleTone::kMuted);
-        print_dashboard_value("CC1101 diagnostics", "unavailable in generic mode",
+        print_dashboard_value("CC1101 diag", "unavailable in generic mode",
                               ConsoleTone::kMuted);
     } else {
         std::snprintf(left, sizeof(left), "%d.%03d MHz", CONFIG_CC1101_FREQUENCY_HZ / 1000000,
