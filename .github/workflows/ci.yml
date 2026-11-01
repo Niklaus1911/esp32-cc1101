@@ -1,27 +1,57 @@
 name: CI
 
+# Only changes to files a job builds, tests, or checks start a run. Tag pushes ignore path
+# filters, so a release tag always runs.
 on:
   push:
     branches: [main]
     tags: ["v*"]
-    # Nothing reads these, so they never need a run. Tag pushes ignore path filters.
-    paths-ignore: ["release-notes/**", "plan/**"]
+    paths:
+      - ".github/workflows/ci.yml"
+      - "CMakeLists.txt"
+      - "boards/**"
+      - "components/**"
+      - "main/**"
+      - "partitions_ota.csv"
+      - "sdkconfig.defaults*"
+      - "dependencies.lock.*"
+      - "test_apps/**"
+      - "host_tests/**"
+      - "tools/**"
+      - "README.md"
+      - "docs/development-tooling-setup.md"
   pull_request:
-    paths-ignore: ["release-notes/**", "plan/**"]
+    branches: [main]
+    paths:
+      - ".github/workflows/ci.yml"
+      - "CMakeLists.txt"
+      - "boards/**"
+      - "components/**"
+      - "main/**"
+      - "partitions_ota.csv"
+      - "sdkconfig.defaults*"
+      - "dependencies.lock.*"
+      - "test_apps/**"
+      - "host_tests/**"
+      - "tools/**"
+      - "README.md"
+      - "docs/development-tooling-setup.md"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to the same branch or pull request supersedes an unfinished run. Tag runs
-# publish a release and are never cancelled.
+# One run at a time across the whole repository: a running workflow always finishes (so a
+# release is never interrupted), and at most one run waits. GitHub replaces a waiting run with
+# a newer one, so push a release tag only when no other run is queued.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: ci
+  cancel-in-progress: false
 
 jobs:
   # Documentation-only changes skip the ESP-IDF builds; host tests still check the README
-  # and AGENTS.md contracts. Runs on a free GitHub-hosted runner (public repository).
+  # and tooling-guide contracts. A few seconds of git diff, so it uses a free GitHub-hosted
+  # runner (public repository) instead of starting a Namespace machine.
   changes:
     name: Detect changes
     runs-on: ubuntu-24.04
@@ -52,8 +82,8 @@ jobs:
   # The tagged commit already passed these on main, and they don't depend on the version.
   host-tests:
     name: Host tests
-    if: github.ref_type != 'tag'
-    runs-on: ubuntu-24.04
+    if: github.ref_type != 'tag' && !github.event.pull_request.head.repo.fork
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -83,7 +113,10 @@ jobs:
   production:
     name: Production firmware (4 profiles)
     needs: changes
-    if: needs.changes.outputs.firmware == 'true'
+    # Namespace runners are paid: pull requests from forks never start them.
+    if: >-
+      needs.changes.outputs.firmware == 'true' &&
+      !github.event.pull_request.head.repo.fork
     runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 45
     container: espressif/idf:v6.0.2
@@ -182,8 +215,10 @@ jobs:
   unity:
     name: Unity image (${{ matrix.target }})
     needs: changes
-    if: github.ref_type != 'tag' && needs.changes.outputs.firmware == 'true'
-    runs-on: nscloud-ubuntu-24.04-amd64-4x8
+    if: >-
+      github.ref_type != 'tag' && needs.changes.outputs.firmware == 'true' &&
+      !github.event.pull_request.head.repo.fork
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 30
     container: espressif/idf:v6.0.2
     strategy:

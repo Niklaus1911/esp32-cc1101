@@ -294,22 +294,24 @@ Do not commit browser profiles, storage state, screenshots, traces, npm caches, 
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml` runs for pushes to `main`, `v*` tags, pull requests, and manual dispatch. The ESP-IDF builds use Namespace runners (the Namespace GitHub app is installed on the repository); the cheap jobs use free GitHub-hosted runners because the repository is public:
+`.github/workflows/ci.yml` runs on pushes to `main`, `v*` tags, pull requests into `main`, and manual dispatch. A branch push or pull request starts a run only when it changes a file that some job builds, tests, or checks: the workflow itself, firmware sources and build metadata (`CMakeLists.txt`, `boards/`, `components/`, `main/`, `partitions_ota.csv`, `sdkconfig.defaults*`, `dependencies.lock.*`), `test_apps/`, `host_tests/`, `tools/`, `README.md`, or this guide. Release notes, plans, and other documentation never start a run. Tag pushes always run.
+
+Build and test jobs use Namespace `nscloud-ubuntu-24.04-amd64-8x16` runners (8 vCPU, 16 GB; the Namespace GitHub app is installed on the repository). Change detection and the release upload take seconds, so they use free GitHub-hosted runners (the repository is public):
 
 | Job | Runner | What it proves |
 |---|---|---|
 | Detect changes | `ubuntu-24.04` | Whether anything other than Markdown, `docs/`, `plan/`, `release-notes/`, or license files changed |
-| Host tests | `ubuntu-24.04` | The full `host_tests` suite with a native toolchain and Node 24, including the README and AGENTS.md contracts |
+| Host tests | `nscloud-ubuntu-24.04-amd64-8x16` | The full `host_tests` suite with a native toolchain and Node 24, including the README and tooling-guide contracts |
 | Production firmware | `nscloud-ubuntu-24.04-amd64-8x16`, container `espressif/idf:v6.0.2` | `tools/verify-production.sh` for all four profiles; uploads the images, ELF files, wired-install files, and logs as the `firmware-<sha>` artifact (14 days) |
-| Unity image | `nscloud-ubuntu-24.04-amd64-4x8`, container `espressif/idf:v6.0.2` | The Unity test image compiles for `esp32` and `esp32s3` |
+| Unity image | `nscloud-ubuntu-24.04-amd64-8x16`, container `espressif/idf:v6.0.2` | The Unity test image compiles for `esp32` and `esp32s3` |
 
 To keep Namespace usage down:
-- Pushes that touch only `release-notes/` or `plan/` start no run.
-- Documentation-only changes run only change detection and host tests.
-- A newer push to the same branch or pull request cancels the unfinished run.
+- Changes to `README.md` or this guide alone run only change detection and host tests.
 - Tag runs skip host tests and Unity builds, because those already passed on `main` for the same source.
+- Pull requests from forks never start Namespace jobs.
+- Runs never overlap. All runs share one concurrency group, a running workflow always finishes, and at most one run waits. GitHub replaces a waiting run with a newer one, so push a release tag only when no other run is queued.
 
-Releases are built by CI, not on a developer machine. Commit `release-notes/<tag>.md` (this starts no run), then push an annotated `v*` tag on that commit once the release's code has passed on `main`. The tag run's production job verifies all four profiles, checks that every image reports the tag as its version, and packages the per-profile zips, OTA images, and `SHA256SUMS` with `tools/package-release.sh`. The `Publish release` job (on a GitHub-hosted runner, which provides the `gh` CLI) then verifies the checksums and creates the GitHub release with those notes. A tag without its notes file fails before anything is published.
+Releases are built by CI, not on a developer machine. Commit `release-notes/<tag>.md` (this starts no run), then, once the release's code has passed on `main` and no run is queued, push an annotated `v*` tag on that commit. The tag run's production job verifies all four profiles, checks that every image reports the tag as its version, and packages the per-profile zips, OTA images, and `SHA256SUMS` with `tools/package-release.sh`. The `Publish release` job (on a GitHub-hosted runner, which provides the `gh` CLI) then verifies the checksums and creates the GitHub release with those notes. A tag without its notes file fails before anything is published.
 
 The verifier normally sources the machine-local `$HOME/.espressif/v6.0.2/esp-idf/export.sh`; CI sets `RFBRIDGE_IDF_EXPORT` to the container's export script instead. CI never flashes hardware or runs on-device tests, and its success does not replace hardware validation.
 
