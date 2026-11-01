@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -58,7 +59,8 @@ SemaphoreHandle_t s_recent_mutex = nullptr;
 QueueHandle_t s_queue = nullptr;
 TaskHandle_t s_task = nullptr;
 std::atomic_flag s_initializing = ATOMIC_FLAG_INIT;
-std::array<LearnedSignalEntry, CONFIG_RF_MAX_LEARNED_SIGNALS> s_catalog{};
+// Zero-initialised, so the S3 profiles keep it in PSRAM instead of internal RAM.
+EXT_RAM_BSS_ATTR std::array<LearnedSignalEntry, CONFIG_RF_MAX_LEARNED_SIGNALS> s_catalog{};
 std::size_t s_catalog_count = 0;
 bool s_catalog_available = false;
 RfSignalsStatus s_status{};

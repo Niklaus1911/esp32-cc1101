@@ -7,10 +7,12 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <cstddef>
 #include <memory>
 #include <new>
 #include <type_traits>
 
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -66,7 +68,14 @@ enum class EventEmitResult : uint8_t {
 
 static_assert(std::is_trivially_copyable_v<RuntimeRule>);
 
-std::array<RuntimeRule, CONFIG_RF_MAX_AUTOMATION_RULES> s_rules{};
+using RuntimeRules = std::array<RuntimeRule, CONFIG_RF_MAX_AUTOMATION_RULES>;
+static_assert(std::is_trivially_destructible_v<RuntimeRules>);
+// Zero-filled bytes rather than a value-initialised array: RfStoredRule's non-zero cooldown
+// default would put the table in .data, and only zero-initialised .bss can live in PSRAM
+// (EXT_RAM_BSS_ATTR, S3 profiles). The bytes implicitly create the array, and
+// clear_runtime_rules() resets it to the same all-zero state before any rule is loaded.
+alignas(RuntimeRules) EXT_RAM_BSS_ATTR std::byte s_rule_storage[sizeof(RuntimeRules)];
+RuntimeRules &s_rules = *std::launder(reinterpret_cast<RuntimeRules *>(s_rule_storage));
 std::array<RfStorageRuleEntry, CONFIG_RF_MAX_AUTOMATION_RULES> s_graph_scratch{};
 std::size_t s_rule_count = 0;
 SemaphoreHandle_t s_mutex = nullptr;

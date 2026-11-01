@@ -147,8 +147,14 @@ run_profile() {
             'S3 boot PSRAM initialization'
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_BOOT_INIT=y' \
             'S3 application PSRAM initialization'
-        require_exact_line "$sdkconfig" '# CONFIG_SPIRAM_IGNORE_NOTFOUND is not set' \
-            'required S3 PSRAM detection'
+        # PSRAM-resident .bss makes PSRAM mandatory: Kconfig then removes IGNORE_NOTFOUND.
+        require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' \
+            'S3 PSRAM .bss placement'
+        if grep -Fqx -- 'CONFIG_SPIRAM_IGNORE_NOTFOUND=y' "$sdkconfig"; then
+            printf 'Production verification failed: S3 PSRAM must be required in %s\n' \
+                "$sdkconfig" >&2
+            return 1
+        fi
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_MEMTEST=y' 'S3 boot PSRAM memory test'
         require_exact_line "$sdkconfig" 'CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y' \
             'Wi-Fi/lwIP PSRAM allocation'
