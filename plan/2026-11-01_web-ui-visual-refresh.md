@@ -52,9 +52,13 @@ Result: CSS only, no HTML or JavaScript changes. On desktop the header and tab b
 
 Each view lands with before/after screenshots at all three widths.
 
-### 4. Light theme and contrast pass
+Result (done, CSS only): status cards are flat with a status dot instead of a colored top bar and show larger values; the latest frame is a card with two label/value pairs per row on desktop (one per row at 820px and below) and monospace values; list-row Replay buttons are secondary so only primary actions are solid teal; System groups separate key/value rows with dividers; section titles placed directly in a band (Transmit) get proper spacing. Eight redundant `letter-spacing: 0` declarations, three duplicate `.metric strong.value-*` rules, and the `.first-band` rule were removed, and tabular figures are set once globally. `app.css` is 19,904 bytes. Code chips for RF codes were not done: they need markup that `app.js` generates, so they would cost JavaScript changes.
+
+### 4. Light theme and contrast pass (done)
 
 Add the light token block, then check contrast for text, borders, badges, and focus rings in both themes.
+
+Result: a `prefers-color-scheme: light` block overrides only tokens, and `index.html` declares `color-scheme: dark light`. Every text pair meets WCAG AA (body text 16.6:1, tertiary text at least 4.9:1, white on the primary button 5.1:1, status colors on their tinted backgrounds at least 5.2:1); field borders are at least 3.3:1. The accent was darkened to `#0a7a84` so icons and focus rings keep margin on the page background. Screenshots of `healthy`, `busy`, `degraded`, `empty`, and `list-failure` in light, plus a dark regression pass, show no page errors or horizontal overflow. Decision 1 was applied: the theme took `app.css` to 20,899 bytes, so its limit is now 24,000 bytes (`index.html` stays at 20,000).
 
 ### 5. Verification and release
 
@@ -65,9 +69,9 @@ Add the light token block, then check contrast for text, borders, badges, and fo
 
 ## Decisions
 
-1. **CSS budget.** Recommended: rewrite compactly and keep the 20,000-byte limit if possible; if the light theme pushes past it, raise the `app.css` limit to 24,000 bytes in one deliberate change. Alternative: serve gzip-precompressed assets (changes `web_api.cpp` and the build) and budget on compressed size.
-2. **Theme selection.** Recommended: follow the system setting only (CSS-only, no JavaScript bytes). Alternative: a manual toggle stored in `localStorage` (about 400 bytes of JavaScript).
-3. **Mobile navigation.** Recommended: keep the top tab bar, restyled. Alternative: a fixed bottom tab bar (better thumb reach, needs safe-area handling and more layout testing).
+1. **CSS budget.** Resolved in phase 4: `app.css` limit raised to 24,000 bytes. Recommended: rewrite compactly and keep the 20,000-byte limit if possible; if the light theme pushes past it, raise the `app.css` limit to 24,000 bytes in one deliberate change. Alternative: serve gzip-precompressed assets (changes `web_api.cpp` and the build) and budget on compressed size.
+2. **Theme selection.** Applied: follows the system setting. Recommended: follow the system setting only (CSS-only, no JavaScript bytes). Alternative: a manual toggle stored in `localStorage` (about 400 bytes of JavaScript).
+3. **Mobile navigation.** Applied: top tab bar kept. Recommended: keep the top tab bar, restyled. Alternative: a fixed bottom tab bar (better thumb reach, needs safe-area handling and more layout testing).
 
 ## Out of scope
 
