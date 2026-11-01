@@ -36,9 +36,11 @@ Rewrite `:root`, typography, buttons, inputs, selects, toggles, badges, notices,
 
 Result: a dark token set that meets WCAG AA (text at least 5.5:1, primary button label 7.5:1, field borders at least 3.9:1) with tokens for hover, tint, primary, and semantic ink colors, replacing the hard-coded colors outside the header. Buttons are flat (solid teal primary with dark label, raised secondary, tinted danger, ghost quiet); fields are filled with an accent focus border; labels and section titles are larger and use the main text color. `app.css` is 19,599 bytes, so phases 2 and 3 must remove more than they add. Follow-ups for phase 3: give section headings breathing room above their cards, and make per-row Replay buttons secondary so long lists aren't a column of solid teal.
 
-### 2. App shell
+### 2. App shell (done)
 
 Header (brand, device name, connection badge), tab navigation (pill/segmented on desktop, full-width icon tabs on mobile), and notices shown as an unobtrusive toast-style banner that doesn't shift the layout. Same DOM; class additions only where needed.
+
+Result: CSS only, no HTML or JavaScript changes. On desktop the header and tab bar share one translucent sticky surface, and the 60px header and pill tabs replace the 68px header and underline tabs. Mobile keeps the full-width icon tabs with an accent underline. The brand mark now uses tokens, leaving no hard-coded colors outside the token block. Notices are a fixed toast (bottom right on desktop, full width on mobile) with a `--shadow-md` token; `main` reserves bottom padding while a notice is visible so a persistent error can't hide the last controls. `app.css` is 19,881 bytes: phase 3 must shrink the view styles, and the phase 4 light theme will need the budget decision.
 
 ### 3. Views, one at a time
 
