@@ -304,7 +304,9 @@ Do not commit browser profiles, storage state, screenshots, traces, npm caches, 
 
 The verifier normally sources the machine-local `$HOME/.espressif/v6.0.2/esp-idf/export.sh`; CI sets `RFBRIDGE_IDF_EXPORT` to the container's export script instead. CI never flashes hardware or runs on-device tests, and its success does not replace hardware validation.
 
-The ESP-IDF image is large (about 5 GB). To avoid pulling it on every run, create a Namespace runner profile with cache volumes (container images enabled) and replace the `nscloud-ubuntu-…` labels with `namespace-profile-<name>`.
+The firmware jobs enable ESP-IDF's ccache support (`IDF_CCACHE_ENABLE=1`) and keep the compiler cache in GitHub's Actions cache (`actions/cache`, free and reachable from Namespace runners). Every run restores the newest cache for its job; only pushes to `main` save a new one, so pull requests and branches never evict it. ccache reuses compiler output only, so the verifier still checks complete clean builds. GitHub keeps up to 10 GB of cache per repository and drops the least recently used entries first.
+
+The ESP-IDF image itself (about 5 GB) is pulled on each run. If that becomes slow, a Namespace runner profile with cache volumes (container images enabled) can keep it, by replacing the `nscloud-ubuntu-…` labels with `namespace-profile-<name>`.
 
 ## Verification Checklist
 

@@ -20,9 +20,9 @@ jobs:
     runs-on: nscloud-ubuntu-24.04-amd64-4x8
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -49,20 +49,28 @@ jobs:
     runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 45
     container: espressif/idf:v6.0.2
+    env:
+      # ESP-IDF leaves ccache off by default. CCACHE_DIR is set per step because the
+      # workspace path inside the container is only known at run time.
+      IDF_CCACHE_ENABLE: "1"
+      CCACHE_MAXSIZE: 1G
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history and tags: ESP-IDF derives the firmware version from `git describe`.
           fetch-depth: 0
 
-      - name: Install image inspection tools
+      - name: Install image inspection tools and ccache
         run: |
-          if ! command -v objdump >/dev/null; then
+          missing=()
+          command -v objdump >/dev/null || missing+=(binutils)
+          command -v ccache >/dev/null || missing+=(ccache)
+          if (( ${#missing[@]} )); then
             apt-get update
-            apt-get install -y --no-install-recommends binutils
+            apt-get install -y --no-install-recommends "${missing[@]}"
           fi
 
       - name: Check ESP-IDF version
@@ -70,13 +78,32 @@ jobs:
           source "$IDF_PATH/export.sh" >/dev/null
           idf.py --version | tee /dev/stderr | grep -q 'v6\.0\.2'
 
+      # Compiler output only; ccache never changes the produced objects. Pull requests
+      # restore the latest main cache but only main saves, so branches can't evict it.
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: ccache-production-${{ github.sha }}
+          restore-keys: ccache-production-
+
       - name: Verify production builds
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          ccache --zero-stats
           RFBRIDGE_IDF_EXPORT="$IDF_PATH/export.sh" tools/verify-production.sh
+          ccache --show-stats
+
+      - name: Save compiler cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: ccache-production-${{ github.sha }}
 
       - name: Upload firmware images
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-${{ github.sha }}
           retention-days: 14
@@ -99,16 +126,31 @@ jobs:
       fail-fast: false
       matrix:
         target: [esp32, esp32s3]
+    env:
+      IDF_CCACHE_ENABLE: "1"
+      CCACHE_MAXSIZE: 500M
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Install ccache
+        run: command -v ccache >/dev/null || { apt-get update && apt-get install -y --no-install-recommends ccache; }
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: ccache-unity-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ccache-unity-${{ matrix.target }}-
 
       # Compile only: on-device Unity tests need hardware and explicit approval.
       - name: Build Unity image
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          ccache --zero-stats
           source "$IDF_PATH/export.sh" >/dev/null
           build="/tmp/esp32-cc1101-unit-${{ matrix.target }}"
           idf.py -C test_apps/unit -B "$build" \
@@ -117,3 +159,11 @@ jobs:
             -DSDKCONFIG_DEFAULTS="$PWD/test_apps/unit/sdkconfig.defaults;$PWD/test_apps/unit/sdkconfig.defaults.${{ matrix.target }}" \
             -DDEPENDENCIES_LOCK="$PWD/test_apps/unit/dependencies.lock.${{ matrix.target }}" \
             build
+          ccache --show-stats
+
+      - name: Save compiler cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: ccache-unity-${{ matrix.target }}-${{ github.sha }}
