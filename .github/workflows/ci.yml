@@ -4,20 +4,56 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Nothing reads these, so they never need a run. Tag pushes ignore path filters.
+    paths-ignore: ["release-notes/**", "plan/**"]
   pull_request:
+    paths-ignore: ["release-notes/**", "plan/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request supersedes an unfinished run. Tag runs
+# publish a release and are never cancelled.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  # Documentation-only changes skip the ESP-IDF builds; host tests still check the README
+  # and AGENTS.md contracts. Runs on a free GitHub-hosted runner (public repository).
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      firmware: ${{ steps.diff.outputs.firmware }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          firmware=true
+          if [[ "$GITHUB_REF_TYPE" != tag && "$GITHUB_EVENT_NAME" != workflow_dispatch &&
+                -n "$BASE" && ! "$BASE" =~ ^0+$ ]] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            changed="$(git diff --name-only "$BASE" "$GITHUB_SHA")"
+            printf 'Changed files:\n%s\n' "$changed"
+            if [[ -n "$changed" ]] &&
+               ! grep -qvE '(\.md$|^docs/|^plan/|^release-notes/|^LICENSE)' <<<"$changed"; then
+              firmware=false
+            fi
+          fi
+          echo "firmware=$firmware" | tee -a "$GITHUB_OUTPUT"
+
+  # The tagged commit already passed these on main, and they don't depend on the version.
   host-tests:
     name: Host tests
-    runs-on: nscloud-ubuntu-24.04-amd64-4x8
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -46,6 +82,8 @@ jobs:
 
   production:
     name: Production firmware (4 profiles)
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true'
     runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 45
     container: espressif/idf:v6.0.2
@@ -143,6 +181,8 @@ jobs:
 
   unity:
     name: Unity image (${{ matrix.target }})
+    needs: changes
+    if: github.ref_type != 'tag' && needs.changes.outputs.firmware == 'true'
     runs-on: nscloud-ubuntu-24.04-amd64-4x8
     timeout-minutes: 30
     container: espressif/idf:v6.0.2
@@ -196,7 +236,9 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-tests, production, unity]
+    # Tag images must be rebuilt so they report the tag as their version; the tests and
+    # Unity builds already passed on main for the same source.
+    needs: production
     # Publishing only needs the gh CLI, which GitHub-hosted runners always provide.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
