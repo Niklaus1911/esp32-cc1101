@@ -30,9 +30,11 @@ Commit a deterministic mock server (`tools/web-mock.mjs`, Node, no dependencies)
 
 Result: `tools/web-mock.mjs` with scenarios `healthy`, `empty`, `busy`, `degraded`, `list-failure`, `disconnected`, and `rebooting`; `host_tests/test_web_mock.mjs` requires the mock's JSON fields to match the firmware handlers exactly; `tools/web-screenshots.mjs` captures full-page screenshots with headless Chromium. Baselines for `healthy`, `empty`, `busy`, and `degraded` (dark, 1280/768/375) are in the ignored `.local/web-screenshots/baseline/`; all rendered without page errors or horizontal overflow.
 
-### 1. Tokens, base, and controls
+### 1. Tokens, base, and controls (done)
 
 Rewrite `:root`, typography, buttons, inputs, selects, toggles, badges, notices, and focus states. Remove duplicated rules while rewriting, so the stylesheet gets smaller as it changes.
+
+Result: a dark token set that meets WCAG AA (text at least 5.5:1, primary button label 7.5:1, field borders at least 3.9:1) with tokens for hover, tint, primary, and semantic ink colors, replacing the hard-coded colors outside the header. Buttons are flat (solid teal primary with dark label, raised secondary, tinted danger, ghost quiet); fields are filled with an accent focus border; labels and section titles are larger and use the main text color. `app.css` is 19,599 bytes, so phases 2 and 3 must remove more than they add. Follow-ups for phase 3: give section headings breathing room above their cards, and make per-row Replay buttons secondary so long lists aren't a column of solid teal.
 
 ### 2. App shell
 
