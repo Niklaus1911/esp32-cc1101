@@ -296,7 +296,8 @@ const errorsApi = sourceSection(liveApi, '"\\"errors\\":{',
 assertFields(radioApi, [
   "available", "running", "hardware", "hardware_switch_error", "hardware_switches", "rx",
   "transmitting", "maintenance", "accepted", "duplicates",
-  "queue_drops", "timeouts", "truncated", "frequency_hz", "tx_power_dbm", "cc1101", "error",
+  "queue_drops", "timeouts", "truncated", "captures", "capture_open_ms", "line_samples",
+  "line_high", "line_edges", "frequency_hz", "tx_power_dbm", "cc1101", "error",
   "part", "version", "marc_state", "rssi_dbm_x2", "carrier_sense", "clear_channel", "resets",
   "recoveries", "ready_timeouts", "state_timeouts",
 ], "live radio");

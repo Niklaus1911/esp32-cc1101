@@ -392,7 +392,9 @@ esp_err_t live_handler(httpd_req_t *request)
             "\"hardware_switch_error\":\"%s\",\"hardware_switches\":%lu,\"rx\":\"%s\","
             "\"transmitting\":%s,\"maintenance\":%s,\"accepted\":%lu,"
             "\"duplicates\":%lu,\"queue_drops\":%lu,\"timeouts\":%lu,"
-            "\"truncated\":%lu,\"frequency_hz\":%lu,\"tx_power_dbm\":%d,"
+            "\"truncated\":%lu,\"captures\":%lu,\"capture_open_ms\":%lu,"
+            "\"line_samples\":%lu,\"line_high\":%lu,\"line_edges\":%lu,"
+            "\"frequency_hz\":%lu,\"tx_power_dbm\":%d,"
             "\"cc1101\":{\"available\":%s,\"error\":\"%s\"",
             radio_error == ESP_OK ? "true" : "false",
             radio_error == ESP_OK && radio.running ? "true" : "false",
@@ -404,6 +406,11 @@ esp_err_t live_handler(httpd_req_t *request)
             static_cast<unsigned long>(radio.rx_queue_drops),
             static_cast<unsigned long>(radio.command_timeouts),
             static_cast<unsigned long>(radio.truncated_captures),
+            static_cast<unsigned long>(radio.completed_captures),
+            static_cast<unsigned long>(radio.capture_open_ms),
+            static_cast<unsigned long>(radio.line_samples),
+            static_cast<unsigned long>(radio.line_high_samples),
+            static_cast<unsigned long>(radio.line_transitions),
             static_cast<unsigned long>(CONFIG_CC1101_FREQUENCY_HZ),
             static_cast<int>(CONFIG_CC1101_TX_POWER_DBM),
             radio.cc1101_info_valid ? "true" : "false", esp_err_to_name(radio.cc1101_error));

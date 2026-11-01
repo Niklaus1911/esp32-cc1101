@@ -99,6 +99,7 @@ function live(state) {
       hardware_switch_error: bad ? "ESP_ERR_TIMEOUT" : "ESP_OK", hardware_switches: busy ? 3 : 0,
       rx: bad ? "faulted" : "active", transmitting: false, maintenance: false, accepted: state.accepted,
       duplicates: 12, queue_drops: bad ? 7 : 0, timeouts: bad ? 2 : 0, truncated: bad ? 4 : 0,
+      captures: 40, capture_open_ms: 120, line_samples: 50000, line_high: 900, line_edges: 260,
       frequency_hz: 433920000, tx_power_dbm: 10, cc1101,
     },
     learning: {

@@ -23,6 +23,11 @@ struct RfRadioStatus {
     uint32_t suppressed_duplicates;
     uint32_t rx_queue_drops;
     uint32_t truncated_captures;
+    uint32_t completed_captures;
+    uint32_t capture_open_ms;
+    uint32_t line_samples;
+    uint32_t line_high_samples;
+    uint32_t line_transitions;
     uint32_t command_timeouts;
     bool cc1101_info_valid;
     esp_err_t cc1101_error;

@@ -162,6 +162,13 @@ int64_t s_last_reported_us = 0;
 std::atomic<uint32_t> s_accepted_frames{0};
 std::atomic<uint32_t> s_suppressed_duplicates{0};
 std::atomic<uint32_t> s_truncated_captures{0};
+std::atomic<uint32_t> s_completed_captures{0};
+std::atomic<int64_t> s_receive_armed_us{0};
+// Sampled RX DATA line activity. A capture only completes after a kRmtStopDurationUs idle gap, so a
+// receiver that never idles (no squelch) leaves RX armed forever; these tell that apart from a dead line.
+std::atomic<uint32_t> s_line_samples{0};
+std::atomic<uint32_t> s_line_high_samples{0};
+std::atomic<uint32_t> s_line_transitions{0};
 std::atomic<bool> s_activity_led_warning_logged{false};
 
 class LifecycleGuard {
@@ -401,9 +408,33 @@ esp_err_t arm_receiver_owned()
                                         &s_receive_config);
     if (error == ESP_OK) {
         s_next_rx_buffer = (buffer_index + 1U) % std::size(s_rx_symbols);
+        s_receive_armed_us.store(static_cast<int64_t>(armed_us), std::memory_order_relaxed);
         s_receive_active = true;
     }
     return error;
+}
+
+void sample_rx_line_owned()
+{
+    constexpr uint32_t kSamples = 250;
+    constexpr uint32_t kSampleSpacingUs = 16;
+    const gpio_num_t gpio = static_cast<gpio_num_t>(active_rx_gpio());
+    if (!s_receive_active || gpio < 0) {
+        return;
+    }
+    int previous = gpio_get_level(gpio);
+    uint32_t high = previous != 0 ? 1U : 0U;
+    uint32_t transitions = 0;
+    for (uint32_t index = 1; index < kSamples; ++index) {
+        esp_rom_delay_us(kSampleSpacingUs);
+        const int level = gpio_get_level(gpio);
+        high += level != 0 ? 1U : 0U;
+        transitions += level != previous ? 1U : 0U;
+        previous = level;
+    }
+    s_line_samples.fetch_add(kSamples, std::memory_order_relaxed);
+    s_line_high_samples.fetch_add(high, std::memory_order_relaxed);
+    s_line_transitions.fetch_add(transitions, std::memory_order_relaxed);
 }
 
 esp_err_t stop_rmt_receive_owned()
@@ -637,6 +668,7 @@ void process_receive_item(const RxQueueItem &item)
         return;
     }
     s_receive_active = false;
+    ++s_completed_captures;
     const std::size_t symbol_count = std::min<std::size_t>(item.event.num_symbols, kRxSymbolCapacity);
     std::memcpy(s_symbol_snapshot, item.event.received_symbols, symbol_count * sizeof(rmt_symbol_word_t));
     esp_err_t arm_error = arm_receiver_owned();
@@ -712,6 +744,14 @@ void fill_software_status(RfRadioStatus *status)
     status->suppressed_duplicates = s_suppressed_duplicates.load(std::memory_order_relaxed);
     status->rx_queue_drops = s_rx_queue_drops.load(std::memory_order_relaxed);
     status->truncated_captures = s_truncated_captures.load(std::memory_order_relaxed);
+    status->completed_captures = s_completed_captures.load(std::memory_order_relaxed);
+    if (status->receive_active) {
+        const int64_t open_us = esp_timer_get_time() - s_receive_armed_us.load(std::memory_order_relaxed);
+        status->capture_open_ms = static_cast<uint32_t>(std::clamp<int64_t>(open_us / 1000, 0, UINT32_MAX));
+    }
+    status->line_samples = s_line_samples.load(std::memory_order_relaxed);
+    status->line_high_samples = s_line_high_samples.load(std::memory_order_relaxed);
+    status->line_transitions = s_line_transitions.load(std::memory_order_relaxed);
     status->command_timeouts = s_command_timeouts.load(std::memory_order_relaxed);
 }
 
@@ -855,6 +895,9 @@ void radio_task(void *)
             }
         }
         recover_dropped_receive_owned();
+        if (ready == nullptr) {
+            sample_rx_line_owned();
+        }
         if (ready == nullptr && !s_receive_active &&
             !s_maintenance_requested.load(std::memory_order_relaxed)) {
             const esp_err_t recovery_error = restore_receive_owned();
@@ -1227,6 +1270,10 @@ esp_err_t start_rf_ook_owned(RfFrameCallback callback, void *context)
     s_accepted_frames = 0;
     s_suppressed_duplicates = 0;
     s_truncated_captures = 0;
+    s_completed_captures = 0;
+    s_line_samples = 0;
+    s_line_high_samples = 0;
+    s_line_transitions = 0;
     s_next_rx_buffer = 0;
     s_rx_generation.store(0, std::memory_order_relaxed);
     s_rx_queue_drops.store(0, std::memory_order_relaxed);
