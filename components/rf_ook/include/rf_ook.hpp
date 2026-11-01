@@ -6,29 +6,10 @@
 #include "cc1101.hpp"
 #include "esp_err.h"
 #include "rf_codec.hpp"
+#include "rf_frame_decode.hpp"
 #include "rf_storage_format.hpp"
 
 namespace rfbridge {
-
-enum class RfEncoding : uint8_t {
-    kDecoded,
-    kRaw,
-};
-
-enum class RfFrameConfidence : uint8_t {
-    kRepeatedEvidence,
-    kSingleDecoded,
-};
-
-struct RfFrame {
-    RfEncoding encoding;
-    RfFrameConfidence confidence = RfFrameConfidence::kRepeatedEvidence;
-    uint32_t fingerprint;
-    uint16_t observed_repeats;
-    int64_t captured_us;
-    DecodedSignal decoded;
-    RawSignal raw;
-};
 
 struct RfRadioStatus {
     RfHardware hardware = RfHardware::kCc1101;
@@ -84,10 +65,5 @@ esp_err_t reset_rf_radio();
 esp_err_t begin_rf_maintenance();
 esp_err_t end_rf_maintenance();
 bool rf_maintenance_is_active();
-
-bool decode_rf_pulses(const uint8_t *levels, const uint16_t *durations_us, std::size_t count, RfFrame *frame,
-                      bool capture_may_be_truncated = false, bool capture_started_after_idle = false);
-bool rf_frames_equivalent(const RfFrame &left, const RfFrame &right);
-uint32_t rf_frame_fingerprint(const RfFrame &frame);
 
 }  // namespace rfbridge

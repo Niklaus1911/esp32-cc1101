@@ -118,7 +118,7 @@ assertOrder(startup, [
   "initialize_rmt()",
 ], "shared GPIO release before CC1101 and RMT initialization");
 const cleanup = sourceSection(
-  radio, "esp_err_t cleanup_resources()", "bool capture_input_is_valid(", "RF cleanup");
+  radio, "esp_err_t cleanup_resources()", "bool command_is_blocked_by_maintenance(", "RF cleanup");
 assert(cleanup.includes("const bool generic_tx_shared = gpio_is_cc1101_pin") &&
        cleanup.includes("if (using_generic_hardware() || !generic_tx_shared) {") &&
        radio.includes("gpio_set_pull_mode") && radio.includes("GPIO_PULLDOWN_ONLY"),

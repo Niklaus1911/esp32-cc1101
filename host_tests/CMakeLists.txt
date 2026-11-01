@@ -68,6 +68,28 @@ target_compile_features(mqtt_host_tests PRIVATE cxx_std_17)
 target_compile_options(mqtt_host_tests PRIVATE -Wall -Wextra -Werror)
 
 add_test(NAME mqtt_host_tests COMMAND mqtt_host_tests)
+
+# The real rf_ook Unity test file, run through a host Unity shim against the ESP-IDF-free decoder.
+add_executable(rf_ook_host_tests
+    unity_shim/unity_main.cpp
+    ../components/rf_ook/test/test_rf_ook.cpp
+    ../components/rf_ook/rf_frame_decode.cpp
+    ../components/rf_ook/rf_activity_led_policy.cpp
+    ../components/rf_codec/rf_codec.cpp
+    ../components/platform_board/platform_board_policy.cpp
+)
+target_include_directories(rf_ook_host_tests PRIVATE
+    unity_shim
+    ../components/rf_ook/include
+    ../components/rf_ook/private_include
+    ../components/rf_codec/include
+    ../components/platform_board/include
+)
+target_compile_definitions(rf_ook_host_tests PRIVATE RFBRIDGE_HOST_TESTS)
+target_compile_features(rf_ook_host_tests PRIVATE cxx_std_17)
+target_compile_options(rf_ook_host_tests PRIVATE -Wall -Wextra -Werror)
+
+add_test(NAME rf_ook_host_tests COMMAND rf_ook_host_tests)
 add_test(NAME push_ota_script_tests
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_push_ota.sh"
             "${CMAKE_CURRENT_SOURCE_DIR}/..")

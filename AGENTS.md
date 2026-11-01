@@ -15,7 +15,7 @@
 - `components/rf_signals/`: learned-signal matching, learning state, replay ownership, and snapshots.
 - `components/platform_nvs/`: shared NVS initialization and availability state.
 - `components/web_ui/`: responsive assets, typed HTTP API, polling, request validation, and shared HTTP server ownership.
-- `host_tests/`: portable C++17 codec/parser/storage/automation tests.
+- `host_tests/`: portable C++17 codec/decoder/parser/storage/automation tests; `rf_ook_host_tests` runs the `rf_ook` Unity tests through `host_tests/unity_shim`.
 - `test_apps/unit/`: dedicated ESP-IDF Unity image. Building it does not run its on-device tests.
 - `README.md`: authoritative hardware, command, RF, and safety documentation.
 

@@ -899,6 +899,8 @@ TEST_CASE("raw PWM ordering cannot collapse into equal symbols", "[rf_ook][match
     TEST_ASSERT_FALSE(rfbridge::raw_signals_match(ordered, equal));
 }
 
+// Needs the radio service; the host build runs only the pure decoder and policy tests.
+#ifndef RFBRIDGE_HOST_TESTS
 TEST_CASE("software RF status remains available while service is stopped", "[rf_ook][status]")
 {
     rfbridge::RfRadioStatus status{};
@@ -908,3 +910,4 @@ TEST_CASE("software RF status remains available while service is stopped", "[rf_
     TEST_ASSERT_FALSE(status.cc1101_info_valid);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, status.cc1101_error);
 }
+#endif
